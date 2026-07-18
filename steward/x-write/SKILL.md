@@ -144,10 +144,13 @@ readiness status, and context path.
 
 ### 5. Record language approval
 
-After Nick approves exact final post or reply language, save it to
-`project-ideas/x-presence-agent-assisted/approved-posts.json` with its weighted
-count, run ID, target number, approval timestamp, status, and public-action
-approval status.
+After Nick approves exact final post or reply language, save the exact text only
+in `x-posts/<post-id>/post.txt`. Record its ID, status, run creation time,
+approval time, and exact-approval session and transcript path in
+`x-posts/approved-posts.json`.
+Reuse the same post ID for approved revisions until publication.
+For an original post, set `raw_input_reply_status` to `pending` unless Nick
+explicitly skips the companion.
 
 Compare only the first proposed text, final approved text, and Nick's language
 feedback. Exclude planner targets, target edits, strategy, content plans, and
@@ -186,16 +189,15 @@ employer or confidential information, private third-party messages,
 copyrighted source text, and unverified claims that should not become public.
 
 Show Nick the exact companion and its `./steward x count --long` result. If it
-exceeds the longer-reply limit, stop; do not truncate or split it. Until exact
-language approval, store `raw_input_reply.status` as `pending_review` without
-`approved_text`. After approval, store `status`, `approved_text`, `redacted`,
-`approved_at`, `text_count`, and `public_action_approved`.
+exceeds the longer-reply limit, stop; do not truncate or split it. Do not create
+`raw-input-reply.txt` until exact language approval. After approval, save the
+exact companion only in the post package's `raw-input-reply.txt` and set
+`raw_input_reply_status` to `approved`. Set it to `posted` after publication;
+use `skipped` only for an explicit exception.
 
 ## Guardrails
 
 - Do not bypass `./steward x write` with an in-skill drafting loop.
-- Do not use normal `al dispatch` for planner, writer, reviewer, or readiness
-  calls.
 - Do not use browser automation or scraping for X.
 - Do not add hashtags or emoji unless Nick asks.
 
@@ -205,8 +207,8 @@ language approval, store `raw_input_reply.status` as `pending_review` without
   and exactly one pending post per agreed target.
 - Nick has seen each exact draft, count, and readiness result; exact approved
   language is stored durably, or the item remains explicitly pending.
-- Each approved original post has an explicit `raw_input_reply` status; any
-  approved companion text has a separate approval record.
+- Each approved original post has an approved companion file or is explicitly
+  reported as pending or not planned.
 
 ## Final handoff
 
