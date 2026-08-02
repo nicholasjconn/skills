@@ -1,0 +1,128 @@
+:root {
+  --instruction-page: #dbe4ef;
+  --instruction-canvas: #f8fafc;
+  --instruction-ink: #0f172a;
+  --instruction-blue: #2563eb;
+  --instruction-code: #172033;
+  --instruction-code-ink: #f8fafc;
+  --instruction-code-muted: #94a3b8;
+}
+
+.asset-canvas,
+.asset-canvas * {
+  box-sizing: border-box;
+}
+
+.asset-canvas {
+  width: 1200px;
+  height: 1500px;
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 88% 12%, rgba(37, 99, 235, .10), transparent 31%),
+    var(--instruction-canvas);
+  color: var(--instruction-ink);
+}
+
+.frame {
+  position: absolute;
+  inset: 70px;
+  display: grid;
+  grid-template-rows: 117px 1fr 105px;
+  overflow: hidden;
+  border: 2px solid #94a3b8;
+  border-radius: 22px;
+  background: var(--instruction-code);
+  box-shadow: 0 28px 70px rgba(15, 23, 42, .20);
+}
+
+.editor-topbar {
+  display: flex;
+  align-items: end;
+  gap: 42px;
+  padding: 0 42px;
+  border-bottom: 1px solid #334155;
+  background: #111827;
+}
+
+.traffic-lights {
+  display: flex;
+  gap: 15px;
+  align-self: center;
+}
+
+.traffic-lights span {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #475569;
+}
+
+.traffic-lights span:first-child { background: #fb7185; }
+.traffic-lights span:nth-child(2) { background: #fbbf24; }
+.traffic-lights span:last-child { background: #4ade80; }
+
+.tab {
+  min-width: 345px;
+  padding: 26px 36px 24px;
+  border-top: 3px solid var(--instruction-blue);
+  background: var(--instruction-code);
+  color: var(--instruction-code-ink);
+  font: 700 38px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.editor-body { min-height: 0; }
+
+.editor-body pre {
+  min-width: 0;
+  margin: 0;
+  padding: 42px 48px 0;
+  overflow: hidden;
+  color: var(--instruction-code-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 400 40px/1.25 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-ligatures: none;
+  letter-spacing: -.2px;
+}
+
+.md-marker { color: #93c5fd; }
+.md-strong { color: #fbbf24; font-weight: 800; }
+.md-placeholder { color: #86efac; }
+
+.editor-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 0 28px;
+  border-top: 4px solid #2563eb;
+  background: #0b1120;
+  color: var(--instruction-code-muted);
+  font: 700 36px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.source-pill { color: #93c5fd; }
+.status-label { color: #94a3b8; }
+
+.instruction-preview {
+  width: 412px;
+  height: 515px;
+  overflow: hidden;
+}
+
+.instruction-preview > .asset-canvas {
+  transform: scale(.3433333333);
+  transform-origin: top left;
+}
+
+@media (max-width: 620px) {
+  .instruction-preview {
+    width: 336px;
+    height: 420px;
+  }
+
+  .instruction-preview > .asset-canvas {
+    transform: scale(.28);
+  }
+}
