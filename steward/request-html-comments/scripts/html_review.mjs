@@ -26,6 +26,9 @@ import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+const REVIEW_SAFETY_TIMEOUT_MS = 60 * 60 * 1000
+const TAB_CLOSE_GRACE_MS = 60 * 1000
+const FORCE_CLOSE_GRACE_MS = 250
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.gif', 'image/gif'],
@@ -200,7 +203,7 @@ function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   return proxied
 }
 
-function proxyRequest(request, response, requested, source, initialPath, inject, log) {
+function proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources) {
   const upstreamPath = requested.pathname === initialPath
     ? `${source.url.pathname}${source.url.search}`
     : `${requested.pathname}${requested.search}`
@@ -234,6 +237,8 @@ function proxyRequest(request, response, requested, source, initialPath, inject,
       response.end(body)
     })
   })
+  activeResources.add(upstream)
+  upstream.once('close', () => activeResources.delete(upstream))
   upstream.on('error', error => {
     log('error', 'Could not reach served-page source', { source: source.url.href, error: error.message })
     if (!response.headersSent) sendText(response, 502, `Could not reach local page: ${error.message}`)
@@ -244,7 +249,7 @@ function proxyRequest(request, response, requested, source, initialPath, inject,
 
 // Development servers use WebSockets for hot reload. Forward upgrades without
 // interpreting frames so Next.js and similar local applications keep working.
-function proxyUpgrade(request, socket, head, source, log) {
+function proxyUpgrade(request, socket, head, source, log, activeResources) {
   const upstream = netConnect(Number(source.url.port || 80), upstreamHostname(source.url.hostname), () => {
     const headers = proxyHeaders(request.headers, source)
     const lines = Object.entries(headers).flatMap(([name, value]) => Array.isArray(value)
@@ -254,6 +259,10 @@ function proxyUpgrade(request, socket, head, source, log) {
     if (head.length) upstream.write(head)
     socket.pipe(upstream).pipe(socket)
   })
+  activeResources.add(socket)
+  activeResources.add(upstream)
+  socket.once('close', () => activeResources.delete(socket))
+  upstream.once('close', () => activeResources.delete(upstream))
   upstream.on('error', error => {
     log('error', 'WebSocket proxy failed', { path: request.url, error: error.message })
     socket.destroy()
@@ -270,6 +279,8 @@ export async function createReviewServer({
   initialComments,
   overlayScript,
   log,
+  safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
+  tabCloseGraceMs = TAB_CLOSE_GRACE_MS,
 }) {
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
@@ -278,8 +289,65 @@ export async function createReviewServer({
   let lastDraftRevision = -1
   let settled = false
   let settle
+  let safetyTimer = null
+  let tabCloseTimer = null
+  let closing = null
   const completion = new Promise(resolveCompletion => { settle = resolveCompletion })
   const sourceRecord = sourceIdentity(source)
+  const serverConnections = new Set()
+  const activeResources = new Set()
+
+  const finish = (action, comments = []) => {
+    if (settled) return
+    settled = true
+    settle({ action, comments })
+  }
+
+  const cancelTabClose = () => {
+    if (!tabCloseTimer) return
+    clearTimeout(tabCloseTimer)
+    tabCloseTimer = null
+    log('info', 'Review tab reconnected before shutdown')
+  }
+
+  const scheduleTabClose = () => {
+    if (tabCloseTimer || settled) return
+    tabCloseTimer = setTimeout(() => {
+      tabCloseTimer = null
+      if (settled) return
+      log('info', 'Review tab remained closed; stopping worker')
+      finish('abandon')
+    }, tabCloseGraceMs)
+    tabCloseTimer.unref()
+    log('info', 'Review tab closed; waiting briefly for reconnection', { grace_ms: tabCloseGraceMs })
+  }
+
+  const saveDraft = payload => {
+    if (typeof payload.client_id !== 'string' || !payload.client_id) throw new Error('client_id must be a nonempty string')
+    if (!Number.isInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative integer')
+    if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
+    if (draftClient && payload.client_id !== draftClient) {
+      const error = new Error('another browser tab owns this review draft')
+      error.statusCode = 409
+      throw error
+    }
+    if (payload.revision <= lastDraftRevision) {
+      const error = new Error('draft revision is stale')
+      error.statusCode = 409
+      throw error
+    }
+    if (!draftOutput) return
+    draftClient = payload.client_id
+    writeJsonAtomic(draftOutput, {
+      version: 2,
+      source: sourceRecord,
+      saved_at: new Date().toISOString(),
+      revision: payload.revision,
+      comments: payload.comments,
+    })
+    lastDraftRevision = payload.revision
+    log('info', 'Saved recoverable draft', { revision: payload.revision, comments: payload.comments.length })
+  }
 
   const server = createServer(async (request, response) => {
     if (!requestHostIsLoopback(request)) {
@@ -288,53 +356,37 @@ export async function createReviewServer({
     }
     const requested = new URL(request.url, 'http://review.local')
     const action = requested.pathname.slice(endpoint.length + 1)
-    if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'submit', 'cancel'].includes(action)) {
+    if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'heartbeat', 'abandon', 'submit', 'cancel'].includes(action)) {
+      let payload = {}
       try {
         const content = await readRequestBody(request)
-        const payload = content ? JSON.parse(content) : {}
-        if (action === 'draft') {
-          if (typeof payload.client_id !== 'string' || !payload.client_id) throw new Error('client_id must be a nonempty string')
-          if (!Number.isInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative integer')
-          if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
-          if (draftClient && payload.client_id !== draftClient) {
-            log('error', 'Rejected conflicting draft writer', { client_id: payload.client_id, revision: payload.revision })
-            sendText(response, 409, 'another browser tab owns this review draft')
-            return
-          }
-          if (payload.revision <= lastDraftRevision) {
-            log('error', 'Rejected stale draft revision', { client_id: payload.client_id, revision: payload.revision, current_revision: lastDraftRevision })
-            sendText(response, 409, 'draft revision is stale')
-            return
-          }
-          if (draftOutput) {
-            draftClient = payload.client_id
-            writeJsonAtomic(draftOutput, {
-              version: 2,
-              source: sourceRecord,
-              saved_at: new Date().toISOString(),
-              revision: payload.revision,
-              comments: payload.comments,
-            })
-            lastDraftRevision = payload.revision
-            log('info', 'Saved recoverable draft', { revision: payload.revision, comments: payload.comments.length })
-          }
+        payload = content ? JSON.parse(content) : {}
+        if (action === 'draft' || action === 'abandon') {
+          saveDraft(payload)
+          if (action === 'abandon') scheduleTabClose()
+        } else if (action === 'heartbeat') {
+          cancelTabClose()
         } else if (action === 'submit') {
           if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
-          if (!settled) {
-            settled = true
-            settle({ action, comments: payload.comments })
-            log('info', 'Review submitted', { comments: payload.comments.length })
-          }
+          finish(action, payload.comments)
+          log('info', 'Review submitted', { comments: payload.comments.length })
         } else if (!settled) {
-          settled = true
-          settle({ action, comments: [] })
+          finish(action)
           log('info', 'Review cancelled')
         }
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end('{"ok":true}')
       } catch (error) {
-        log('error', 'Rejected review request', { action, error: error.message })
-        sendText(response, 400, error.message)
+        if (error.statusCode === 409) {
+          log('error', error.message === 'draft revision is stale' ? 'Rejected stale draft revision' : 'Rejected conflicting draft writer', {
+            client_id: payload?.client_id,
+            revision: payload?.revision,
+            current_revision: lastDraftRevision,
+          })
+        } else {
+          log('error', 'Rejected review request', { action, error: error.message })
+        }
+        sendText(response, error.statusCode || 400, error.message)
       }
       return
     }
@@ -361,10 +413,14 @@ export async function createReviewServer({
       serveStaticAsset(request, response, dirname(source.path), log)
       return
     }
-    proxyRequest(request, response, requested, source, initialPath, inject, log)
+    proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources)
   })
 
-  if (source.type === 'url') server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, source, log))
+  server.on('connection', socket => {
+    serverConnections.add(socket)
+    socket.once('close', () => serverConnections.delete(socket))
+  })
+  if (source.type === 'url') server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, source, log, activeResources))
   server.on('clientError', (error, socket) => {
     log('error', 'Review server rejected a client connection', { error: error.message })
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
@@ -376,13 +432,32 @@ export async function createReviewServer({
   const address = server.address()
   const reviewUrl = `http://127.0.0.1:${address.port}${initialPath}`
   log('info', 'Review server ready', { review_url: reviewUrl })
+  safetyTimer = setTimeout(() => {
+    if (settled) return
+    log('info', 'Review reached the safety timeout; stopping worker', { timeout_ms: safetyTimeoutMs })
+    finish('timeout')
+  }, safetyTimeoutMs)
+  safetyTimer.unref()
 
   return {
     reviewUrl,
     completion,
     async close() {
-      await new Promise(resolveClose => server.close(resolveClose))
-      log('info', 'Review server stopped')
+      if (closing) return closing
+      closing = (async () => {
+        if (safetyTimer) clearTimeout(safetyTimer)
+        if (tabCloseTimer) clearTimeout(tabCloseTimer)
+        const closed = new Promise(resolveClose => server.close(() => resolveClose()))
+        for (const resource of activeResources) resource.destroy()
+        const forceCloseTimer = setTimeout(() => {
+          for (const socket of serverConnections) socket.destroy()
+        }, FORCE_CLOSE_GRACE_MS)
+        forceCloseTimer.unref()
+        await closed
+        clearTimeout(forceCloseTimer)
+        log('info', 'Review server stopped')
+      })()
+      return closing
     },
   }
 }

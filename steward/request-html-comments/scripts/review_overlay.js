@@ -633,18 +633,30 @@
       const response = await fetch(`${endpoint}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
       if (!response.ok) throw new Error(await response.text());
       finished = true;
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
       document.documentElement.innerHTML = `<head><title>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</title></head><body style="font:16px/1.5 system-ui;padding:3rem"><h1>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</h1><p>You can close this tab.</p></body>`;
     } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
   };
+  const heartbeat = () => fetch(`${endpoint}/heartbeat`, { method: 'POST', body: '{}' }).catch(() => {});
+  let heartbeatTimer = null;
+  const startHeartbeat = () => {
+    if (finished || heartbeatTimer) return;
+    heartbeat();
+    heartbeatTimer = setInterval(heartbeat, 15000);
+  };
+  startHeartbeat();
   window.addEventListener('pagehide', () => {
     if (finished) return;
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
-    if (!draftDirty) return;
     const recoverable = recoverableComments();
     const body = JSON.stringify({ client_id: draftClientId, revision: ++draftRevision, comments: recoverable });
-    if (navigator.sendBeacon) navigator.sendBeacon(`${endpoint}/draft`, new Blob([body], {type: 'application/json'}));
-    else fetch(`${endpoint}/draft`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true });
+    const queued = navigator.sendBeacon && navigator.sendBeacon(`${endpoint}/abandon`, new Blob([body], {type: 'application/json'}));
+    if (!queued) fetch(`${endpoint}/abandon`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true });
   });
+  window.addEventListener('pageshow', startHeartbeat);
   root.querySelector('.sr-send').addEventListener('click', () => finish('submit'));
   root.querySelector('.sr-cancel').addEventListener('click', () => finish('cancel'));
 })();

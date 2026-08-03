@@ -50,6 +50,16 @@ function websocketHandshake(port, path, origin) {
   })
 }
 
+function openWebsocket(port, path, origin) {
+  return new Promise((resolveSocket, rejectSocket) => {
+    const socket = connect(port, '127.0.0.1', () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
+    })
+    socket.once('data', () => resolveSocket(socket))
+    socket.once('error', rejectSocket)
+  })
+}
+
 test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -214,6 +224,63 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   assert.ok(events.some(event => event.message === 'Review submitted'))
 })
 
+test('tab closure preserves the draft, allows a brief reconnect, then completes as abandoned', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const draft = join(directory, 'feedback.draft.json')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: draft,
+    initialComments: [],
+    overlayScript: OVERLAY_SCRIPT,
+    log: () => {},
+    safetyTimeoutMs: 1_000,
+    tabCloseGraceMs: 25,
+  })
+  t.after(() => review.close())
+  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
+  const comments = [{ id: 'one', comment: 'Recover this' }]
+
+  const firstClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
+    method: 'POST',
+    body: JSON.stringify({ client_id: 'review-tab', revision: 1, comments }),
+  })
+  assert.equal(firstClose.status, 200)
+  const heartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), { method: 'POST', body: '{}' })
+  assert.equal(heartbeat.status, 200)
+  const remainedOpen = await Promise.race([
+    review.completion.then(() => false),
+    new Promise(resolveWait => setTimeout(() => resolveWait(true), 40)),
+  ])
+  assert.equal(remainedOpen, true)
+
+  const secondClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
+    method: 'POST',
+    body: JSON.stringify({ client_id: 'review-tab', revision: 2, comments }),
+  })
+  assert.equal(secondClose.status, 200)
+  assert.deepEqual(await review.completion, { action: 'abandon', comments: [] })
+  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, comments)
+})
+
+test('the safety timeout completes an otherwise abandoned review', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: null,
+    initialComments: [],
+    overlayScript: OVERLAY_SCRIPT,
+    log: () => {},
+    safetyTimeoutMs: 20,
+  })
+  t.after(() => review.close())
+
+  assert.deepEqual(await review.completion, { action: 'timeout', comments: [] })
+})
+
 test('served-page review proxies HTML and assets while removing blocking CSP', async t => {
   let pageOrigin
   let websocketOrigin
@@ -271,6 +338,38 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), { method: 'POST', body: '{}' })
   assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
   assert.ok(events.some(event => event.message === 'Review server ready'))
+})
+
+test('server shutdown destroys upgraded sockets instead of waiting indefinitely', async t => {
+  const upstreamSockets = new Set()
+  const upstream = createServer((_request, response) => response.end('<html></html>'))
+  upstream.on('upgrade', (_request, socket) => {
+    upstreamSockets.add(socket)
+    socket.once('close', () => upstreamSockets.delete(socket))
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+  })
+  const upstreamPort = await listen(upstream)
+  t.after(() => {
+    for (const socket of upstreamSockets) socket.destroy()
+    return new Promise(resolveClose => upstream.close(resolveClose))
+  })
+  const review = await createReviewServer({
+    source: parseSource(`http://127.0.0.1:${upstreamPort}/app`),
+    draftOutput: null,
+    initialComments: [],
+    overlayScript: OVERLAY_SCRIPT,
+    log: () => {},
+  })
+  t.after(() => review.close())
+  const reviewUrl = new URL(review.reviewUrl)
+  const socket = await openWebsocket(Number(reviewUrl.port), '/socket', 'http://127.0.0.1:65500')
+  t.after(() => socket.destroy())
+
+  const shutdown = await Promise.race([
+    review.close().then(() => 'closed'),
+    new Promise(resolveWait => setTimeout(() => resolveWait('timed out'), 100)),
+  ])
+  assert.equal(shutdown, 'closed')
 })
 
 test('an unavailable served page returns a visible error and writes a diagnostic event', async t => {
