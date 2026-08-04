@@ -20,7 +20,7 @@ import {
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
-import { dirname, extname, resolve, sep } from 'node:path'
+import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -84,6 +84,14 @@ export function normalizeRestoredSource(payload) {
   return null
 }
 
+function validCommentList(comments) {
+  return Array.isArray(comments) && comments.every(comment => (
+    comment && typeof comment === 'object' && !Array.isArray(comment)
+    && typeof comment.id === 'string' && comment.id
+    && typeof comment.comment === 'string'
+  ))
+}
+
 export function loadRestoredComments(path, source) {
   if (!path) return []
   let payload
@@ -97,25 +105,27 @@ export function loadRestoredComments(path, source) {
   if (!restoredSource || restoredSource.type !== expectedSource.type || restoredSource.value !== expectedSource.value) {
     throw new Error('restored review comments belong to a different source')
   }
-  if (!Array.isArray(payload.comments) || payload.comments.some(item => !item || typeof item !== 'object' || Array.isArray(item))) {
+  if (!validCommentList(payload.comments)) {
     throw new Error('restored review artifact must contain a comments list')
   }
   return payload.comments
 }
 
-export function injectHtml(html, endpoint, comments, overlayScript, addBase = false) {
+export function injectHtml(html, endpoint, comments, overlayScript) {
   const serializedComments = JSON.stringify(comments).replaceAll('<', '\\u003c')
+  // Replacement callbacks keep `$&` and friends inside comment text literal
+  // rather than letting them expand as replacement patterns.
   const script = overlayScript
-    .replaceAll('__ENDPOINT__', JSON.stringify(endpoint))
-    .replace('__INITIAL_COMMENTS__', serializedComments)
+    .replaceAll('__ENDPOINT__', () => JSON.stringify(endpoint))
+    .replace('__INITIAL_COMMENTS__', () => serializedComments)
   const overlay = `<script>${script}</script>`
   let rendered = html
   const needsFavicon = !/<link\b[^>]*\brel\s*=\s*["'][^"']*\bicon\b[^"']*["']/i.test(rendered)
-  const headAdditions = `${addBase ? '<base href="/">' : ''}${needsFavicon ? '<link rel="icon" href="data:,">' : ''}`
-  if (headAdditions) {
+  if (needsFavicon) {
     const match = /<head(?:\s[^>]*)?>/i.exec(rendered)
-    if (match) rendered = `${rendered.slice(0, match.index + match[0].length)}${headAdditions}${rendered.slice(match.index + match[0].length)}`
-    else rendered = `${headAdditions}${rendered}`
+    const favicon = '<link rel="icon" href="data:,">'
+    if (match) rendered = `${rendered.slice(0, match.index + match[0].length)}${favicon}${rendered.slice(match.index + match[0].length)}`
+    else rendered = `${favicon}${rendered}`
   }
   const bodyEnd = rendered.toLowerCase().lastIndexOf('</body>')
   return bodyEnd < 0 ? `${rendered}${overlay}` : `${rendered.slice(0, bodyEnd)}${overlay}${rendered.slice(bodyEnd)}`
@@ -203,10 +213,8 @@ function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   return proxied
 }
 
-function proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources) {
-  const upstreamPath = requested.pathname === initialPath
-    ? `${source.url.pathname}${source.url.search}`
-    : `${requested.pathname}${requested.search}`
+function proxyRequest(request, response, requested, source, inject, log, activeResources) {
+  const upstreamPath = `${requested.pathname}${requested.search}`
   const upstream = httpRequest({
     hostname: upstreamHostname(source.url.hostname),
     port: source.url.port || 80,
@@ -282,10 +290,15 @@ export async function createReviewServer({
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
   tabCloseGraceMs = TAB_CLOSE_GRACE_MS,
 }) {
+  if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
-  const initialPath = `${endpoint}/review`
+  // Present the document at its original pathname so the browser resolves
+  // relative assets, links, forms, and explicit <base> elements normally.
+  const reviewPath = source.type === 'file' ? `/${encodeURIComponent(basename(source.path))}` : source.url.pathname
+  const reviewSearch = source.type === 'url' ? source.url.search : ''
   let draftClient = null
+  let draftComments = initialComments
   let lastDraftRevision = -1
   let settled = false
   let settle
@@ -322,31 +335,44 @@ export async function createReviewServer({
     log('info', 'Review tab closed; waiting briefly for reconnection', { grace_ms: tabCloseGraceMs })
   }
 
-  const saveDraft = payload => {
+  const claimDraftClient = payload => {
     if (typeof payload.client_id !== 'string' || !payload.client_id) throw new Error('client_id must be a nonempty string')
-    if (!Number.isInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative integer')
-    if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
     if (draftClient && payload.client_id !== draftClient) {
       const error = new Error('another browser tab owns this review draft')
       error.statusCode = 409
       throw error
     }
+    draftClient = payload.client_id
+  }
+
+  // A reloading tab keeps its client ID and revision counter in session
+  // storage, so it stays the draft owner. A second tab starts fresh and is
+  // rejected instead of overwriting the first tab's work.
+  const saveDraft = payload => {
+    if (!Number.isSafeInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative safe integer')
+    if (payload.revision >= Number.MAX_SAFE_INTEGER) throw new Error('revision cannot be incremented safely')
+    if (!validCommentList(payload.comments)) throw new Error('comments must be a list of valid comment records')
+    claimDraftClient(payload)
     if (payload.revision <= lastDraftRevision) {
       const error = new Error('draft revision is stale')
       error.statusCode = 409
       throw error
     }
-    if (!draftOutput) return
+    if (draftOutput) {
+      writeJsonAtomic(draftOutput, {
+        version: 2,
+        source: sourceRecord,
+        saved_at: new Date().toISOString(),
+        revision: payload.revision,
+        comments: payload.comments,
+      })
+      log('info', 'Saved recoverable draft', { revision: payload.revision, comments: payload.comments.length })
+    }
     draftClient = payload.client_id
-    writeJsonAtomic(draftOutput, {
-      version: 2,
-      source: sourceRecord,
-      saved_at: new Date().toISOString(),
-      revision: payload.revision,
-      comments: payload.comments,
-    })
     lastDraftRevision = payload.revision
-    log('info', 'Saved recoverable draft', { revision: payload.revision, comments: payload.comments.length })
+    // Reserving the live draft for the next page load restores a reloading
+    // tab's work without the browser having to persist comments itself.
+    draftComments = payload.comments
   }
 
   const server = createServer(async (request, response) => {
@@ -365,12 +391,15 @@ export async function createReviewServer({
           saveDraft(payload)
           if (action === 'abandon') scheduleTabClose()
         } else if (action === 'heartbeat') {
+          claimDraftClient(payload)
           cancelTabClose()
         } else if (action === 'submit') {
-          if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
+          claimDraftClient(payload)
+          if (!validCommentList(payload.comments)) throw new Error('comments must be a list of valid comment records')
           finish(action, payload.comments)
           log('info', 'Review submitted', { comments: payload.comments.length })
         } else if (!settled) {
+          claimDraftClient(payload)
           finish(action)
           log('info', 'Review cancelled')
         }
@@ -391,9 +420,9 @@ export async function createReviewServer({
       return
     }
 
-    const inject = html => injectHtml(html, endpoint, initialComments, overlayScript, source.type === 'file')
+    const inject = html => injectHtml(html, endpoint, draftComments, overlayScript)
     if (source.type === 'file') {
-      if (request.method === 'GET' && requested.pathname === initialPath) {
+      if (request.method === 'GET' && requested.pathname === reviewPath) {
         try {
           // Latin-1 provides a one-byte round trip, preserving the source
           // file's bytes while appending the ASCII overlay script.
@@ -413,7 +442,7 @@ export async function createReviewServer({
       serveStaticAsset(request, response, dirname(source.path), log)
       return
     }
-    proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources)
+    proxyRequest(request, response, requested, source, inject, log, activeResources)
   })
 
   server.on('connection', socket => {
@@ -430,7 +459,7 @@ export async function createReviewServer({
     server.listen(0, '127.0.0.1', resolveListen)
   })
   const address = server.address()
-  const reviewUrl = `http://127.0.0.1:${address.port}${initialPath}`
+  const reviewUrl = `http://127.0.0.1:${address.port}${reviewPath}${reviewSearch}`
   log('info', 'Review server ready', { review_url: reviewUrl })
   safetyTimer = setTimeout(() => {
     if (settled) return
