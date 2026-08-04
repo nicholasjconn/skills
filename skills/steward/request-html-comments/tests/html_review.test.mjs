@@ -8,15 +8,11 @@ import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
-  DRAFT_IDENTIFIER_MAX_LENGTH,
-  EARLY_HANDOFF_CANDIDATE_LIMIT,
-  createDraftSession,
   createReviewServer,
   injectHtml,
   loadRestoredComments,
   parseSource,
   sourceIdentity,
-  draftPath,
   logPath,
 } from '../scripts/html_review.mjs'
 
@@ -63,15 +59,6 @@ function openWebsocket(port, path, origin) {
   })
 }
 
-function memoryStorage(entries = []) {
-  const values = new Map(entries)
-  return {
-    getItem: key => values.get(key) ?? null,
-    setItem: (key, value) => values.set(key, String(value)),
-    entries: () => [...values.entries()],
-  }
-}
-
 test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -87,50 +74,6 @@ test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   assert.throws(() => parseSource(join(directory, 'missing.html')), /existing .html/)
 })
 
-test('companion paths preserve the established sidecar names', () => {
-  assert.equal(draftPath('/tmp/review.json'), '/tmp/review.draft.json')
-  assert.equal(logPath('/tmp/review.json'), '/tmp/review.log')
-})
-
-test('draft sessions reject invalid persisted state as a complete unit', () => {
-  const initialComments = [{ id: 'initial', comment: 'Start here' }]
-  const invalidStates = [
-    { clientId: 'client-old', revision: Number.MAX_SAFE_INTEGER, comments: initialComments, handoffCredential: null },
-    { clientId: 'client-old', revision: 2, comments: [{ id: 'broken' }], handoffCredential: null },
-    { clientId: 'client-old', revision: 2, comments: 'not-a-list', handoffCredential: null },
-    { clientId: 'x'.repeat(DRAFT_IDENTIFIER_MAX_LENGTH + 1), revision: 2, comments: initialComments, handoffCredential: null },
-    { clientId: 'client-old', revision: 2, comments: initialComments, handoffCredential: 'x'.repeat(DRAFT_IDENTIFIER_MAX_LENGTH + 1) },
-  ]
-
-  for (const [index, invalidState] of invalidStates.entries()) {
-    const storage = memoryStorage([['draft', JSON.stringify(invalidState)]])
-    const errors = []
-    let sequence = 0
-    const session = createDraftSession(storage, 'draft', () => `new-${index}-${++sequence}`, initialComments, message => errors.push(message))
-    assert.equal(session.clientId, `new-${index}-1`)
-    assert.equal(session.revision, 0)
-    assert.deepEqual(session.comments, initialComments)
-    assert.match(errors.join('\n'), /stored review draft state is invalid/i)
-  }
-})
-
-test('draft sessions surface inaccessible storage while keeping in-memory revisions monotonic', () => {
-  const errors = []
-  const storage = {
-    getItem: () => { throw new Error('read denied') },
-    setItem: () => { throw new Error('write denied') },
-  }
-  let sequence = 0
-  const session = createDraftSession(storage, 'draft', () => `generated-${++sequence}`, [], message => errors.push(message))
-  const comments = [{ id: 'one', comment: 'Still save this load' }]
-
-  assert.equal(session.nextRevision(comments), 1)
-  assert.equal(session.nextRevision(comments), 2)
-  assert.deepEqual(session.comments, comments)
-  assert.match(errors.join('\n'), /read denied/)
-  assert.match(errors.join('\n'), /write denied/)
-})
-
 test('invalid startup input leaves an actionable worker log', t => {
   const directory = temporaryDirectory(t)
   const output = join(directory, 'feedback.json')
@@ -141,64 +84,55 @@ test('invalid startup input leaves an actionable worker log', t => {
 
   assert.equal(result.status, 1)
   assert.match(result.stderr, /loopback URL/)
-  const log = readFileSync(logPath(output), 'utf8')
-  assert.match(log, /ERROR Review could not start/)
-  assert.match(log, /loopback URL/)
+  // Async mode detaches, so the log file is the only diagnostic the caller gets.
+  assert.match(readFileSync(logPath(output), 'utf8'), /loopback URL/)
 })
 
-test('restore accepts legacy file artifacts and rejects another source', t => {
+test('restore accepts legacy and versioned artifacts but rejects another source', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const other = join(directory, 'other.html')
-  const artifact = join(directory, 'review.json')
+  const legacy = join(directory, 'legacy.json')
+  const versioned = join(directory, 'versioned.json')
   writeFileSync(html, '<html></html>')
   writeFileSync(other, '<html></html>')
   const comments = [{ id: 'one', comment: 'Keep this' }]
-  writeFileSync(artifact, JSON.stringify({ version: 1, source: html, comments }))
+  writeFileSync(legacy, JSON.stringify({ version: 1, source: html, comments }))
+  const servedSource = parseSource('http://localhost:3100/review-me')
+  writeFileSync(versioned, JSON.stringify({ version: 2, source: sourceIdentity(servedSource), comments }))
 
-  assert.deepEqual(loadRestoredComments(artifact, parseSource(html)), comments)
-  assert.throws(() => loadRestoredComments(artifact, parseSource(other)), /different source/)
-})
-
-test('restore accepts the versioned served-page source identity', t => {
-  const directory = temporaryDirectory(t)
-  const artifact = join(directory, 'review.json')
-  const source = parseSource('http://localhost:3100/review-me')
-  const comments = [{ id: 'one', comment: 'Keep this' }]
-  writeFileSync(artifact, JSON.stringify({ version: 2, source: sourceIdentity(source), comments }))
-
-  assert.deepEqual(loadRestoredComments(artifact, source), comments)
+  assert.deepEqual(loadRestoredComments(legacy, parseSource(html)), comments)
+  assert.deepEqual(loadRestoredComments(versioned, servedSource), comments)
+  const malformed = join(directory, 'malformed.json')
+  writeFileSync(malformed, JSON.stringify({ version: 2, source: sourceIdentity(parseSource(html)), comments: [{ id: 'broken' }] }))
+  assert.throws(() => loadRestoredComments(malformed, parseSource(html)), /comments list/)
+  // Restoring onto the wrong page would silently attach comments to it.
+  assert.throws(() => loadRestoredComments(legacy, parseSource(other)), /different source/)
   assert.throws(
-    () => loadRestoredComments(artifact, parseSource('http://localhost:3100/another-page')),
+    () => loadRestoredComments(versioned, parseSource('http://localhost:3100/another-page')),
     /different source/,
   )
 })
 
-test('overlay injection keeps comments script-safe and preserves the existing controls', () => {
+test('overlay injection keeps comment text inert and yields a parseable script', () => {
   const rendered = injectHtml(
     '<html><head></head><body>Review me</body></html>',
     '/token',
-    [{ id: 'one', comment: 'Keep </script> and __ENDPOINT__ __INITIAL_COMMENTS__ __CREATE_DRAFT_SESSION__ __DRAFT_IDENTIFIER_MAX_LENGTH__ safe' }],
+    [{ id: 'one', comment: 'Keep </script> and __ENDPOINT__ __INITIAL_COMMENTS__ $& $` safe' }],
     OVERLAY_SCRIPT,
     true,
   )
 
+  // Without <base>, relative asset URLs would resolve against the token path.
   assert.match(rendered, /<base href="\/">/)
-  assert.match(rendered, /<link rel="icon" href="data:,">/)
   assert.match(rendered, /Keep \\u003c\/script>/)
   assert.match(rendered, /const endpoint = "\/token"/)
-  assert.match(rendered, /class="sr-add"/)
-  assert.match(rendered, /Send review comments/)
-  assert.match(rendered, /class="sr-text-toggle"/)
-  assert.match(rendered, /class="sr-icon sr-info"/)
-  assert.match(rendered, /Created by Nick Conn/)
-  assert.match(rendered, /https:\/\/x\.com\/nicholasjconn/)
-  assert.match(rendered, /https:\/\/github\.com\/nicholasjconn\/skills/)
-  assert.match(rendered, /steward-review-highlight/)
-  assert.match(rendered, /Could not preserve review draft across reloads/)
-  assert.ok(rendered.indexOf('<style>') < rendered.indexOf('</body>'))
+  // Comment text is substituted last, and never as a replacement pattern,
+  // so placeholders and `$` sequences inside it stay literal.
+  assert.match(rendered, /and __ENDPOINT__ __INITIAL_COMMENTS__ \$& \$` safe/)
   const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
   const scriptEnd = rendered.indexOf('</script>', scriptStart)
+  assert.ok(scriptEnd < rendered.toLowerCase().lastIndexOf('</body>'))
   assert.doesNotThrow(() => new Function(rendered.slice(scriptStart, scriptEnd)))
 })
 
@@ -214,13 +148,12 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   writeFileSync(css, 'body { color: red; }')
   writeFileSync(outside, 'must remain private')
   if (process.platform !== 'win32') symlinkSync(outside, escapedLink)
-  const events = []
   const review = await createReviewServer({
     source: parseSource(html),
     draftOutput: draft,
     initialComments: [],
     overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: (level, message, details) => events.push({ level, message, details }),
+    log: () => {},
   })
   t.after(() => review.close())
 
@@ -240,7 +173,7 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   const draftResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', instance_id: 'primary-page', revision: 3, comments }),
+    body: JSON.stringify({ client_id: 'primary-tab', revision: 3, comments }),
   })
   assert.equal(draftResponse.status, 200)
   const persisted = JSON.parse(readFileSync(draft, 'utf8'))
@@ -248,19 +181,11 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   assert.deepEqual(persisted.source, { type: 'file', value: html })
   assert.deepEqual(persisted.comments, comments)
 
-  const conflictingResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'duplicate-tab', instance_id: 'duplicate-page', revision: 4, comments: [] }),
-  })
-  assert.equal(conflictingResponse.status, 409)
-  assert.match(await conflictingResponse.text(), /another browser tab owns this review draft/)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, comments)
-
+  // A retried or reordered write must not roll the draft back.
   const staleResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', instance_id: 'primary-page', revision: 2, comments: [] }),
+    body: JSON.stringify({ client_id: 'primary-tab', revision: 2, comments: [] }),
   })
   assert.equal(staleResponse.status, 409)
   assert.match(await staleResponse.text(), /draft revision is stale/)
@@ -269,121 +194,13 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   const submitResponse = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', instance_id: 'primary-page', handoff_credential: null, comments }),
+    body: JSON.stringify({ client_id: 'primary-tab', comments }),
   })
   assert.equal(submitResponse.status, 200)
   assert.deepEqual(await review.completion, { action: 'submit', comments })
-  assert.ok(events.some(event => event.message === 'Saved recoverable draft'))
-  assert.ok(events.some(event => event.message === 'Rejected conflicting draft writer'))
-  assert.ok(events.some(event => event.message === 'Rejected stale draft revision'))
-  assert.ok(events.some(event => event.message === 'Review submitted'))
 })
 
-test('review ownership identifiers reject oversized values', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-  })
-  t.after(() => review.close())
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
-  const post = (action, payload) => fetch(new URL(`${endpoint}/${action}`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  const oversized = 'x'.repeat(DRAFT_IDENTIFIER_MAX_LENGTH + 1)
-
-  const oversizedClient = await post('heartbeat', { client_id: oversized, instance_id: 'owner-page' })
-  assert.equal(oversizedClient.status, 400)
-  assert.match(await oversizedClient.text(), /client_id must not exceed/)
-
-  const owner = { client_id: 'owner-client', instance_id: 'owner-page', handoff_credential: null }
-  assert.equal((await post('heartbeat', owner)).status, 200)
-
-  const oversizedInstance = await post('heartbeat', { ...owner, instance_id: oversized })
-  assert.equal(oversizedInstance.status, 400)
-  assert.match(await oversizedInstance.text(), /instance_id must not exceed/)
-  const oversizedHandoff = await post('heartbeat', { ...owner, handoff_credential: oversized })
-  assert.equal(oversizedHandoff.status, 400)
-  assert.match(await oversizedHandoff.text(), /handoff_credential must not exceed/)
-  const oversizedNextHandoff = await post('abandon', {
-    ...owner,
-    next_handoff_credential: oversized,
-    revision: 1,
-    comments: [],
-  })
-  assert.equal(oversizedNextHandoff.status, 400)
-  assert.match(await oversizedNextHandoff.text(), /next_handoff_credential must not exceed/)
-
-  assert.equal((await post('cancel', owner)).status, 200)
-  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
-})
-
-test('early handoff candidates enforce their cap and release a consumed slot', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-    tabCloseGraceMs: 1_000,
-  })
-  t.after(() => review.close())
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
-  const post = (action, payload) => fetch(new URL(`${endpoint}/${action}`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  const clientId = 'bounded-client'
-  const owner = { client_id: clientId, instance_id: 'owner-page', handoff_credential: null }
-  assert.equal((await post('heartbeat', owner)).status, 200)
-
-  for (let index = 0; index < EARLY_HANDOFF_CANDIDATE_LIMIT; index += 1) {
-    const candidate = await post('heartbeat', {
-      client_id: clientId,
-      instance_id: `candidate-page-${index}`,
-      handoff_credential: `candidate-credential-${index}`,
-    })
-    assert.equal(candidate.status, 202)
-  }
-  const overflow = await post('heartbeat', {
-    client_id: clientId,
-    instance_id: 'overflow-page',
-    handoff_credential: 'overflow-credential',
-  })
-  assert.equal(overflow.status, 409)
-  assert.match(await overflow.text(), /too many pending reload handoffs/)
-
-  const abandon = await post('abandon', {
-    ...owner,
-    next_handoff_credential: 'candidate-credential-0',
-    revision: 1,
-    comments: [],
-  })
-  assert.equal(abandon.status, 200)
-  const replacement = await post('heartbeat', {
-    client_id: clientId,
-    instance_id: 'replacement-page',
-    handoff_credential: 'replacement-credential',
-  })
-  assert.equal(replacement.status, 202)
-
-  const currentOwner = { client_id: clientId, instance_id: 'candidate-page-0', handoff_credential: 'candidate-credential-0' }
-  assert.equal((await post('cancel', currentOwner)).status, 200)
-  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
-})
-
-test('same-tab reload resumes its draft while a competing tab remains blocked', async t => {
+test('a reloading tab resumes its draft while a second tab cannot overwrite it', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const draft = join(directory, 'feedback.draft.json')
@@ -392,248 +209,43 @@ test('same-tab reload resumes its draft while a competing tab remains blocked', 
     source: parseSource(html),
     draftOutput: draft,
     initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
     log: () => {},
-    tabCloseGraceMs: 1_000,
   })
   t.after(() => review.close())
   const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
-  const sessionKey = `steward-html-review-draft:${endpoint}`
-  const tabStorage = memoryStorage()
-  let clientSequence = 0
-  const createClientId = () => `client-${++clientSequence}`
-  const firstLoad = createDraftSession(tabStorage, sessionKey, createClientId, [])
-  const firstComments = [{ id: 'one', comment: 'Keep this through reload' }]
+  const post = (action, payload) => fetch(new URL(`${endpoint}/${action}`, review.reviewUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  const comments = [{ id: 'one', comment: 'Keep this through the reload' }]
 
-  const firstSave = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: firstLoad.clientId,
-      instance_id: firstLoad.instanceId,
-      revision: firstLoad.nextRevision(firstComments),
-      comments: firstComments,
-    }),
-  })
-  assert.equal(firstSave.status, 200)
+  assert.equal((await post('draft', { client_id: 'review-tab', revision: 1, comments })).status, 200)
 
-  const clonedStorage = memoryStorage(tabStorage.entries())
-  const clonedTab = createDraftSession(clonedStorage, sessionKey, createClientId, [])
-  assert.equal(clonedTab.clientId, firstLoad.clientId)
-  assert.notEqual(clonedTab.instanceId, firstLoad.instanceId)
-  assert.deepEqual(clonedTab.comments, firstComments)
-  const clonedSave = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: clonedTab.clientId,
-      instance_id: clonedTab.instanceId,
-      revision: clonedTab.nextRevision(clonedTab.comments),
-      comments: clonedTab.comments,
-    }),
-  })
-  assert.equal(clonedSave.status, 409)
-  assert.match(await clonedSave.text(), /another browser tab owns this review draft/)
+  // The reloading tab reads its own work back from the page the server serves,
+  // so the browser never has to persist comments itself.
+  assert.match(await (await fetch(review.reviewUrl)).text(), /Keep this through the reload/)
 
-  const handoff = firstLoad.prepareHandoff(firstComments)
-  const abandon = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: firstLoad.clientId,
-      instance_id: firstLoad.instanceId,
-      handoff_credential: handoff.reconnectCredential,
-      next_handoff_credential: handoff.handoffCredential,
-      revision: handoff.revision,
-      comments: firstComments,
-    }),
-  })
-  assert.equal(abandon.status, 200)
+  // Session storage carries the client ID and revision counter across the
+  // reload, so the same tab keeps writing instead of looking like a rival.
+  const resumed = [...comments, { id: 'two', comment: 'Added after the reload' }]
+  assert.equal((await post('draft', { client_id: 'review-tab', revision: 2, comments: resumed })).status, 200)
+  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, resumed)
 
-  const clonedHeartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: clonedTab.clientId,
-      instance_id: clonedTab.instanceId,
-      handoff_credential: clonedTab.handoffCredential,
-    }),
-  })
-  assert.equal(clonedHeartbeat.status, 409)
+  // A second tab starts fresh and cannot overwrite the first tab's work.
+  const second = await post('draft', { client_id: 'second-tab', revision: 1, comments: [] })
+  assert.equal(second.status, 409)
+  assert.match(await second.text(), /another browser tab owns this review draft/)
+  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, resumed)
 
-  const reloaded = createDraftSession(tabStorage, sessionKey, createClientId, [])
-  assert.equal(reloaded.clientId, firstLoad.clientId)
-  assert.notEqual(reloaded.instanceId, firstLoad.instanceId)
-  assert.equal(reloaded.revision, 2)
-  assert.deepEqual(reloaded.comments, firstComments)
-  assert.equal(reloaded.handoffCredential, handoff.handoffCredential)
-  const reconnect = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-    }),
-  })
-  assert.equal(reconnect.status, 200)
-  reloaded.completeHandoff(reloaded.handoffCredential)
-  assert.equal(reloaded.handoffCredential, null)
-  const reloadedComments = [...reloaded.comments, { id: 'two', comment: 'Added after reload' }]
-  const resumedSave = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-      revision: reloaded.nextRevision(reloadedComments),
-      comments: reloadedComments,
-    }),
-  })
-  assert.equal(resumedSave.status, 200)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, reloadedComments)
-
-  const competingTab = createDraftSession(memoryStorage(), sessionKey, createClientId, [])
-  const competingSave = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: competingTab.clientId,
-      instance_id: competingTab.instanceId,
-      handoff_credential: competingTab.handoffCredential,
-      revision: competingTab.nextRevision([]),
-      comments: [],
-    }),
-  })
-  assert.equal(competingSave.status, 409)
-  assert.match(await competingSave.text(), /another browser tab owns this review draft/)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, reloadedComments)
-
-  const rejectedSubmit = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: clonedTab.clientId,
-      instance_id: clonedTab.instanceId,
-      handoff_credential: clonedTab.handoffCredential,
-      comments: clonedTab.comments,
-    }),
-  })
+  // A second tab cannot finish the review either; otherwise it could submit a
+  // stale page and discard the owner's newer comments.
+  const rejectedSubmit = await post('submit', { client_id: 'second-tab', comments: [] })
   assert.equal(rejectedSubmit.status, 409)
-  const rejectedCancel = await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: competingTab.clientId,
-      instance_id: competingTab.instanceId,
-      handoff_credential: competingTab.handoffCredential,
-    }),
-  })
-  assert.equal(rejectedCancel.status, 409)
-
-  const submit = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-      comments: reloadedComments,
-    }),
-  })
-  assert.equal(submit.status, 200)
-  assert.deepEqual(await review.completion, { action: 'submit', comments: reloadedComments })
-})
-
-test('reload handoff survives heartbeat arriving before abandon without a timed retry', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-    tabCloseGraceMs: 1_000,
-    handoffOrderingGraceMs: 1_000,
-  })
-  t.after(() => review.close())
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
-  const sessionKey = `steward-html-review-draft:${endpoint}`
-  const storage = memoryStorage()
-  let sequence = 0
-  const createId = () => `ordered-${++sequence}`
-  const owner = createDraftSession(storage, sessionKey, createId, [])
-  const comments = [{ id: 'one', comment: 'Survive reversed request ordering' }]
-
-  const firstSave = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: owner.clientId,
-      instance_id: owner.instanceId,
-      handoff_credential: owner.handoffCredential,
-      revision: owner.nextRevision(comments),
-      comments,
-    }),
-  })
-  assert.equal(firstSave.status, 200)
-
-  const handoff = owner.prepareHandoff(comments)
-  const reloaded = createDraftSession(storage, sessionKey, createId, [])
-  const earlyHeartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-    }),
-  })
-  assert.equal(earlyHeartbeat.status, 202)
-
-  const abandon = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: owner.clientId,
-      instance_id: owner.instanceId,
-      handoff_credential: handoff.reconnectCredential,
-      next_handoff_credential: handoff.handoffCredential,
-      revision: handoff.revision,
-      comments,
-    }),
-  })
-  assert.equal(abandon.status, 200)
-
-  const confirmedHeartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-    }),
-  })
-  assert.equal(confirmedHeartbeat.status, 200)
-  reloaded.completeHandoff(reloaded.handoffCredential)
-  assert.equal(reloaded.revision, 2)
-  assert.deepEqual(reloaded.comments, comments)
-
-  const cancel = await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: reloaded.clientId,
-      instance_id: reloaded.instanceId,
-      handoff_credential: reloaded.handoffCredential,
-    }),
-  })
-  assert.equal(cancel.status, 200)
-  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
+  assert.match(await rejectedSubmit.text(), /another browser tab owns this review draft/)
+  assert.equal((await post('submit', { client_id: 'review-tab', comments: resumed })).status, 200)
+  assert.deepEqual(await review.completion, { action: 'submit', comments: resumed })
 })
 
 test('tab closure preserves the draft, allows a brief reconnect, then completes as abandoned', async t => {
@@ -656,19 +268,19 @@ test('tab closure preserves the draft, allows a brief reconnect, then completes 
 
   const firstClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
     method: 'POST',
-    body: JSON.stringify({
-      client_id: 'review-tab',
-      instance_id: 'review-page-1',
-      handoff_credential: null,
-      next_handoff_credential: 'handoff-1',
-      revision: 1,
-      comments,
-    }),
+    body: JSON.stringify({ client_id: 'review-tab', revision: 1, comments }),
   })
   assert.equal(firstClose.status, 200)
+  const competingHeartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: 'second-tab' }),
+  })
+  assert.equal(competingHeartbeat.status, 409)
   const heartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
     method: 'POST',
-    body: JSON.stringify({ client_id: 'review-tab', instance_id: 'review-page-2', handoff_credential: 'handoff-1' }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: 'review-tab' }),
   })
   assert.equal(heartbeat.status, 200)
   const remainedOpen = await Promise.race([
@@ -679,14 +291,7 @@ test('tab closure preserves the draft, allows a brief reconnect, then completes 
 
   const secondClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
     method: 'POST',
-    body: JSON.stringify({
-      client_id: 'review-tab',
-      instance_id: 'review-page-2',
-      handoff_credential: 'handoff-1',
-      next_handoff_credential: 'handoff-2',
-      revision: 2,
-      comments,
-    }),
+    body: JSON.stringify({ client_id: 'review-tab', revision: 2, comments }),
   })
   assert.equal(secondClose.status, 200)
   assert.deepEqual(await review.completion, { action: 'abandon', comments: [] })
@@ -713,6 +318,7 @@ test('the safety timeout completes an otherwise abandoned review', async t => {
 test('served-page review proxies HTML and assets while removing blocking CSP', async t => {
   let pageOrigin
   let websocketOrigin
+  const events = []
   const upstream = createServer((request, response) => {
     if (request.url === '/app') {
       pageOrigin = request.headers.origin
@@ -738,7 +344,6 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   })
   const upstreamPort = await listen(upstream)
   t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
-  const events = []
   const review = await createReviewServer({
     source: parseSource(`http://127.0.0.1:${upstreamPort}/app`),
     draftOutput: null,
@@ -762,14 +367,15 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   const handshake = await websocketHandshake(Number(reviewUrl.port), '/socket', browserOrigin)
   assert.match(handshake, /^HTTP\/1\.1 101 Switching Protocols/)
   assert.equal(websocketOrigin, upstreamOrigin)
+  assert.ok(events.some(event => event.message === 'Review server ready'))
 
   const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
-    body: JSON.stringify({ client_id: 'proxy-tab', instance_id: 'proxy-page', handoff_credential: null }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: 'proxy-tab' }),
   })
   assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
-  assert.ok(events.some(event => event.message === 'Review server ready'))
 })
 
 test('server shutdown destroys upgraded sockets instead of waiting indefinitely', async t => {
@@ -804,7 +410,7 @@ test('server shutdown destroys upgraded sockets instead of waiting indefinitely'
   assert.equal(shutdown, 'closed')
 })
 
-test('an unavailable served page returns a visible error and writes a diagnostic event', async t => {
+test('an unavailable served page returns a visible error instead of hanging', async t => {
   const probe = createServer()
   const unavailablePort = await listen(probe)
   await new Promise(resolveClose => probe.close(resolveClose))
@@ -826,7 +432,8 @@ test('an unavailable served page returns a visible error and writes a diagnostic
   const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
-    body: JSON.stringify({ client_id: 'unavailable-tab', instance_id: 'unavailable-page', handoff_credential: null }),
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ client_id: 'unavailable-tab' }),
   })
   await review.completion
 })
