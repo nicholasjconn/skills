@@ -56,15 +56,15 @@ For an output named `result.json`, the tool reports these paths:
 - `result.log` — worker diagnostics
 
 Record the reported paths, then end the turn while the user reviews the page.
-Do not poll or hold a tool session open. Browser activity does not resume the
+Do not poll or keep the worker attached. Browser activity does not resume the
 conversation; the user must send another chat message.
 
 ## Resume
 
 - **Feedback sent:** Check the submission file once. If it is missing, inspect
   the log once and report the failure.
-- **Tab closed:** Recover the draft only if the user explicitly asks. Identify
-  recovered comments as autosaved, not submitted.
+- **Browser closed or crashed:** Recover the draft only if the user explicitly
+  asks. Identify recovered comments as autosaved, not submitted.
 - **Review reopened:** Restore the prior submission if present; otherwise
   restore the draft. The request to reopen authorizes either.
 - **Review cancelled:** Do not recover the draft unless the user asks.

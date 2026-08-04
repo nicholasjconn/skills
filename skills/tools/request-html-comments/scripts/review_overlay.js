@@ -1,6 +1,6 @@
 (() => {
   // Proxied iframe documents also receive this script. Only the visible,
-  // top-level page should render controls or claim draft ownership.
+  // top-level page should render controls.
   if (window.top !== window) return;
 
   // Keep provenance beside the injected UI so the overlay stays portable and
@@ -114,45 +114,9 @@
   const infoButton = root.querySelector('.sr-info');
   const count = root.querySelector('.sr-count');
   const initialComments = __INITIAL_COMMENTS__;
-  // The server treats the last draft writer as the draft owner, so a reloading
-  // tab has to come back with the same client ID and a higher revision. Session
-  // storage is per tab and survives reloads, which is exactly that lifetime.
-  const draftStateKey = `steward-html-review-draft:${endpoint}`;
-  const validComments = value => Array.isArray(value) && value.every(item => (
-    item && typeof item === 'object' && !Array.isArray(item)
-    && typeof item.id === 'string' && item.id
-    && typeof item.comment === 'string'
-  ));
-  const newDraftState = () => ({
-    clientId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`,
-    revision: 0,
-    comments: null
-  });
-  const readDraftState = () => {
-    try {
-      // sessionStorage is copied when a tab is duplicated. A fresh top-level
-      // navigation therefore needs a new identity; reload and history
-      // navigation retain the existing identity for draft recovery.
-      const navigationType = globalThis.performance?.getEntriesByType?.('navigation')?.[0]?.type;
-      if (navigationType === 'navigate') return newDraftState();
-      const stored = JSON.parse(window.sessionStorage.getItem(draftStateKey));
-      if (stored && typeof stored.clientId === 'string' && stored.clientId
-        && Number.isSafeInteger(stored.revision) && stored.revision >= 0 && stored.revision < Number.MAX_SAFE_INTEGER
-        && validComments(stored.comments)) return stored;
-    } catch (error) { /* A tab that cannot read its stored state starts a new one. */ }
-    return newDraftState();
-  };
-  const draftState = readDraftState();
-  const draftClientId = draftState.clientId;
-  const comments = draftState.comments ? [...draftState.comments] : initialComments;
-  const nextDraftRevision = nextComments => {
-    if (draftState.revision >= Number.MAX_SAFE_INTEGER) throw new Error('draft revision cannot be incremented safely');
-    draftState.revision += 1;
-    draftState.comments = nextComments;
-    try { window.sessionStorage.setItem(draftStateKey, JSON.stringify(draftState)); }
-    catch (error) { status.textContent = `Could not preserve this tab's draft across reloads: ${error.message}`; }
-    return draftState.revision;
-  };
+  const comments = initialComments.map(item => ({...item}));
+  const pendingComments = new Map();
+  const pendingDeletedIds = new Set();
   const pins = new Map();
   const highlights = new Map();
   let mode = 'interact';
@@ -160,7 +124,6 @@
   let popup = null;
   let infoPanel = null;
   let draft = null;
-  let draftDirty = comments.length > 0;
   let draftSaveTimer = null;
   let draftSavePromise = Promise.resolve();
   let finished = false;
@@ -373,35 +336,59 @@
     }
     return recovered;
   };
+  const rememberComment = item => {
+    pendingDeletedIds.delete(item.id);
+    pendingComments.set(item.id, {...item});
+  };
+  const rememberDeletion = id => {
+    pendingComments.delete(id);
+    pendingDeletedIds.add(id);
+  };
+  const rememberOpenDraft = () => {
+    if (!popup || !draft) return;
+    const recoverable = recoverableComments().find(item => item.id === (draft.item?.id || draft.id));
+    if (recoverable) rememberComment(recoverable);
+    else if (draft.item) rememberComment(draft.item);
+    else rememberDeletion(draft.id);
+  };
   const saveDraft = () => {
     if (finished) return draftSavePromise;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
-    draftSavePromise = draftSavePromise.then(async () => {
-      const recoverable = recoverableComments();
+    if (!pendingComments.size && !pendingDeletedIds.size) return draftSavePromise;
+    const savedComments = new Map(pendingComments);
+    const savedDeletedIds = new Set(pendingDeletedIds);
+    draftSavePromise = draftSavePromise.catch(() => {}).then(async () => {
       const response = await fetch(`${endpoint}/draft`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ client_id: draftClientId, revision: nextDraftRevision(recoverable), comments: recoverable }),
+        body: JSON.stringify({ comments: [...savedComments.values()], deleted_ids: [...savedDeletedIds] }),
         keepalive: true
       });
       if (!response.ok) throw new Error(await response.text());
-    }).catch(error => {
-      status.textContent = `Could not save review draft: ${error.message}`;
+      for (const [id, item] of savedComments) {
+        if (pendingComments.get(id) === item) pendingComments.delete(id);
+      }
+      for (const id of savedDeletedIds) {
+        if (pendingDeletedIds.has(id)) pendingDeletedIds.delete(id);
+      }
     });
     return draftSavePromise;
   };
   const queueDraftSave = () => {
     if (finished) return;
-    draftDirty = true;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
-    draftSaveTimer = setTimeout(saveDraft, 200);
+    draftSaveTimer = setTimeout(() => saveDraft().catch(error => {
+      status.textContent = `Could not save review draft: ${error.message}`;
+    }), 200);
   };
 
   // Comment pins own saved feedback; the editor owns only the comment being
   // created or changed. Closing an editor discards its temporary screen
   // position but keeps any previously saved comment anchored to the page.
   const closePopup = () => {
+    if (draft?.item) rememberComment(draft.item);
+    else if (draft) rememberDeletion(draft.id);
     if (draft?.provisionalId) removeHighlight(draft.provisionalId);
     if (popup) popup.remove();
     popup = null;
@@ -447,6 +434,7 @@
     pins.delete(item.id);
     removeHighlight(item.id);
     closePopup();
+    rememberDeletion(item.id);
     renumberPins();
     updateCount();
     queueDraftSave();
@@ -455,14 +443,20 @@
     if (!popup || !draft) return;
     const text = popup.querySelector('textarea').value.trim();
     if (!text) return;
+    let savedItem;
     if (draft.item) {
       draft.item.comment = text;
       draft.item.updated_at = new Date().toISOString();
+      rememberComment(draft.item);
+      savedItem = draft.item;
     } else {
       const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, comment: text, created_at: draft.created_at };
       comments.push(item);
+      rememberComment(item);
       pinFor(item);
+      savedItem = item;
     }
+    draft = { item: savedItem };
     closePopup();
   };
   const openPopup = (item, clientX, clientY, target = null) => {
@@ -515,6 +509,7 @@
     save.disabled = !textarea.value.trim();
     textarea.addEventListener('input', () => {
       save.disabled = !textarea.value.trim();
+      rememberOpenDraft();
       queueDraftSave();
     });
     textarea.addEventListener('keydown', (event) => {
@@ -547,8 +542,6 @@
 
   comments.forEach(pinFor);
   updateCount();
-  if (comments.length) queueDraftSave();
-
   // Toolbar and page event wiring stays together so capture-phase behavior is
   // easy to audit against the host page's own controls.
   addButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'element' ? 'interact' : 'element'); });
@@ -669,47 +662,23 @@
     closeInfo();
     closePopup();
     status.textContent = '';
-    const payload = { client_id: draftClientId, ...(action === 'submit' ? { comments: comments.filter(item => item.comment.trim()) } : {}) };
     try {
       await saveDraft();
-      const response = await fetch(`${endpoint}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
+      const response = await fetch(`${endpoint}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
       if (!response.ok) throw new Error(await response.text());
       finished = true;
-      clearInterval(heartbeatTimer);
-      heartbeatTimer = null;
       document.documentElement.innerHTML = `<head><title>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</title></head><body style="font:16px/1.5 system-ui;padding:3rem"><h1>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</h1><p>You can close this tab.</p></body>`;
     } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
   };
-  const heartbeat = async () => {
-    try {
-      const response = await fetch(`${endpoint}/heartbeat`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ client_id: draftClientId })
-      });
-      if (!response.ok) throw new Error(await response.text());
-    } catch (error) {
-      status.textContent = `Could not connect this review tab: ${error.message}`;
-    }
-  };
-  let heartbeatTimer = null;
-  const startHeartbeat = () => {
-    if (finished || heartbeatTimer) return;
-    heartbeat();
-    heartbeatTimer = setInterval(heartbeat, 15000);
-  };
-  startHeartbeat();
-  window.addEventListener('pagehide', (event) => {
-    if (finished || event.persisted) return;
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
+  window.addEventListener('pagehide', () => {
+    if (finished) return;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
-    const recoverable = recoverableComments();
-    const body = JSON.stringify({ client_id: draftClientId, revision: nextDraftRevision(recoverable), comments: recoverable });
-    const queued = navigator.sendBeacon && navigator.sendBeacon(`${endpoint}/abandon`, new Blob([body], {type: 'application/json'}));
-    if (!queued) fetch(`${endpoint}/abandon`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true });
+    rememberOpenDraft();
+    if (!pendingComments.size && !pendingDeletedIds.size) return;
+    const body = JSON.stringify({ comments: [...pendingComments.values()], deleted_ids: [...pendingDeletedIds] });
+    const queued = navigator.sendBeacon && navigator.sendBeacon(`${endpoint}/draft`, new Blob([body], {type: 'application/json'}));
+    if (!queued) fetch(`${endpoint}/draft`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true });
   });
-  window.addEventListener('pageshow', startHeartbeat);
   root.querySelector('.sr-send').addEventListener('click', () => finish('submit'));
   root.querySelector('.sr-cancel').addEventListener('click', () => finish('cancel'));
 })();

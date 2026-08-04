@@ -27,7 +27,6 @@ import { spawn } from 'node:child_process'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 const REVIEW_SAFETY_TIMEOUT_MS = 60 * 60 * 1000
-const TAB_CLOSE_GRACE_MS = 60 * 1000
 const FORCE_CLOSE_GRACE_MS = 250
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
@@ -288,7 +287,6 @@ export async function createReviewServer({
   overlayScript,
   log,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
-  tabCloseGraceMs = TAB_CLOSE_GRACE_MS,
 }) {
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const token = randomBytes(24).toString('base64url')
@@ -297,13 +295,10 @@ export async function createReviewServer({
   // relative assets, links, forms, and explicit <base> elements normally.
   const reviewPath = source.type === 'file' ? `/${encodeURIComponent(basename(source.path))}` : source.url.pathname
   const reviewSearch = source.type === 'url' ? source.url.search : ''
-  let draftClient = null
   let draftComments = initialComments
-  let lastDraftRevision = -1
   let settled = false
   let settle
   let safetyTimer = null
-  let tabCloseTimer = null
   let closing = null
   const completion = new Promise(resolveCompletion => { settle = resolveCompletion })
   const sourceRecord = sourceIdentity(source)
@@ -316,63 +311,28 @@ export async function createReviewServer({
     settle({ action, comments })
   }
 
-  const cancelTabClose = () => {
-    if (!tabCloseTimer) return
-    clearTimeout(tabCloseTimer)
-    tabCloseTimer = null
-    log('info', 'Review tab reconnected before shutdown')
-  }
-
-  const scheduleTabClose = () => {
-    if (tabCloseTimer || settled) return
-    tabCloseTimer = setTimeout(() => {
-      tabCloseTimer = null
-      if (settled) return
-      log('info', 'Review tab remained closed; stopping worker')
-      finish('abandon')
-    }, tabCloseGraceMs)
-    tabCloseTimer.unref()
-    log('info', 'Review tab closed; waiting briefly for reconnection', { grace_ms: tabCloseGraceMs })
-  }
-
-  const claimDraftClient = payload => {
-    if (typeof payload.client_id !== 'string' || !payload.client_id) throw new Error('client_id must be a nonempty string')
-    if (draftClient && payload.client_id !== draftClient) {
-      const error = new Error('another browser tab owns this review draft')
-      error.statusCode = 409
-      throw error
-    }
-    draftClient = payload.client_id
-  }
-
-  // A reloading tab keeps its client ID and revision counter in session
-  // storage, so it stays the draft owner. A second tab starts fresh and is
-  // rejected instead of overwriting the first tab's work.
+  // Draft writes are idempotent operations on stable comment IDs. Every page
+  // opened by this invocation can add, update, or delete comments without
+  // claiming browser ownership or replacing comments it has never seen.
   const saveDraft = payload => {
-    if (!Number.isSafeInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative safe integer')
-    if (payload.revision >= Number.MAX_SAFE_INTEGER) throw new Error('revision cannot be incremented safely')
     if (!validCommentList(payload.comments)) throw new Error('comments must be a list of valid comment records')
-    claimDraftClient(payload)
-    if (payload.revision <= lastDraftRevision) {
-      const error = new Error('draft revision is stale')
-      error.statusCode = 409
-      throw error
+    const deletedIds = payload.deleted_ids ?? []
+    if (!Array.isArray(deletedIds) || deletedIds.some(id => typeof id !== 'string' || !id)) {
+      throw new Error('deleted_ids must be a list of nonempty strings')
     }
+    const commentById = new Map(draftComments.map(comment => [comment.id, comment]))
+    for (const id of deletedIds) commentById.delete(id)
+    for (const comment of payload.comments) commentById.set(comment.id, comment)
+    draftComments = [...commentById.values()]
     if (draftOutput) {
       writeJsonAtomic(draftOutput, {
         version: 2,
         source: sourceRecord,
         saved_at: new Date().toISOString(),
-        revision: payload.revision,
-        comments: payload.comments,
+        comments: draftComments,
       })
-      log('info', 'Saved recoverable draft', { revision: payload.revision, comments: payload.comments.length })
+      log('info', 'Saved recoverable draft', { comments: draftComments.length })
     }
-    draftClient = payload.client_id
-    lastDraftRevision = payload.revision
-    // Reserving the live draft for the next page load restores a reloading
-    // tab's work without the browser having to persist comments itself.
-    draftComments = payload.comments
   }
 
   const server = createServer(async (request, response) => {
@@ -382,39 +342,24 @@ export async function createReviewServer({
     }
     const requested = new URL(request.url, 'http://review.local')
     const action = requested.pathname.slice(endpoint.length + 1)
-    if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'heartbeat', 'abandon', 'submit', 'cancel'].includes(action)) {
+    if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'submit', 'cancel'].includes(action)) {
       let payload = {}
       try {
         const content = await readRequestBody(request)
         payload = content ? JSON.parse(content) : {}
-        if (action === 'draft' || action === 'abandon') {
+        if (action === 'draft') {
           saveDraft(payload)
-          if (action === 'abandon') scheduleTabClose()
-        } else if (action === 'heartbeat') {
-          claimDraftClient(payload)
-          cancelTabClose()
         } else if (action === 'submit') {
-          claimDraftClient(payload)
-          if (!validCommentList(payload.comments)) throw new Error('comments must be a list of valid comment records')
-          finish(action, payload.comments)
-          log('info', 'Review submitted', { comments: payload.comments.length })
+          finish(action, draftComments)
+          log('info', 'Review submitted', { comments: draftComments.length })
         } else if (!settled) {
-          claimDraftClient(payload)
           finish(action)
           log('info', 'Review cancelled')
         }
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end('{"ok":true}')
       } catch (error) {
-        if (error.statusCode === 409) {
-          log('error', error.message === 'draft revision is stale' ? 'Rejected stale draft revision' : 'Rejected conflicting draft writer', {
-            client_id: payload?.client_id,
-            revision: payload?.revision,
-            current_revision: lastDraftRevision,
-          })
-        } else {
-          log('error', 'Rejected review request', { action, error: error.message })
-        }
+        log('error', 'Rejected review request', { action, error: error.message })
         sendText(response, error.statusCode || 400, error.message)
       }
       return
@@ -475,7 +420,6 @@ export async function createReviewServer({
       if (closing) return closing
       closing = (async () => {
         if (safetyTimer) clearTimeout(safetyTimer)
-        if (tabCloseTimer) clearTimeout(tabCloseTimer)
         const closed = new Promise(resolveClose => server.close(() => resolveClose()))
         for (const resource of activeResources) resource.destroy()
         const forceCloseTimer = setTimeout(() => {

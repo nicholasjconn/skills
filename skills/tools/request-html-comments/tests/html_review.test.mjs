@@ -148,6 +148,10 @@ test('the injected overlay stays inactive inside an iframe', () => {
   assert.doesNotThrow(() => runOverlay({ top: {} }))
 })
 
+test('the overlay has no browser-tab identity or lifecycle endpoints', () => {
+  assert.doesNotMatch(OVERLAY_SCRIPT, /sessionStorage|client_id|\/heartbeat|\/abandon/)
+})
+
 test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -184,7 +188,7 @@ test('file review serves relative local assets, persists drafts, and accepts fee
   const draftResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', revision: 3, comments }),
+    body: JSON.stringify({ comments, deleted_ids: [] }),
   })
   assert.equal(draftResponse.status, 200)
   const persisted = JSON.parse(readFileSync(draft, 'utf8'))
@@ -192,26 +196,25 @@ test('file review serves relative local assets, persists drafts, and accepts fee
   assert.deepEqual(persisted.source, { type: 'file', value: html })
   assert.deepEqual(persisted.comments, comments)
 
-  // A retried or reordered write must not roll the draft back.
-  const staleResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
+  // Retrying the same operation is harmless.
+  const retryResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', revision: 2, comments: [] }),
+    body: JSON.stringify({ comments, deleted_ids: [] }),
   })
-  assert.equal(staleResponse.status, 409)
-  assert.match(await staleResponse.text(), /draft revision is stale/)
+  assert.equal(retryResponse.status, 200)
   assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, comments)
 
   const submitResponse = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'primary-tab', comments }),
+    body: '{}',
   })
   assert.equal(submitResponse.status, 200)
   assert.deepEqual(await review.completion, { action: 'submit', comments })
 })
 
-test('a reloading draft owner can continue while a second tab cannot overwrite it', async t => {
+test('reloads and additional tabs share recoverable comments without ownership', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const draft = join(directory, 'feedback.draft.json')
@@ -230,34 +233,32 @@ test('a reloading draft owner can continue while a second tab cannot overwrite i
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
   })
-  const comments = [{ id: 'one', comment: 'Keep this through the reload' }]
+  const firstTabComment = { id: 'one', comment: 'Keep this through the reload' }
+  const secondTabComment = { id: 'two', comment: 'Added from another tab' }
 
-  assert.equal((await post('draft', { client_id: 'review-tab', revision: 1, comments })).status, 200)
+  assert.equal((await post('draft', { comments: [firstTabComment], deleted_ids: [] })).status, 200)
 
   // A reload receives the latest server-side draft in the injected overlay.
   assert.match(await (await fetch(review.reviewUrl)).text(), /Keep this through the reload/)
 
-  // The owner can continue from the next revision after reloading.
-  const resumed = [...comments, { id: 'two', comment: 'Added after the reload' }]
-  assert.equal((await post('draft', { client_id: 'review-tab', revision: 2, comments: resumed })).status, 200)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, resumed)
+  // Another tab contributes only its change. It never replaces comments it
+  // did not load, and replaying its request does not duplicate anything.
+  const secondPayload = { comments: [secondTabComment], deleted_ids: [] }
+  assert.equal((await post('draft', secondPayload)).status, 200)
+  assert.equal((await post('draft', secondPayload)).status, 200)
+  const combined = [firstTabComment, secondTabComment]
+  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, combined)
 
-  // A second tab starts fresh and cannot overwrite the first tab's work.
-  const second = await post('draft', { client_id: 'second-tab', revision: 1, comments: [] })
-  assert.equal(second.status, 409)
-  assert.match(await second.text(), /another browser tab owns this review draft/)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, resumed)
-
-  // A second tab cannot finish the review either; otherwise it could submit a
-  // stale page and discard the owner's newer comments.
-  const rejectedSubmit = await post('submit', { client_id: 'second-tab', comments: [] })
-  assert.equal(rejectedSubmit.status, 409)
-  assert.match(await rejectedSubmit.text(), /another browser tab owns this review draft/)
-  assert.equal((await post('submit', { client_id: 'review-tab', comments: resumed })).status, 200)
-  assert.deepEqual(await review.completion, { action: 'submit', comments: resumed })
+  // A newly opened page sees the combined server draft, and submission uses
+  // that draft rather than a possibly stale tab-local snapshot.
+  const reopenedHtml = await (await fetch(review.reviewUrl)).text()
+  assert.match(reopenedHtml, /Keep this through the reload/)
+  assert.match(reopenedHtml, /Added from another tab/)
+  assert.equal((await post('submit', {})).status, 200)
+  assert.deepEqual(await review.completion, { action: 'submit', comments: combined })
 })
 
-test('tab closure preserves the draft, allows a brief reconnect, then completes as abandoned', async t => {
+test('comment deletion is idempotent and the worker ignores browser lifecycle', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const draft = join(directory, 'feedback.draft.json')
@@ -268,46 +269,32 @@ test('tab closure preserves the draft, allows a brief reconnect, then completes 
     initialComments: [],
     overlayScript: OVERLAY_SCRIPT,
     log: () => {},
-    safetyTimeoutMs: 1_000,
-    tabCloseGraceMs: 25,
+    safetyTimeoutMs: 30,
   })
   t.after(() => review.close())
   const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const comments = [{ id: 'one', comment: 'Recover this' }]
-
-  const firstClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
-    method: 'POST',
-    body: JSON.stringify({ client_id: 'review-tab', revision: 1, comments }),
-  })
-  assert.equal(firstClose.status, 200)
-  const competingHeartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
+  const comments = [{ id: 'one', comment: 'Remove this' }, { id: 'two', comment: 'Keep this' }]
+  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'second-tab' }),
+    body: JSON.stringify({ comments, deleted_ids: [] }),
   })
-  assert.equal(competingHeartbeat.status, 409)
-  const heartbeat = await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'review-tab' }),
-  })
-  assert.equal(heartbeat.status, 200)
-  const remainedOpen = await Promise.race([
-    review.completion.then(() => false),
-    new Promise(resolveWait => setTimeout(() => resolveWait(true), 40)),
-  ])
-  assert.equal(remainedOpen, true)
-
-  const secondClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
-    method: 'POST',
-    body: JSON.stringify({ client_id: 'review-tab', revision: 2, comments }),
-  })
-  assert.equal(secondClose.status, 200)
-  assert.deepEqual(await review.completion, { action: 'abandon', comments: [] })
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, comments)
+  assert.equal(save.status, 200)
+  for (let retry = 0; retry < 2; retry += 1) {
+    const deletion = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ comments: [], deleted_ids: ['one'] }),
+    })
+    assert.equal(deletion.status, 200)
+  }
+  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, [comments[1]])
+  assert.equal((await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), { method: 'POST' })).status, 404)
+  assert.equal((await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), { method: 'POST' })).status, 404)
+  assert.deepEqual(await review.completion, { action: 'timeout', comments: [] })
 })
 
-test('the safety timeout completes an otherwise abandoned review', async t => {
+test('the safety timeout completes an otherwise idle review', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   writeFileSync(html, '<html><body>Review me</body></html>')
@@ -380,7 +367,7 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'proxy-tab' }),
+    body: '{}',
   })
   assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
 })
