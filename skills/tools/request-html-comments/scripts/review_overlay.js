@@ -293,6 +293,15 @@
       return null;
     }
   };
+  const resolveElement = (reference) => {
+    if (!reference?.css_selector) return null;
+    try {
+      const node = document.querySelector(reference.css_selector);
+      return visible(node) ? node : null;
+    } catch {
+      return null;
+    }
+  };
   const rangeRects = (range) => [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
   const removeHighlight = (id) => {
     for (const node of highlights.get(id) || []) node.remove();
@@ -332,7 +341,7 @@
       if (index >= 0) recovered[index] = item;
       else recovered.push(item);
     } else {
-      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, comment: text, created_at: draft.created_at });
+      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at });
     }
     return recovered;
   };
@@ -400,15 +409,26 @@
     count.dataset.count = String(comments.length);
     count.setAttribute('aria-label', `${comments.length} comment${comments.length === 1 ? '' : 's'}`);
   };
-  const pinFor = (item) => {
-    let anchor = item.anchor;
+  const anchorForComment = (item) => {
     if (item.target_type === 'text' && item.selection) {
       const range = resolveRange(item.selection);
-      if (range) {
-        drawHighlight(item.id, range);
-        anchor = anchorForRange(range) || anchor;
-      }
+      if (!range) return item.anchor;
+      drawHighlight(item.id, range);
+      return anchorForRange(range) || item.anchor;
     }
+    if (item.target_type === 'element' && item.anchor_ratio) {
+      const target = resolveElement(item.element);
+      if (!target) return item.anchor;
+      const rect = target.getBoundingClientRect();
+      return {
+        x: Math.round(rect.left + window.scrollX + rect.width * item.anchor_ratio.x),
+        y: Math.round(rect.top + window.scrollY + rect.height * item.anchor_ratio.y)
+      };
+    }
+    return item.anchor;
+  };
+  const pinFor = (item) => {
+    const anchor = anchorForComment(item);
     if (!anchor) return;
     const pin = document.createElement('button');
     pin.className = 'steward-review-ui steward-review-pin';
@@ -450,13 +470,13 @@
       rememberComment(draft.item);
       savedItem = draft.item;
     } else {
-      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, comment: text, created_at: draft.created_at };
+      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at };
       comments.push(item);
       rememberComment(item);
       pinFor(item);
       savedItem = item;
     }
-    draft = { item: savedItem };
+    draft = { item: savedItem, provisionalId: draft.provisionalId };
     closePopup();
   };
   const openPopup = (item, clientX, clientY, target = null) => {
@@ -572,9 +592,14 @@
     const target = event.target;
     const element = elementReference(target);
     const anchor = { x: Math.round(event.pageX), y: Math.round(event.pageY) };
+    const rect = target.getBoundingClientRect();
+    const anchorRatio = {
+      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+      y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
+    };
     clearHover();
     setMode('interact');
-    openPopup(null, event.clientX, event.clientY, { targetType: 'element', element, anchor });
+    openPopup(null, event.clientX, event.clientY, { targetType: 'element', element, anchor, anchorRatio });
   }, true);
   document.addEventListener('pointerup', (event) => {
     if (mode !== 'text' || isOverlay(event.target)) return;
@@ -609,12 +634,9 @@
     if (event.key === 'Escape' && mode !== 'interact') { event.preventDefault(); setMode('interact'); }
   }, true);
 
-  const refreshTextComments = () => {
-    for (const item of comments.filter(comment => comment.target_type === 'text' && comment.selection)) {
-      const range = resolveRange(item.selection);
-      if (!range) continue;
-      drawHighlight(item.id, range);
-      const anchor = anchorForRange(range);
+  const refreshComments = () => {
+    for (const item of comments) {
+      const anchor = anchorForComment(item);
       const pin = pins.get(item.id);
       if (anchor && pin) {
         pin.style.left = `${anchor.x}px`;
@@ -624,9 +646,9 @@
   };
   window.addEventListener('resize', () => {
     closeInfo();
-    requestAnimationFrame(refreshTextComments);
+    requestAnimationFrame(refreshComments);
   });
-  if (document.fonts?.ready) document.fonts.ready.then(refreshTextComments);
+  if (document.fonts?.ready) document.fonts.ready.then(refreshComments);
 
   const dragHandle = root.querySelector('.sr-drag');
   dragHandle.addEventListener('pointerdown', (event) => {
