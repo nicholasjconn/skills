@@ -109,8 +109,25 @@
   const textButton = root.querySelector('.sr-text-toggle');
   const infoButton = root.querySelector('.sr-info');
   const count = root.querySelector('.sr-count');
-  const comments = __INITIAL_COMMENTS__;
-  const draftClientId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  const initialComments = __INITIAL_COMMENTS__;
+  let draftStorage = null;
+  let draftStorageAccessError = null;
+  try { draftStorage = window.sessionStorage; } catch (error) { draftStorageAccessError = error; }
+  const reportDraftStateError = message => {
+    status.textContent = `Could not preserve review draft across reloads: ${message}`;
+  };
+  const draftSession = __CREATE_DRAFT_SESSION__(
+    draftStorage,
+    `steward-html-review-draft:${endpoint}`,
+    () => crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+    initialComments,
+    reportDraftStateError,
+    __DRAFT_IDENTIFIER_MAX_LENGTH__
+  );
+  if (draftStorageAccessError) reportDraftStateError(draftStorageAccessError.message);
+  const draftClientId = draftSession.clientId;
+  const draftInstanceId = draftSession.instanceId;
+  const comments = draftSession.comments;
   const pins = new Map();
   const highlights = new Map();
   let mode = 'interact';
@@ -121,7 +138,6 @@
   let draftDirty = comments.length > 0;
   let draftSaveTimer = null;
   let draftSavePromise = Promise.resolve();
-  let draftRevision = 0;
   let finished = false;
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
@@ -336,18 +352,22 @@
     if (finished) return draftSavePromise;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
-    draftSavePromise = draftSavePromise.then(async () => {
+    const operation = draftSavePromise.then(async () => {
+      const recoverable = recoverableComments();
+      const handoffCredential = draftSession.handoffCredential;
       const response = await fetch(`${endpoint}/draft`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ client_id: draftClientId, revision: ++draftRevision, comments: recoverableComments() }),
+        body: JSON.stringify({ client_id: draftClientId, instance_id: draftInstanceId, handoff_credential: handoffCredential, revision: draftSession.nextRevision(recoverable), comments: recoverable }),
         keepalive: true
       });
       if (!response.ok) throw new Error(await response.text());
-    }).catch(error => {
+      draftSession.completeHandoff(handoffCredential);
+    });
+    draftSavePromise = operation.catch(error => {
       status.textContent = `Could not save review draft: ${error.message}`;
     });
-    return draftSavePromise;
+    return operation;
   };
   const queueDraftSave = () => {
     if (finished) return;
@@ -627,7 +647,12 @@
     closeInfo();
     closePopup();
     status.textContent = '';
-    const payload = action === 'submit' ? { comments: comments.filter(item => item.comment.trim()) } : {};
+    const payload = {
+      client_id: draftClientId,
+      instance_id: draftInstanceId,
+      handoff_credential: draftSession.handoffCredential,
+      ...(action === 'submit' ? {comments: comments.filter(item => item.comment.trim())} : {})
+    };
     try {
       await saveDraft();
       const response = await fetch(`${endpoint}/${action}`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
@@ -638,7 +663,20 @@
       document.documentElement.innerHTML = `<head><title>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</title></head><body style="font:16px/1.5 system-ui;padding:3rem"><h1>Review ${action === 'submit' ? 'submitted' : 'cancelled'}</h1><p>You can close this tab.</p></body>`;
     } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
   };
-  const heartbeat = () => fetch(`${endpoint}/heartbeat`, { method: 'POST', body: '{}' }).catch(() => {});
+  const heartbeat = async () => {
+    try {
+      const handoffCredential = draftSession.handoffCredential;
+      const response = await fetch(`${endpoint}/heartbeat`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ client_id: draftClientId, instance_id: draftInstanceId, handoff_credential: handoffCredential })
+      });
+      if (!response.ok) throw new Error(await response.text());
+      if (response.status !== 202) draftSession.completeHandoff(handoffCredential);
+    } catch (error) {
+      status.textContent = `Could not connect this review tab: ${error.message}`;
+    }
+  };
   let heartbeatTimer = null;
   const startHeartbeat = () => {
     if (finished || heartbeatTimer) return;
@@ -646,13 +684,21 @@
     heartbeatTimer = setInterval(heartbeat, 15000);
   };
   startHeartbeat();
-  window.addEventListener('pagehide', () => {
-    if (finished) return;
+  window.addEventListener('pagehide', (event) => {
+    if (finished || event.persisted) return;
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     const recoverable = recoverableComments();
-    const body = JSON.stringify({ client_id: draftClientId, revision: ++draftRevision, comments: recoverable });
+    const handoff = draftSession.prepareHandoff(recoverable);
+    const body = JSON.stringify({
+      client_id: draftClientId,
+      instance_id: draftInstanceId,
+      handoff_credential: handoff.reconnectCredential,
+      next_handoff_credential: handoff.handoffCredential,
+      revision: handoff.revision,
+      comments: recoverable
+    });
     const queued = navigator.sendBeacon && navigator.sendBeacon(`${endpoint}/abandon`, new Blob([body], {type: 'application/json'}));
     if (!queued) fetch(`${endpoint}/abandon`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body, keepalive: true });
   });

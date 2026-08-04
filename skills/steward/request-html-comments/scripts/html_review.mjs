@@ -29,6 +29,8 @@ const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 const REVIEW_SAFETY_TIMEOUT_MS = 60 * 60 * 1000
 const TAB_CLOSE_GRACE_MS = 60 * 1000
 const FORCE_CLOSE_GRACE_MS = 250
+export const DRAFT_IDENTIFIER_MAX_LENGTH = 128
+export const EARLY_HANDOFF_CANDIDATE_LIMIT = 4
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.gif', 'image/gif'],
@@ -103,9 +105,87 @@ export function loadRestoredComments(path, source) {
   return payload.comments
 }
 
+export function createDraftSession(storage, key, createId, initialComments = [], reportError = () => {}, maximumIdentifierLength = DRAFT_IDENTIFIER_MAX_LENGTH) {
+  const validIdentifier = value => typeof value === 'string' && value.length > 0 && value.length <= maximumIdentifierLength
+  const validComments = comments => Array.isArray(comments) && comments.every(comment => (
+    comment && typeof comment === 'object' && !Array.isArray(comment)
+    && typeof comment.id === 'string' && comment.id
+    && typeof comment.comment === 'string'
+  ))
+  const validState = value => (
+    value && typeof value === 'object' && !Array.isArray(value)
+    && validIdentifier(value.clientId)
+    && Number.isSafeInteger(value.revision) && value.revision >= 0 && value.revision < Number.MAX_SAFE_INTEGER
+    && validComments(value.comments)
+    && (value.handoffCredential === null || validIdentifier(value.handoffCredential))
+  )
+  let state = null
+  if (!storage) {
+    reportError('Browser session storage is unavailable; draft reload recovery is disabled.')
+  } else {
+    try {
+      const stored = storage.getItem(key)
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (validState(parsed)) state = parsed
+        else reportError('Stored review draft state is invalid; reload recovery was reset.')
+      }
+    } catch (error) {
+      reportError(`Could not read browser session storage; draft reload recovery is disabled: ${error.message}`)
+    }
+  }
+  if (!validComments(initialComments)) throw new Error('initial comments must contain valid comment records')
+  if (!state) state = { clientId: createId(), revision: 0, comments: initialComments, handoffCredential: null }
+  if (!validIdentifier(state.clientId)) throw new Error(`draft client ID must be between 1 and ${maximumIdentifierLength} characters`)
+  const instanceId = createId()
+  if (!validIdentifier(instanceId)) throw new Error(`draft instance ID must be between 1 and ${maximumIdentifierLength} characters`)
+
+  const persist = () => {
+    if (!storage) return
+    try {
+      storage.setItem(key, JSON.stringify(state))
+    } catch (error) {
+      reportError(`Could not write browser session storage; draft reload recovery is disabled: ${error.message}`)
+    }
+  }
+  persist()
+
+  return {
+    clientId: state.clientId,
+    instanceId,
+    get comments() { return state.comments },
+    get handoffCredential() { return state.handoffCredential },
+    get revision() { return state.revision },
+    nextRevision(comments) {
+      if (!validComments(comments)) throw new Error('draft comments must contain valid comment records')
+      if (state.revision >= Number.MAX_SAFE_INTEGER) throw new Error('draft revision cannot be incremented safely')
+      state.revision += 1
+      state.comments = comments
+      persist()
+      return state.revision
+    },
+    prepareHandoff(comments) {
+      const reconnectCredential = state.handoffCredential
+      const revision = this.nextRevision(comments)
+      const handoffCredential = createId()
+      if (!validIdentifier(handoffCredential)) throw new Error(`draft handoff credential must be between 1 and ${maximumIdentifierLength} characters`)
+      state.handoffCredential = handoffCredential
+      persist()
+      return { handoffCredential, reconnectCredential, revision }
+    },
+    completeHandoff(credential) {
+      if (!credential || state.handoffCredential !== credential) return
+      state.handoffCredential = null
+      persist()
+    },
+  }
+}
+
 export function injectHtml(html, endpoint, comments, overlayScript, addBase = false) {
   const serializedComments = JSON.stringify(comments).replaceAll('<', '\\u003c')
   const script = overlayScript
+    .replace('__CREATE_DRAFT_SESSION__', `(${createDraftSession.toString()})`)
+    .replace('__DRAFT_IDENTIFIER_MAX_LENGTH__', String(DRAFT_IDENTIFIER_MAX_LENGTH))
     .replaceAll('__ENDPOINT__', JSON.stringify(endpoint))
     .replace('__INITIAL_COMMENTS__', serializedComments)
   const overlay = `<script>${script}</script>`
@@ -281,16 +361,20 @@ export async function createReviewServer({
   log,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
   tabCloseGraceMs = TAB_CLOSE_GRACE_MS,
+  handoffOrderingGraceMs = tabCloseGraceMs,
 }) {
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
   const initialPath = `${endpoint}/review`
   let draftClient = null
+  let draftInstance = null
+  let pendingHandoffCredential = null
   let lastDraftRevision = -1
   let settled = false
   let settle
   let safetyTimer = null
   let tabCloseTimer = null
+  const earlyHandoffs = new Map()
   let closing = null
   const completion = new Promise(resolveCompletion => { settle = resolveCompletion })
   const sourceRecord = sourceIdentity(source)
@@ -310,10 +394,50 @@ export async function createReviewServer({
     log('info', 'Review tab reconnected before shutdown')
   }
 
-  const scheduleTabClose = () => {
+  const clearEarlyHandoff = credential => {
+    const candidate = earlyHandoffs.get(credential)
+    if (!candidate) return null
+    clearTimeout(candidate.timer)
+    earlyHandoffs.delete(credential)
+    return candidate
+  }
+
+  const validateIdentifier = (value, name, required = true) => {
+    if (!required && (value === null || value === undefined)) return
+    if (typeof value !== 'string' || !value) throw new Error(`${name} must be a nonempty string`)
+    if (value.length > DRAFT_IDENTIFIER_MAX_LENGTH) {
+      throw new Error(`${name} must not exceed ${DRAFT_IDENTIFIER_MAX_LENGTH} characters`)
+    }
+  }
+
+  const queueEarlyHandoff = payload => {
+    const credential = payload.handoff_credential
+    if (typeof credential !== 'string' || !credential) return false
+    if (earlyHandoffs.has(credential)) return earlyHandoffs.get(credential).instanceId === payload.instance_id
+    if (earlyHandoffs.size >= EARLY_HANDOFF_CANDIDATE_LIMIT) {
+      const error = new Error(`too many pending reload handoffs; limit is ${EARLY_HANDOFF_CANDIDATE_LIMIT}`)
+      error.statusCode = 409
+      throw error
+    }
+    const timer = setTimeout(() => earlyHandoffs.delete(credential), handoffOrderingGraceMs)
+    timer.unref()
+    earlyHandoffs.set(credential, { clientId: payload.client_id, instanceId: payload.instance_id, timer })
+    return true
+  }
+
+  const scheduleTabClose = credential => {
     if (tabCloseTimer || settled) return
+    pendingHandoffCredential = credential
+    const earlyHandoff = clearEarlyHandoff(credential)
+    if (earlyHandoff?.clientId === draftClient) {
+      draftInstance = earlyHandoff.instanceId
+      pendingHandoffCredential = null
+      log('info', 'Review tab reconnected after an ordered handoff')
+      return
+    }
     tabCloseTimer = setTimeout(() => {
       tabCloseTimer = null
+      pendingHandoffCredential = null
       if (settled) return
       log('info', 'Review tab remained closed; stopping worker')
       finish('abandon')
@@ -322,22 +446,46 @@ export async function createReviewServer({
     log('info', 'Review tab closed; waiting briefly for reconnection', { grace_ms: tabCloseGraceMs })
   }
 
-  const saveDraft = payload => {
-    if (typeof payload.client_id !== 'string' || !payload.client_id) throw new Error('client_id must be a nonempty string')
-    if (!Number.isInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative integer')
-    if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
-    if (draftClient && payload.client_id !== draftClient) {
+  const claimDraftSession = (payload, allowEarlyHandoff = false) => {
+    validateIdentifier(payload.client_id, 'client_id')
+    validateIdentifier(payload.instance_id, 'instance_id')
+    validateIdentifier(payload.handoff_credential, 'handoff_credential', false)
+    if (!draftClient) {
+      draftClient = payload.client_id
+      draftInstance = payload.instance_id
+      return
+    }
+    if (payload.client_id === draftClient && payload.instance_id !== draftInstance && tabCloseTimer
+      && typeof payload.handoff_credential === 'string' && payload.handoff_credential
+      && payload.handoff_credential === pendingHandoffCredential) {
+      draftInstance = payload.instance_id
+      pendingHandoffCredential = null
+      clearEarlyHandoff(payload.handoff_credential)
+      cancelTabClose()
+      return 'owned'
+    }
+    if (payload.client_id === draftClient && payload.instance_id !== draftInstance && !tabCloseTimer
+      && allowEarlyHandoff && queueEarlyHandoff(payload)) {
+      return 'pending'
+    }
+    if (payload.client_id !== draftClient || payload.instance_id !== draftInstance) {
       const error = new Error('another browser tab owns this review draft')
       error.statusCode = 409
       throw error
     }
+    return 'owned'
+  }
+
+  const saveDraft = payload => {
+    if (!Number.isSafeInteger(payload.revision) || payload.revision < 0) throw new Error('revision must be a nonnegative safe integer')
+    if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
+    claimDraftSession(payload)
     if (payload.revision <= lastDraftRevision) {
       const error = new Error('draft revision is stale')
       error.statusCode = 409
       throw error
     }
     if (!draftOutput) return
-    draftClient = payload.client_id
     writeJsonAtomic(draftOutput, {
       version: 2,
       source: sourceRecord,
@@ -358,24 +506,33 @@ export async function createReviewServer({
     const action = requested.pathname.slice(endpoint.length + 1)
     if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'heartbeat', 'abandon', 'submit', 'cancel'].includes(action)) {
       let payload = {}
+      let responseStatus = 200
+      let responseBody = '{"ok":true}'
       try {
         const content = await readRequestBody(request)
         payload = content ? JSON.parse(content) : {}
         if (action === 'draft' || action === 'abandon') {
+          if (action === 'abandon') validateIdentifier(payload.next_handoff_credential, 'next_handoff_credential')
           saveDraft(payload)
-          if (action === 'abandon') scheduleTabClose()
+          if (action === 'abandon') scheduleTabClose(payload.next_handoff_credential)
         } else if (action === 'heartbeat') {
-          cancelTabClose()
+          if (claimDraftSession(payload, true) === 'pending') {
+            responseStatus = 202
+            responseBody = '{"ok":false,"pending":true}'
+          }
         } else if (action === 'submit') {
           if (!Array.isArray(payload.comments)) throw new Error('comments must be a list')
+          claimDraftSession(payload)
           finish(action, payload.comments)
           log('info', 'Review submitted', { comments: payload.comments.length })
-        } else if (!settled) {
+        } else {
+          claimDraftSession(payload)
+          if (settled) throw new Error('review is already complete')
           finish(action)
           log('info', 'Review cancelled')
         }
-        response.writeHead(200, { 'content-type': 'application/json' })
-        response.end('{"ok":true}')
+        response.writeHead(responseStatus, { 'content-type': 'application/json' })
+        response.end(responseBody)
       } catch (error) {
         if (error.statusCode === 409) {
           log('error', error.message === 'draft revision is stale' ? 'Rejected stale draft revision' : 'Rejected conflicting draft writer', {
@@ -447,6 +604,8 @@ export async function createReviewServer({
       closing = (async () => {
         if (safetyTimer) clearTimeout(safetyTimer)
         if (tabCloseTimer) clearTimeout(tabCloseTimer)
+        for (const candidate of earlyHandoffs.values()) clearTimeout(candidate.timer)
+        earlyHandoffs.clear()
         const closed = new Promise(resolveClose => server.close(() => resolveClose()))
         for (const resource of activeResources) resource.destroy()
         const forceCloseTimer = setTimeout(() => {
