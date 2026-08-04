@@ -7,14 +7,14 @@ When a leaf skill name exists in more than one group, install it with its
 namespaced `<group>/<skill>` identifier. For example:
 
 ```bash
-gh skill install nicholasjconn/skills steward/request-html-comments
+gh skill install nicholasjconn/skills tools/request-html-comments
 ```
 
-The current Steward skills are:
+## Steward
 
-- [`fact-check`](skills/steward/fact-check/)
-- [`request-html-comments`](skills/steward/request-html-comments/)
-- [`x-write`](skills/steward/x-write/)
+- [`fact-check`](skills/steward/fact-check/): Produces a cited, claim-by-claim evidence report for content that needs verification.
+- [`x-write`](skills/steward/x-write/): Turns Nick's rough dictation or source material into a draft X post or reply.
 
-The expected source for `request-html-comments` is
-[`skills/steward/request-html-comments`](https://github.com/nicholasjconn/skills/tree/main/skills/steward/request-html-comments).
+## Tools
+
+- [`request-html-comments`](skills/tools/request-html-comments/): Collects element- and text-linked feedback on local HTML through an interactive browser overlay.
