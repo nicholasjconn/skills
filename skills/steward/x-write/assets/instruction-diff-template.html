@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="instruction-diff-template.css">
+  <title>Stacked instruction comparison template</title>
+</head>
+<body>
+  <section class="asset-canvas" aria-label="Original and revised instruction excerpts">
+    <div class="frame">
+      <header class="editor-topbar">
+        <div class="traffic-lights" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="tab">implement/SKILL.md</div>
+      </header>
+      <div class="editor-body stacked-comparison-editor">
+        <div class="comparison-stack">
+          <section class="comparison-block original" aria-label="Original instruction excerpt">
+            <div class="block-label">Original</div>
+            <div class="code-row no-number section"><span class="code-text">## Implementation</span></div>
+            <div class="code-row no-number removed"><span class="code-text">Update the plan to address any findings you agree with.</span></div>
+            <div class="code-row no-number collapsed"><span class="code-text" aria-label="Unchanged lines omitted">⋮</span></div>
+            <div class="code-row no-number section"><span class="code-text">## Finish</span></div>
+            <div class="code-row no-number removed"><span class="code-text">Resolve any gaps, <span class="inline-delete">repeat any invalidated review,</span> and run required checks before reporting completion.</span></div>
+          </section>
+          <section class="comparison-block revised" aria-label="Revised instruction excerpt">
+            <div class="block-label">Revised</div>
+            <div class="code-row no-number section"><span class="code-text">## Implementation</span></div>
+            <div class="code-row no-number added"><span class="code-text">Update the plan to address any findings you agree with. <span class="inline-add">Do not repeat plan review.</span></span></div>
+            <div class="code-row no-number collapsed"><span class="code-text" aria-label="Unchanged lines omitted">⋮</span></div>
+            <div class="code-row no-number section"><span class="code-text">## Finish</span></div>
+            <div class="code-row no-number added"><span class="code-text">Resolve any gaps and run required checks before reporting completion.</span></div>
+          </section>
+        </div>
+      </div>
+      <footer class="editor-status">
+        <span class="source-pill">@nicholasjconn</span>
+        <span class="status-label">Lowering costs</span>
+      </footer>
+    </div>
+  </section>
+</body>
+</html>

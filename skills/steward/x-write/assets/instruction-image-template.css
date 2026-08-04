@@ -4,6 +4,7 @@
   --instruction-ink: #0f172a;
   --instruction-blue: #2563eb;
   --instruction-code: #172033;
+  --instruction-tab: #263449;
   --instruction-code-ink: #f8fafc;
   --instruction-code-muted: #94a3b8;
 }
@@ -66,7 +67,9 @@
   min-width: 345px;
   padding: 26px 36px 24px;
   border-top: 3px solid var(--instruction-blue);
-  background: var(--instruction-code);
+  border-right: 1px solid #475569;
+  border-left: 1px solid #475569;
+  background: var(--instruction-tab);
   color: var(--instruction-code-ink);
   font: 700 38px/1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
