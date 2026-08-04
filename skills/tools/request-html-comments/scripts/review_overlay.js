@@ -26,7 +26,7 @@
 #steward-review-root .sr-add:hover, #steward-review-root .sr-add[aria-pressed="true"], #steward-review-root .sr-text-toggle:hover, #steward-review-root .sr-text-toggle[aria-pressed="true"] { background: #1d4ed8; }
 #steward-review-root .sr-add[aria-pressed="true"], #steward-review-root .sr-text-toggle[aria-pressed="true"] { box-shadow: 0 0 0 3px rgba(96,165,250,.42); }
 #steward-review-root .sr-text-toggle { width: 38px; padding: 0; font-family: Georgia,serif; font-size: 17px; font-weight: 700; text-decoration: underline; text-decoration-color: #facc15; text-decoration-thickness: 3px; text-underline-offset: 3px; }
-#steward-review-root .sr-plus { font-size: 18px; font-weight: 500; transform: translateY(-1px); }
+#steward-review-root .sr-plus { display: grid; width: 18px; height: 18px; place-items: center; font-size: 18px; font-weight: 500; line-height: 1; }
 #steward-review-root .sr-count { display: grid; min-width: 22px; height: 22px; place-items: center; margin-left: 1px; padding: 0 6px; color: #dbeafe; background: rgba(15,23,42,.28); border: 1px solid rgba(255,255,255,.16); border-radius: 999px; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); font-size: 11px; font-weight: 800; }
 #steward-review-root .sr-send { gap: 6px; padding-inline: 12px; }
 #steward-review-root .sr-send:hover { color: #fff; background: #15803d; }
