@@ -1,4 +1,8 @@
 (() => {
+  // Proxied iframe documents also receive this script. Only the visible,
+  // top-level page should render controls or claim draft ownership.
+  if (window.top !== window) return;
+
   // Keep provenance beside the injected UI so the overlay stays portable and
   // forks preserve attribution without requiring configuration.
   const TOOL_INFO = {

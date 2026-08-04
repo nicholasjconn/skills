@@ -20,7 +20,7 @@ import {
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
-import { dirname, extname, resolve, sep } from 'node:path'
+import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
@@ -111,7 +111,7 @@ export function loadRestoredComments(path, source) {
   return payload.comments
 }
 
-export function injectHtml(html, endpoint, comments, overlayScript, addBase = false) {
+export function injectHtml(html, endpoint, comments, overlayScript) {
   const serializedComments = JSON.stringify(comments).replaceAll('<', '\\u003c')
   // Replacement callbacks keep `$&` and friends inside comment text literal
   // rather than letting them expand as replacement patterns.
@@ -121,11 +121,11 @@ export function injectHtml(html, endpoint, comments, overlayScript, addBase = fa
   const overlay = `<script>${script}</script>`
   let rendered = html
   const needsFavicon = !/<link\b[^>]*\brel\s*=\s*["'][^"']*\bicon\b[^"']*["']/i.test(rendered)
-  const headAdditions = `${addBase ? '<base href="/">' : ''}${needsFavicon ? '<link rel="icon" href="data:,">' : ''}`
-  if (headAdditions) {
+  if (needsFavicon) {
     const match = /<head(?:\s[^>]*)?>/i.exec(rendered)
-    if (match) rendered = `${rendered.slice(0, match.index + match[0].length)}${headAdditions}${rendered.slice(match.index + match[0].length)}`
-    else rendered = `${headAdditions}${rendered}`
+    const favicon = '<link rel="icon" href="data:,">'
+    if (match) rendered = `${rendered.slice(0, match.index + match[0].length)}${favicon}${rendered.slice(match.index + match[0].length)}`
+    else rendered = `${favicon}${rendered}`
   }
   const bodyEnd = rendered.toLowerCase().lastIndexOf('</body>')
   return bodyEnd < 0 ? `${rendered}${overlay}` : `${rendered.slice(0, bodyEnd)}${overlay}${rendered.slice(bodyEnd)}`
@@ -213,10 +213,8 @@ function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   return proxied
 }
 
-function proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources) {
-  const upstreamPath = requested.pathname === initialPath
-    ? `${source.url.pathname}${source.url.search}`
-    : `${requested.pathname}${requested.search}`
+function proxyRequest(request, response, requested, source, inject, log, activeResources) {
+  const upstreamPath = `${requested.pathname}${requested.search}`
   const upstream = httpRequest({
     hostname: upstreamHostname(source.url.hostname),
     port: source.url.port || 80,
@@ -295,7 +293,10 @@ export async function createReviewServer({
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
-  const initialPath = `${endpoint}/review`
+  // Present the document at its original pathname so the browser resolves
+  // relative assets, links, forms, and explicit <base> elements normally.
+  const reviewPath = source.type === 'file' ? `/${encodeURIComponent(basename(source.path))}` : source.url.pathname
+  const reviewSearch = source.type === 'url' ? source.url.search : ''
   let draftClient = null
   let draftComments = initialComments
   let lastDraftRevision = -1
@@ -419,9 +420,9 @@ export async function createReviewServer({
       return
     }
 
-    const inject = html => injectHtml(html, endpoint, draftComments, overlayScript, source.type === 'file')
+    const inject = html => injectHtml(html, endpoint, draftComments, overlayScript)
     if (source.type === 'file') {
-      if (request.method === 'GET' && requested.pathname === initialPath) {
+      if (request.method === 'GET' && requested.pathname === reviewPath) {
         try {
           // Latin-1 provides a one-byte round trip, preserving the source
           // file's bytes while appending the ASCII overlay script.
@@ -441,7 +442,7 @@ export async function createReviewServer({
       serveStaticAsset(request, response, dirname(source.path), log)
       return
     }
-    proxyRequest(request, response, requested, source, initialPath, inject, log, activeResources)
+    proxyRequest(request, response, requested, source, inject, log, activeResources)
   })
 
   server.on('connection', socket => {
@@ -458,7 +459,7 @@ export async function createReviewServer({
     server.listen(0, '127.0.0.1', resolveListen)
   })
   const address = server.address()
-  const reviewUrl = `http://127.0.0.1:${address.port}${initialPath}`
+  const reviewUrl = `http://127.0.0.1:${address.port}${reviewPath}${reviewSearch}`
   log('info', 'Review server ready', { review_url: reviewUrl })
   safetyTimer = setTimeout(() => {
     if (settled) return

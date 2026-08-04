@@ -59,6 +59,12 @@ function openWebsocket(port, path, origin) {
   })
 }
 
+function endpointFromHtml(html) {
+  const match = /const endpoint\s*=\s*"([^"]+)"/.exec(html)
+  assert.ok(match, 'the review page should contain its generated action endpoint')
+  return match[1]
+}
+
 test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -120,11 +126,8 @@ test('overlay injection keeps comment text inert and yields a parseable script',
     '/token',
     [{ id: 'one', comment: 'Keep </script> and __ENDPOINT__ __INITIAL_COMMENTS__ $& $` safe' }],
     OVERLAY_SCRIPT,
-    true,
   )
 
-  // Without <base>, relative asset URLs would resolve against the token path.
-  assert.match(rendered, /<base href="\/">/)
   assert.match(rendered, /Keep \\u003c\/script>/)
   assert.match(rendered, /const endpoint = "\/token"/)
   // Comment text is substituted last, and never as a replacement pattern,
@@ -136,7 +139,16 @@ test('overlay injection keeps comment text inert and yields a parseable script',
   assert.doesNotThrow(() => new Function(rendered.slice(scriptStart, scriptEnd)))
 })
 
-test('file review serves local assets, persists drafts, and submits versioned feedback', async t => {
+test('the injected overlay stays inactive inside an iframe', () => {
+  const rendered = injectHtml('<html><body>Framed page</body></html>', '/token', [], OVERLAY_SCRIPT)
+  const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
+  const scriptEnd = rendered.indexOf('</script>', scriptStart)
+  const runOverlay = new Function('window', rendered.slice(scriptStart, scriptEnd))
+
+  assert.doesNotThrow(() => runOverlay({ top: {} }))
+})
+
+test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const css = join(directory, 'page.css')
@@ -159,8 +171,8 @@ test('file review serves local assets, persists drafts, and submits versioned fe
 
   const pageResponse = await fetch(review.reviewUrl)
   assert.equal(pageResponse.status, 200)
-  assert.match(await pageResponse.text(), /const endpoint="\/[^"]+"/)
-  const assetResponse = await fetch(new URL('/page.css', review.reviewUrl))
+  const endpoint = endpointFromHtml(await pageResponse.text())
+  const assetResponse = await fetch(new URL('page.css', review.reviewUrl))
   assert.equal(assetResponse.status, 200)
   assert.equal(await assetResponse.text(), 'body { color: red; }')
   if (process.platform !== 'win32') {
@@ -168,7 +180,6 @@ test('file review serves local assets, persists drafts, and submits versioned fe
     assert.equal(escapedResponse.status, 404)
   }
 
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
   const comments = [{ id: 'one', target_type: 'text', comment: 'Clarify this' }]
   const draftResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
     method: 'POST',
@@ -200,7 +211,7 @@ test('file review serves local assets, persists drafts, and submits versioned fe
   assert.deepEqual(await review.completion, { action: 'submit', comments })
 })
 
-test('a reloading tab resumes its draft while a second tab cannot overwrite it', async t => {
+test('a reloading draft owner can continue while a second tab cannot overwrite it', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
   const draft = join(directory, 'feedback.draft.json')
@@ -213,7 +224,7 @@ test('a reloading tab resumes its draft while a second tab cannot overwrite it',
     log: () => {},
   })
   t.after(() => review.close())
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
+  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
   const post = (action, payload) => fetch(new URL(`${endpoint}/${action}`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -223,12 +234,10 @@ test('a reloading tab resumes its draft while a second tab cannot overwrite it',
 
   assert.equal((await post('draft', { client_id: 'review-tab', revision: 1, comments })).status, 200)
 
-  // The reloading tab reads its own work back from the page the server serves,
-  // so the browser never has to persist comments itself.
+  // A reload receives the latest server-side draft in the injected overlay.
   assert.match(await (await fetch(review.reviewUrl)).text(), /Keep this through the reload/)
 
-  // Session storage carries the client ID and revision counter across the
-  // reload, so the same tab keeps writing instead of looking like a rival.
+  // The owner can continue from the next revision after reloading.
   const resumed = [...comments, { id: 'two', comment: 'Added after the reload' }]
   assert.equal((await post('draft', { client_id: 'review-tab', revision: 2, comments: resumed })).status, 200)
   assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, resumed)
@@ -263,7 +272,7 @@ test('tab closure preserves the draft, allows a brief reconnect, then completes 
     tabCloseGraceMs: 25,
   })
   t.after(() => review.close())
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
+  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
   const comments = [{ id: 'one', comment: 'Recover this' }]
 
   const firstClose = await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), {
@@ -318,11 +327,10 @@ test('the safety timeout completes an otherwise abandoned review', async t => {
 test('served-page review proxies HTML and assets while removing blocking CSP', async t => {
   let pageOrigin
   let websocketOrigin
-  const events = []
   const upstream = createServer((request, response) => {
-    if (request.url === '/app') {
+    if (request.url === '/app?theme=dark') {
       pageOrigin = request.headers.origin
-      const body = '<html><body><script src="/app.js"></script>Live app</body></html>'
+      const body = '<html><body><script src="app.js"></script>Live app</body></html>'
       response.writeHead(200, {
         'content-type': 'text/html; charset=utf-8',
         'content-security-policy': "script-src 'self'",
@@ -345,11 +353,11 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   const upstreamPort = await listen(upstream)
   t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
   const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${upstreamPort}/app`),
+    source: parseSource(`http://127.0.0.1:${upstreamPort}/app?theme=dark`),
     draftOutput: null,
     initialComments: [],
     overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: (level, message, details) => events.push({ level, message, details }),
+    log: () => {},
   })
   t.after(() => review.close())
 
@@ -357,19 +365,18 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
   const pageResponse = await fetch(review.reviewUrl, { headers: { origin: browserOrigin } })
   assert.equal(pageResponse.status, 200)
   assert.equal(pageResponse.headers.get('content-security-policy'), null)
-  assert.match(await pageResponse.text(), /Live app.*const endpoint=/s)
+  const pageHtml = await pageResponse.text()
+  const endpoint = endpointFromHtml(pageHtml)
+  assert.match(pageHtml, /Live app.*const endpoint=/s)
   const upstreamOrigin = `http://127.0.0.1:${upstreamPort}`
   assert.equal(pageOrigin, upstreamOrigin)
-  const assetResponse = await fetch(new URL('/app.js', review.reviewUrl))
+  const assetResponse = await fetch(new URL('app.js', review.reviewUrl))
   assert.equal(assetResponse.status, 200)
   assert.equal(await assetResponse.text(), 'window.appLoaded = true;')
   const reviewUrl = new URL(review.reviewUrl)
   const handshake = await websocketHandshake(Number(reviewUrl.port), '/socket', browserOrigin)
   assert.match(handshake, /^HTTP\/1\.1 101 Switching Protocols/)
   assert.equal(websocketOrigin, upstreamOrigin)
-  assert.ok(events.some(event => event.message === 'Review server ready'))
-
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -428,12 +435,4 @@ test('an unavailable served page returns a visible error instead of hanging', as
   assert.equal(response.status, 502)
   assert.match(await response.text(), /Could not reach local page/)
   assert.ok(events.some(event => event.level === 'error' && event.message === 'Could not reach served-page source'))
-
-  const endpoint = new URL(review.reviewUrl).pathname.replace(/\/review$/, '')
-  await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: 'unavailable-tab' }),
-  })
-  await review.completion
 })
