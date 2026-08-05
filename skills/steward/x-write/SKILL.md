@@ -156,9 +156,14 @@ changed revised lines in muted green, with only the removed or added phrase in
 darker red or green.
 
 Visual comparisons must use the shared 412×515 preview helper with real,
-complete content; its mobile rule may reduce the preview to 336×420. Final
-post-package HTML must reference the canonical stylesheet by repository-relative
-path and contain no `<style>` block.
+complete content; its mobile rule may reduce the preview to 336×420.
+
+A post package is self-contained: copy the stylesheet it needs into the
+package's own `assets/`, reference it by bare filename, and use no `<style>`
+block. Never reach across trees with a `../../..` path or a repo-root path — the
+file is opened directly to capture the image, so only a sibling reference is
+reliable. The copy is a frozen snapshot alongside the exported image; do not
+edit it to restyle a published package.
 
 ### 5. Record language approval
 
