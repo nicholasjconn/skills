@@ -9,6 +9,14 @@
   --instruction-code-muted: #94a3b8;
 }
 
+html,
+body {
+  margin: 0;
+  min-width: 1200px;
+  background: var(--instruction-page);
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
 .asset-canvas,
 .asset-canvas * {
   box-sizing: border-box;

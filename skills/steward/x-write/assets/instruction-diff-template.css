@@ -1,13 +1,5 @@
 @import url("instruction-image-template.css");
 
-html,
-body {
-  margin: 0;
-  min-width: 1200px;
-  background: var(--instruction-page);
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
 .editor-body.stacked-comparison-editor {
   min-height: 0;
   overflow: hidden;
