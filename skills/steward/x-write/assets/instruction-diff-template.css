@@ -1,0 +1,127 @@
+@import url("instruction-image-template.css");
+
+.editor-body.stacked-comparison-editor {
+  min-height: 0;
+  overflow: hidden;
+  background: var(--instruction-code);
+}
+
+.comparison-stack {
+  padding: 17px 0 0;
+}
+
+.comparison-block + .comparison-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 4px solid #475569;
+}
+
+.block-label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 48px 10px;
+  color: #cbd5e1;
+  font: 800 32px/1 Menlo, Monaco, Consolas, monospace;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+
+.block-label::before {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fb7185;
+  content: "";
+}
+
+.comparison-block.revised .block-label::before { background: #4ade80; }
+
+.code-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  min-height: 50px;
+}
+
+.code-row.no-number {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.line-number,
+.code-text {
+  min-width: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.code-row.no-number .code-text {
+  grid-column: 1;
+  padding-left: 48px;
+}
+
+.code-row.collapsed {
+  min-height: 42px;
+}
+
+.code-row.collapsed .code-text {
+  color: #64748b;
+  font-size: 36px;
+  line-height: 42px;
+}
+
+.line-number {
+  padding-right: 12px;
+  color: #64748b;
+  border-right: 1px solid #253044;
+  font: 500 22px/50px Menlo, Monaco, Consolas, monospace;
+  text-align: right;
+  user-select: none;
+}
+
+.code-text {
+  padding-right: 42px;
+  padding-left: 28px;
+  color: #e2e8f0;
+  font: 500 40px/50px Menlo, Monaco, Consolas, monospace;
+  font-variant-ligatures: none;
+  letter-spacing: -.45px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-row.section .code-text {
+  color: #fbbf24;
+  font-weight: 800;
+}
+
+.code-row.blank { min-height: 24px; }
+.code-row.blank .line-number,
+.code-row.blank .code-text { padding-top: 0; padding-bottom: 0; }
+
+.code-row.removed .line-number,
+.code-row.removed .code-text {
+  background: rgb(90 53 61 / 42%);
+  color: #fecdd3;
+}
+
+.code-row.added .line-number,
+.code-row.added .code-text {
+  background: rgb(28 89 64 / 42%);
+  color: #bbf7d0;
+}
+
+.code-row.removed .line-number,
+.code-row.added .line-number { border-right-color: transparent; }
+
+.inline-delete,
+.inline-add {
+  margin: 0 -3px;
+  padding: 2px 3px 3px;
+  border-radius: 4px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  font-weight: 900;
+}
+
+.inline-delete { background: #641f28; color: #fff1f2; }
+.inline-add { background: #0f4829; color: #f0fdf4; }
