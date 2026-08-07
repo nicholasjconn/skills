@@ -1,6 +1,6 @@
 ---
 name: request-html-comments
-description: Use to request and return element- or text-linked comments on a local HTML file or loopback-served page through an interactive browser overlay. Trigger when the user wants to comment on or annotate local HTML. Do not use for remote URLs, browser automation, or code review.
+description: Use to request, return, and immediately address element- or text-linked comments on a local HTML file or loopback-served page through an interactive browser overlay. Trigger when the user wants to comment on or annotate local HTML and expects the submitted feedback to be implemented. Do not use for remote URLs, browser automation, or code review.
 ---
 
 # Request HTML Comments
@@ -16,6 +16,9 @@ description: Use to request and return element- or text-linked comments on a loc
   `http://localhost:3000/page`. The review server proxies requests to that
   origin, including assets, APIs, and WebSockets, and preserves client
   rerenders.
+- Keep review-toolbar, comment-editor, pin, and information-panel interactions
+  isolated from the reviewed page. Clicking or typing in review UI must not
+  trigger page controls, outside-click dismissal, shortcuts, or analytics.
 
 ## Launch
 
@@ -68,6 +71,13 @@ conversation; the user must send another chat message.
   asks. Identify recovered comments as autosaved, not submitted.
 - **Review cancelled:** Do not recover the draft unless the user asks.
 
-## Return
+## Return and Address
 
 - Return every comment with its target data intact.
+- Treat submitted feedback as authorization to address the comments immediately.
+  Do not wait for a separate implementation request.
+- Inspect the linked targets, apply each safe in-scope change, and verify the
+  result according to the host repository's workflow.
+- Stop for the user's decision only when a comment introduces a substantive
+  tradeoff, expands scope, or requires authority the user has not granted.
+- Report each comment's disposition and the verification performed.
