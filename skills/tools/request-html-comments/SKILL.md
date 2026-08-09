@@ -71,3 +71,4 @@ conversation; the user must send another chat message.
 ## Return
 
 - Return every comment with its target data intact.
+- Address the comments once submitted.

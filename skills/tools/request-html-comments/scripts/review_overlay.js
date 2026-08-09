@@ -130,11 +130,34 @@
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
   const isOverlay = (node) => node instanceof Element && Boolean(node.closest('.steward-review-ui'));
+  // Review controls must be inert from the host page's perspective. Let each
+  // control receive the event, then stop it at the nearest review UI boundary
+  // before document-level outside-click handlers, shortcuts, or analytics do.
+  const shieldReviewUi = (node) => {
+    for (const eventName of [
+      'pointerdown', 'pointerup', 'mousedown', 'mouseup',
+      'touchstart', 'touchend', 'click', 'dblclick', 'contextmenu',
+      'focusin', 'focusout', 'keydown', 'keyup', 'input', 'change', 'submit'
+    ]) {
+      node.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+  };
+  shieldReviewUi(root);
   const visible = (node) => {
     if (!(node instanceof Element) || isOverlay(node)) return false;
     const style = getComputedStyle(node);
     const rect = node.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  // `showModal()` sets neither role nor aria-modal, so native dialogs need
+  // their own selector to be found alongside library-rendered modals.
+  const MODAL_HOST_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog[open]';
+  const activeModalHost = () => {
+    const focusedDialog = document.activeElement instanceof Element
+      ? document.activeElement.closest(MODAL_HOST_SELECTOR)
+      : null;
+    if (focusedDialog && visible(focusedDialog)) return focusedDialog;
+    return [...document.querySelectorAll(MODAL_HOST_SELECTOR)].filter(visible).at(-1) || null;
   };
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {
@@ -206,6 +229,7 @@
         </svg>
       </a>
     `;
+    shieldReviewUi(infoPanel);
     // Keep fixed positioning outside the transformed toolbar; that transform
     // would otherwise create a different containing block before first drag.
     document.documentElement.appendChild(infoPanel);
@@ -437,6 +461,7 @@
     pin.style.left = `${anchor.x}px`;
     pin.style.top = `${anchor.y}px`;
     pin.setAttribute('aria-label', `Open comment ${comments.indexOf(item) + 1}`);
+    shieldReviewUi(pin);
     pin.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); openPopup(item, event.clientX, event.clientY); });
     document.documentElement.appendChild(pin);
     pins.set(item.id, pin);
@@ -503,16 +528,32 @@
       </div>
       <div class="sr-error" role="status"></div>
     `;
-    document.documentElement.appendChild(popup);
+    shieldReviewUi(popup);
+    // Focus-trapping dialog libraries reject focus outside their content.
+    // Keep the editor inside the active dialog so its textarea remains usable
+    // without weakening the page's production modal behavior.
+    const popupHost = activeModalHost() || document.documentElement;
+    popupHost.appendChild(popup);
     draft = item ? { item } : {
       ...target,
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
       created_at: new Date().toISOString()
     };
     const placePopup = (left, top) => {
+      const hostRect = popupHost === document.documentElement
+        ? { left: 0, top: 0 }
+        : popupHost.getBoundingClientRect();
+      const scrollLeft = popupHost === document.documentElement ? 0 : popupHost.scrollLeft;
+      const scrollTop = popupHost === document.documentElement ? 0 : popupHost.scrollTop;
+      const hostWidth = popupHost === document.documentElement ? window.innerWidth : popupHost.clientWidth;
+      const hostHeight = popupHost === document.documentElement ? window.innerHeight : popupHost.clientHeight;
+      const minimumX = scrollLeft + 12;
+      const minimumY = scrollTop + 12;
+      const maximumX = Math.max(minimumX, scrollLeft + hostWidth - popup.offsetWidth - 12);
+      const maximumY = Math.max(minimumY, scrollTop + hostHeight - popup.offsetHeight - 12);
       const position = {
-        x: Math.round(clamp(left, 12, window.innerWidth - popup.offsetWidth - 12)),
-        y: Math.round(clamp(top, 12, window.innerHeight - popup.offsetHeight - 12))
+        x: Math.round(clamp(left - hostRect.left + scrollLeft, minimumX, maximumX)),
+        y: Math.round(clamp(top - hostRect.top + scrollTop, minimumY, maximumY))
       };
       popup.style.left = `${position.x}px`;
       popup.style.top = `${position.y}px`;
