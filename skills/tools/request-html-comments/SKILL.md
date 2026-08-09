@@ -71,5 +71,4 @@ conversation; the user must send another chat message.
 ## Return
 
 - Return every comment with its target data intact.
-- Address the comments without requiring additional user input, following the
-  other rules you have.
+- Address the comments without requiring additional user input.
