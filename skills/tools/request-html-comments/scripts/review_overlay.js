@@ -149,12 +149,15 @@
     const rect = node.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
+  // `showModal()` sets neither role nor aria-modal, so native dialogs need
+  // their own selector to be found alongside library-rendered modals.
+  const MODAL_HOST_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog[open]';
   const activeModalHost = () => {
     const focusedDialog = document.activeElement instanceof Element
-      ? document.activeElement.closest('[role="dialog"], [aria-modal="true"]')
+      ? document.activeElement.closest(MODAL_HOST_SELECTOR)
       : null;
     if (focusedDialog && visible(focusedDialog)) return focusedDialog;
-    return [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')].filter(visible).at(-1) || null;
+    return [...document.querySelectorAll(MODAL_HOST_SELECTOR)].filter(visible).at(-1) || null;
   };
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {

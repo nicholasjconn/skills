@@ -1,4 +1,4 @@
 interface:
   display_name: "Request HTML Comments"
-  short_description: "Collect and address comments on local HTML"
-  default_prompt: "Use $request-html-comments to collect and address my comments on a local HTML file or loopback-served page."
+  short_description: "Collect comments on local HTML in a browser"
+  default_prompt: "Use $request-html-comments to collect my comments on a local HTML file or loopback-served page."
