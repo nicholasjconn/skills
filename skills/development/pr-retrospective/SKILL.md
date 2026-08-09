@@ -18,7 +18,7 @@ Review merged GitHub PRs and post machine-readable retrospective comments.
   range (`601-614`), a mix, or no PR input.
 - A PR is eligible only when its metadata has a non-null `mergedAt`.
 - With explicit input, de-duplicate the requested PRs and inspect their metadata.
-  Record unmerged PRs as `skipped-unmerged` in `summary.md`. Process only
+  Record unmerged PRs as `skipped-unmerged` in the run summary. Process only
   eligible PRs, sorted by `mergedAt` from oldest to newest.
 - With no input, scan recent merged PRs by `mergedAt` from newest to oldest.
 - During backfill, pause after fully reviewing 20 eligible PRs without markers
@@ -155,16 +155,17 @@ result more closely matches the band's upper end.
      unscorable.
 3. For each eligible PR not skipped in step 2, gather `Evidence`, read the
    changed code paths, and check whether later PRs changed the reviewed behavior.
-   Record notes in `summary.md` before scoring.
+   Record notes in the run summary before scoring.
 4. Score each key against the `Rubric`, calibrating across PRs when a range is
    given. Build and validate the complete comment against `Contract` and
    `Comment format` before writing it. Reject missing or extra fields, invalid
    schema or score keys, non-integer or out-of-range scores, and invalid summary
-   content. Then write the `pr-<number>.md` body and append the `scores.jsonl`
-   line.
+   content. Then write the comment file and append the scores file.
 5. Run `gh pr comment <url> --body-file <comment_file>` for each scored PR.
    Posting is part of the skill even when the user did not explicitly request
-   it. Record the posted comment URL in `summary.md`.
+   it. Record the posted comment URL in the run summary. After any posting
+   failure, check again for a marker before retrying. If one exists, record its
+   comment URL and do not retry; otherwise record the failure in the run summary.
 
 ## Finish
 
