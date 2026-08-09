@@ -10,6 +10,10 @@ namespaced `<group>/<skill>` identifier. For example:
 gh skill install nicholasjconn/skills tools/request-html-comments
 ```
 
+## Development
+
+- [`pr-retrospective`](skills/development/pr-retrospective/): Scores merged GitHub PRs and posts structured retrospective comments.
+
 ## Steward
 
 - [`fact-check`](skills/steward/fact-check/): Produces a cited, claim-by-claim evidence report for content that needs verification.
