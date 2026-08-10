@@ -15,7 +15,7 @@
 .steward-review-ui, .steward-review-ui * { box-sizing: border-box; }
 #steward-review-root { position: fixed; z-index: 2147483647; top: 22px; left: 50%; display: flex; align-items: center; gap: 5px; min-height: 50px; padding: 6px; color: #f8fafc; background: rgba(15,23,42,.96); border: 1px solid rgba(255,255,255,.18); border-radius: 999px; box-shadow: 0 16px 44px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.18); transform: translateX(-50%); animation: steward-review-enter .18s ease-out; font: 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; backdrop-filter: blur(14px); user-select: none; }
 #steward-review-root button, .steward-review-popup button { appearance: none; margin: 0; text-transform: none; letter-spacing: normal; white-space: nowrap; }
-#steward-review-root button { display: inline-flex; align-items: center; justify-content: center; height: 38px; cursor: pointer; border: 0; border-radius: 999px; padding: 0 13px; color: #e2e8f0; background: transparent; transition: background .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease; font: 650 13px/1 inherit; }
+#steward-review-root button { appearance: none; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: none; height: 38px; cursor: pointer; margin: 0; border: 0; border-radius: 999px; padding: 0 13px; color: #e2e8f0; background: transparent; transition: background .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease; font: inherit; font-size: 13px; font-weight: 650; line-height: 1; text-transform: none; letter-spacing: normal; white-space: nowrap; }
 #steward-review-root button:hover { color: #fff; background: rgba(255,255,255,.1); }
 #steward-review-root button:active { transform: scale(.96); }
 #steward-review-root button:focus-visible, .steward-review-popup button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
@@ -53,7 +53,7 @@
 .steward-review-popup .sr-popup-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; }
 .steward-review-popup .sr-hint { color: #64748b; font-size: 11px; }
 .steward-review-popup .sr-popup-actions { display: flex; gap: 6px; }
-.steward-review-popup button { cursor: pointer; border: 0; border-radius: 8px; padding: 7px 10px; font: 700 12px/1 inherit; }
+.steward-review-popup button { appearance: none; flex: 0 0 auto; width: auto; min-width: 0; max-width: none; height: auto; cursor: pointer; margin: 0; border: 0; border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 12px; font-weight: 700; line-height: 1; text-transform: none; letter-spacing: normal; white-space: nowrap; }
 .steward-review-popup .sr-delete { color: #b91c1c; background: #fee2e2; }
 .steward-review-popup .sr-delete:hover { background: #fecaca; }
 .steward-review-popup .sr-save { color: #fff; background: #2563eb; }
