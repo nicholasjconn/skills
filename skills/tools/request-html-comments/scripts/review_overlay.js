@@ -176,7 +176,7 @@
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['open', 'role', 'aria-modal']
+    attributeFilter: ['open', 'role', 'aria-modal', 'class', 'style', 'hidden']
   });
   syncOverlayHost();
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
