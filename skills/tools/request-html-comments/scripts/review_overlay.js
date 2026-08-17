@@ -13,7 +13,8 @@
 
   const overlayCss = String.raw`
 .steward-review-ui, .steward-review-ui * { box-sizing: border-box; }
-#steward-review-root { position: fixed; z-index: 2147483647; top: 22px; left: 50%; display: flex; align-items: center; gap: 5px; min-height: 50px; padding: 6px; color: #f8fafc; background: rgba(15,23,42,.96); border: 1px solid rgba(255,255,255,.18); border-radius: 999px; box-shadow: 0 16px 44px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.18); transform: translateX(-50%); animation: steward-review-enter .18s ease-out; font: 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; backdrop-filter: blur(14px); user-select: none; }
+#steward-review-root { position: fixed; z-index: 2147483647; top: 22px; left: 50%; display: flex; align-items: center; gap: 5px; min-height: 50px; padding: 6px; color: #f8fafc; background: rgba(15,23,42,.96); border: 1px solid rgba(255,255,255,.18); border-radius: 999px; box-shadow: 0 16px 44px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.18); transform: translateX(-50%); font: 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; backdrop-filter: blur(14px); user-select: none; }
+#steward-review-root.steward-review-enter { animation: steward-review-enter .18s ease-out; }
 #steward-review-root button, .steward-review-popup button { appearance: none; margin: 0; text-transform: none; letter-spacing: normal; white-space: nowrap; }
 #steward-review-root button { appearance: none; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: none; height: 38px; cursor: pointer; margin: 0; border: 0; border-radius: 999px; padding: 0 13px; color: #e2e8f0; background: transparent; transition: background .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease; font: inherit; font-size: 13px; font-weight: 650; line-height: 1; text-transform: none; letter-spacing: normal; white-space: nowrap; }
 #steward-review-root button:hover { color: #fff; background: rgba(255,255,255,.1); }
@@ -87,7 +88,7 @@
   const endpoint = __ENDPOINT__;
   const root = document.createElement('div');
   root.id = 'steward-review-root';
-  root.className = 'steward-review-ui';
+  root.className = 'steward-review-ui steward-review-enter';
   root.innerHTML = `
     <button class="sr-drag" aria-label="Drag toolbar" title="Drag toolbar"></button>
     <button class="sr-add" aria-pressed="false">
@@ -107,6 +108,8 @@
     <div class="sr-status" role="status"></div>
   `;
   document.documentElement.appendChild(root);
+  root.addEventListener('animationend', () => root.classList.remove('steward-review-enter'), {once: true});
+  setTimeout(() => root.classList.remove('steward-review-enter'), 250);
 
   const status = root.querySelector('.sr-status');
   const addButton = root.querySelector('.sr-add');
@@ -159,6 +162,23 @@
     if (focusedDialog && visible(focusedDialog)) return focusedDialog;
     return [...document.querySelectorAll(MODAL_HOST_SELECTOR)].filter(visible).at(-1) || null;
   };
+  // Native modal dialogs live in the browser's top layer and make the rest of
+  // the document inert. A z-index cannot cross that boundary, so keep the
+  // review controls inside the active modal until it closes or is removed.
+  const syncOverlayHost = () => {
+    if (finished) return;
+    const host = activeModalHost() || document.documentElement;
+    if (root.parentElement !== host) host.appendChild(root);
+    if (infoPanel && infoPanel.parentElement !== host) host.appendChild(infoPanel);
+  };
+  const modalHostObserver = new MutationObserver(syncOverlayHost);
+  modalHostObserver.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['open', 'role', 'aria-modal']
+  });
+  syncOverlayHost();
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {
     const parts = [];
@@ -232,7 +252,7 @@
     shieldReviewUi(infoPanel);
     // Keep fixed positioning outside the transformed toolbar; that transform
     // would otherwise create a different containing block before first drag.
-    document.documentElement.appendChild(infoPanel);
+    (activeModalHost() || document.documentElement).appendChild(infoPanel);
 
     const buttonRect = infoButton.getBoundingClientRect();
     const maximumLeft = window.innerWidth - infoPanel.offsetWidth - 12;
