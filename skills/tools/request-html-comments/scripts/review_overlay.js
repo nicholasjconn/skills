@@ -164,8 +164,8 @@
   };
   const hostForNode = (node) => {
     if (!(node instanceof Element)) return document.documentElement;
-    const dialog = node.closest('dialog[open]');
-    return (dialog && visible(dialog)) ? dialog : document.documentElement;
+    const host = node.closest(MODAL_HOST_SELECTOR);
+    return (host && visible(host)) ? host : document.documentElement;
   };
   const pointInHost = (clientX, clientY, host) => {
     if (!host || host === document.documentElement) {
@@ -188,9 +188,18 @@
     const host = activeModalHost() || document.documentElement;
     if (root.parentElement !== host) host.appendChild(root);
     if (infoPanel && infoPanel.parentElement !== host) host.appendChild(infoPanel);
+    if (popup && popup.parentElement !== host) host.appendChild(popup);
     if (typeof refreshComments === 'function') refreshComments();
   };
-  const modalHostObserver = new MutationObserver(syncOverlayHost);
+  const isOverlayMutation = (record) =>
+    isOverlay(record.target) ||
+    (record.type === 'childList' &&
+      [...record.addedNodes, ...record.removedNodes].length > 0 &&
+      [...record.addedNodes, ...record.removedNodes].every(isOverlay));
+  const modalHostObserver = new MutationObserver((records) => {
+    if (records.every(isOverlayMutation)) return;
+    syncOverlayHost();
+  });
   modalHostObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
