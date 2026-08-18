@@ -152,6 +152,12 @@ test('the overlay has no browser-tab identity or lifecycle endpoints', () => {
   assert.doesNotMatch(OVERLAY_SCRIPT, /sessionStorage|client_id|\/heartbeat|\/abandon/)
 })
 
+test('the overlay observes modal visibility attributes and targets dialog hosts', () => {
+  assert.match(OVERLAY_SCRIPT, /attributeFilter:\s*\['open',\s*'role',\s*'aria-modal',\s*'class',\s*'style',\s*'hidden'\]/)
+  assert.match(OVERLAY_SCRIPT, /const hostForNode =/)
+  assert.match(OVERLAY_SCRIPT, /const pointInHost =/)
+})
+
 test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')

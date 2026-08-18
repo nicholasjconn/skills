@@ -162,6 +162,24 @@
     if (focusedDialog && visible(focusedDialog)) return focusedDialog;
     return [...document.querySelectorAll(MODAL_HOST_SELECTOR)].filter(visible).at(-1) || null;
   };
+  const hostForNode = (node) => {
+    if (!(node instanceof Element)) return document.documentElement;
+    const dialog = node.closest('dialog[open]');
+    return (dialog && visible(dialog)) ? dialog : document.documentElement;
+  };
+  const pointInHost = (clientX, clientY, host) => {
+    if (!host || host === document.documentElement) {
+      return {
+        x: Math.round(clientX + window.scrollX),
+        y: Math.round(clientY + window.scrollY)
+      };
+    }
+    const rect = host.getBoundingClientRect();
+    return {
+      x: Math.round(clientX - rect.left - host.clientLeft + host.scrollLeft),
+      y: Math.round(clientY - rect.top - host.clientTop + host.scrollTop)
+    };
+  };
   // Native modal dialogs live in the browser's top layer and make the rest of
   // the document inert. A z-index cannot cross that boundary, so keep the
   // review controls inside the active modal until it closes or is removed.
@@ -170,6 +188,7 @@
     const host = activeModalHost() || document.documentElement;
     if (root.parentElement !== host) host.appendChild(root);
     if (infoPanel && infoPanel.parentElement !== host) host.appendChild(infoPanel);
+    if (typeof refreshComments === 'function') refreshComments();
   };
   const modalHostObserver = new MutationObserver(syncOverlayHost);
   modalHostObserver.observe(document.documentElement, {
@@ -351,25 +370,27 @@
     for (const node of highlights.get(id) || []) node.remove();
     highlights.delete(id);
   };
-  const drawHighlight = (id, range) => {
+  const drawHighlight = (id, range, host = document.documentElement) => {
     removeHighlight(id);
     const nodes = rangeRects(range).map(rect => {
       const highlight = document.createElement('div');
       highlight.className = 'steward-review-ui steward-review-highlight';
-      highlight.style.left = `${Math.round(rect.left + window.scrollX)}px`;
-      highlight.style.top = `${Math.round(rect.top + window.scrollY)}px`;
+      const point = pointInHost(rect.left, rect.top, host);
+      highlight.style.left = `${point.x}px`;
+      highlight.style.top = `${point.y}px`;
       highlight.style.width = `${Math.round(rect.width)}px`;
       highlight.style.height = `${Math.round(rect.height)}px`;
-      document.documentElement.appendChild(highlight);
+      shieldReviewUi(highlight);
+      host.appendChild(highlight);
       return highlight;
     });
     highlights.set(id, nodes);
     return nodes;
   };
-  const anchorForRange = (range) => {
+  const anchorForRange = (range, host = document.documentElement) => {
     const rects = rangeRects(range);
     const rect = rects.at(-1);
-    return rect ? { x: Math.round(rect.right + window.scrollX), y: Math.round(rect.top + window.scrollY) } : null;
+    return rect ? pointInHost(rect.right, rect.top, host) : null;
   };
 
   // Draft persistence includes unsaved textarea content so an interrupted tab
@@ -456,24 +477,30 @@
   const anchorForComment = (item) => {
     if (item.target_type === 'text' && item.selection) {
       const range = resolveRange(item.selection);
-      if (!range) return item.anchor;
-      drawHighlight(item.id, range);
-      return anchorForRange(range) || item.anchor;
+      if (!range) return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
+      const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? range.commonAncestorContainer
+        : range.commonAncestorContainer.parentElement;
+      const host = hostForNode(commonElement);
+      drawHighlight(item.id, range, host);
+      const anchor = anchorForRange(range, host);
+      return anchor ? { ...anchor, host } : (item.anchor ? { ...item.anchor, host: document.documentElement } : null);
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
       const target = resolveElement(item.element);
-      if (!target) return item.anchor;
+      if (!target) return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
+      const host = hostForNode(target);
       const rect = target.getBoundingClientRect();
-      return {
-        x: Math.round(rect.left + window.scrollX + rect.width * item.anchor_ratio.x),
-        y: Math.round(rect.top + window.scrollY + rect.height * item.anchor_ratio.y)
-      };
+      const clientX = rect.left + rect.width * item.anchor_ratio.x;
+      const clientY = rect.top + rect.height * item.anchor_ratio.y;
+      return { ...pointInHost(clientX, clientY, host), host };
     }
-    return item.anchor;
+    return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
   };
   const pinFor = (item) => {
     const anchor = anchorForComment(item);
     if (!anchor) return;
+    const host = anchor.host || document.documentElement;
     const pin = document.createElement('button');
     pin.className = 'steward-review-ui steward-review-pin';
     pin.type = 'button';
@@ -483,7 +510,7 @@
     pin.setAttribute('aria-label', `Open comment ${comments.indexOf(item) + 1}`);
     shieldReviewUi(pin);
     pin.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); openPopup(item, event.clientX, event.clientY); });
-    document.documentElement.appendChild(pin);
+    host.appendChild(pin);
     pins.set(item.id, pin);
     updateCount();
   };
@@ -559,29 +586,21 @@
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
       created_at: new Date().toISOString()
     };
-    const placePopup = (left, top) => {
-      const hostRect = popupHost === document.documentElement
-        ? { left: 0, top: 0 }
-        : popupHost.getBoundingClientRect();
-      const scrollLeft = popupHost === document.documentElement ? 0 : popupHost.scrollLeft;
-      const scrollTop = popupHost === document.documentElement ? 0 : popupHost.scrollTop;
-      const hostWidth = popupHost === document.documentElement ? window.innerWidth : popupHost.clientWidth;
-      const hostHeight = popupHost === document.documentElement ? window.innerHeight : popupHost.clientHeight;
-      const minimumX = scrollLeft + 12;
-      const minimumY = scrollTop + 12;
-      const maximumX = Math.max(minimumX, scrollLeft + hostWidth - popup.offsetWidth - 12);
-      const maximumY = Math.max(minimumY, scrollTop + hostHeight - popup.offsetHeight - 12);
-      const position = {
-        x: Math.round(clamp(left - hostRect.left + scrollLeft, minimumX, maximumX)),
-        y: Math.round(clamp(top - hostRect.top + scrollTop, minimumY, maximumY))
-      };
-      popup.style.left = `${position.x}px`;
-      popup.style.top = `${position.y}px`;
+    const placePopup = (clientX, clientY) => {
+      const minX = 12;
+      const minY = 12;
+      const maxX = Math.max(minX, window.innerWidth - popup.offsetWidth - 12);
+      const maxY = Math.max(minY, window.innerHeight - popup.offsetHeight - 12);
+      popup.style.left = `${Math.round(clamp(clientX, minX, maxX))}px`;
+      popup.style.top = `${Math.round(clamp(clientY, minY, maxY))}px`;
     };
     placePopup(clientX + 14, clientY + 14);
     if (!item && target?.range) {
       draft.provisionalId = `draft-${draft.id}`;
-      drawHighlight(draft.provisionalId, target.range);
+      const commonElement = target.range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? target.range.commonAncestorContainer
+        : target.range.commonAncestorContainer.parentElement;
+      drawHighlight(draft.provisionalId, target.range, hostForNode(commonElement));
       delete draft.range;
     }
     const textarea = popup.querySelector('textarea');
@@ -652,7 +671,8 @@
     event.stopImmediatePropagation();
     const target = event.target;
     const element = elementReference(target);
-    const anchor = { x: Math.round(event.pageX), y: Math.round(event.pageY) };
+    const host = hostForNode(target);
+    const anchor = pointInHost(event.clientX, event.clientY, host);
     const rect = target.getBoundingClientRect();
     const anchorRatio = {
       x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
@@ -671,7 +691,11 @@
     }
     const range = selection.getRangeAt(0).cloneRange();
     const reference = rangeReference(range);
-    const anchor = anchorForRange(range);
+    const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+      ? range.commonAncestorContainer
+      : range.commonAncestorContainer.parentElement;
+    const host = hostForNode(commonElement);
+    const anchor = anchorForRange(range, host);
     if (!reference || !reference.selected_text.trim() || !anchor) {
       status.textContent = 'That selection cannot be annotated. Select page text outside the review controls.';
       return;
@@ -700,6 +724,8 @@
       const anchor = anchorForComment(item);
       const pin = pins.get(item.id);
       if (anchor && pin) {
+        const host = anchor.host || document.documentElement;
+        if (pin.parentElement !== host) host.appendChild(pin);
         pin.style.left = `${anchor.x}px`;
         pin.style.top = `${anchor.y}px`;
       }
