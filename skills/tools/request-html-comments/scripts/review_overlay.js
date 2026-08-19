@@ -130,6 +130,11 @@
   let draftSaveTimer = null;
   let draftSavePromise = Promise.resolve();
   let finished = false;
+  // Modal-host synchronization runs during startup, before saved comment
+  // positioning is fully wired. Use a safe callback until the real refresher
+  // is assigned below; referencing a later `const` here would throw in its
+  // temporal dead zone and abort every annotation event handler.
+  let refreshComments = () => {};
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
   const isOverlay = (node) => node instanceof Element && Boolean(node.closest('.steward-review-ui'));
@@ -189,7 +194,7 @@
     if (root.parentElement !== host) host.appendChild(root);
     if (infoPanel && infoPanel.parentElement !== host) host.appendChild(infoPanel);
     if (popup && popup.parentElement !== host) host.appendChild(popup);
-    if (typeof refreshComments === 'function') refreshComments();
+    refreshComments();
   };
   const isOverlayMutation = (record) =>
     isOverlay(record.target) ||
@@ -728,7 +733,7 @@
     if (event.key === 'Escape' && mode !== 'interact') { event.preventDefault(); setMode('interact'); }
   }, true);
 
-  const refreshComments = () => {
+  refreshComments = () => {
     for (const item of comments) {
       const anchor = anchorForComment(item);
       const pin = pins.get(item.id);
