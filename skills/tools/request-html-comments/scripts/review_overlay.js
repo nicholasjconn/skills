@@ -91,6 +91,8 @@
   const endpoint = __ENDPOINT__;
   // This is the only review rule that intentionally targets page content.
   // Keep it in the document; all review chrome styles live in the shadow root.
+  // Document styles cannot cross a shadow boundary, so the rule is copied into
+  // an open shadow root on demand when one of its elements is hovered.
   const pageStyle = document.createElement('style');
   pageStyle.textContent = '.steward-review-hover { outline: 3px solid #3b82f6 !important; outline-offset: 2px !important; cursor: crosshair !important; }';
   document.head.appendChild(pageStyle);
@@ -148,6 +150,7 @@
   const highlights = new Map();
   let mode = 'interact';
   let hovered = null;
+  const hoverStyleRoots = new WeakSet();
   let popup = null;
   let infoPanel = null;
   let draft = null;
@@ -160,6 +163,7 @@
   // temporal dead zone and abort every annotation event handler.
   let refreshComments = () => {};
   let refreshCommentsFrame = null;
+  let scheduleCommentRefresh = () => {};
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
   const isOverlay = (node) => node instanceof Element && Boolean(node.closest('.steward-review-ui'));
@@ -227,12 +231,10 @@
     probe.remove();
     return { left: rect.left, top: rect.top };
   };
-  const toContainingBlock = (clientX, clientY) => {
-    const origin = containingBlockOrigin();
+  const toContainingBlock = (clientX, clientY, origin = containingBlockOrigin()) => {
     return { x: clientX - origin.left, y: clientY - origin.top };
   };
-  const placeToolbarDefault = () => {
-    const origin = containingBlockOrigin();
+  const placeToolbarDefault = (origin = containingBlockOrigin()) => {
     const width = root.offsetWidth;
     root.style.left = `${Math.round(window.innerWidth / 2 - width / 2 - origin.left)}px`;
     root.style.top = `${Math.round(22 - origin.top)}px`;
@@ -249,7 +251,7 @@
       ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
       : null;
   };
-  const restoreFixedPosition = (node, rect) => {
+  const restoreFixedPosition = (node, rect, origin = containingBlockOrigin()) => {
     if (!node || !rect) return;
     if (node === root) {
       root.classList.remove('steward-review-enter');
@@ -257,7 +259,6 @@
     }
     node.style.setProperty('right', 'auto');
     node.style.setProperty('bottom', 'auto');
-    const origin = containingBlockOrigin();
     node.style.setProperty('left', `${Math.round(rect.left - origin.left)}px`);
     node.style.setProperty('top', `${Math.round(rect.top - origin.top)}px`);
   };
@@ -293,7 +294,7 @@
   // Overlay chrome is viewport UI. Never shrink it to a host dialog or other
   // overflow box; a tiny modal must not clip or squeeze the editor.
   const visibleClipRect = () => viewportClipRect();
-  const placeFixedElement = (node, clientX, clientY) => {
+  const placeFixedElement = (node, clientX, clientY, origin = containingBlockOrigin()) => {
     const clip = visibleClipRect();
     const clipWidth = Math.max(0, clip.right - clip.left);
     if (clipWidth > 0) node.style.maxWidth = `${Math.floor(clipWidth)}px`;
@@ -305,7 +306,7 @@
     const maxY = Math.max(minY, clip.bottom - height);
     const desiredX = clamp(clientX, minX, maxX);
     const desiredY = clamp(clientY, minY, maxY);
-    restoreFixedPosition(node, {left: desiredX, top: desiredY});
+    restoreFixedPosition(node, {left: desiredX, top: desiredY}, origin);
   };
   // A modal dialog makes every node outside it inert. The overlay has to be a
   // descendant to stay clickable, but that is only a hit-testing hook: geometry
@@ -314,15 +315,16 @@
   // reparent — preserve screen position and do not replay those animations.
   const applyOverlayPlacement = (toolbarRect, popupRect, infoRect) => {
     showOverlayLayer();
-    if (toolbarRect) restoreFixedPosition(root, toolbarRect);
-    else placeToolbarDefault();
+    const origin = containingBlockOrigin();
+    if (toolbarRect) restoreFixedPosition(root, toolbarRect, origin);
+    else placeToolbarDefault(origin);
     if (infoPanel) {
       showAsPopover(infoPanel);
-      if (infoRect) restoreFixedPosition(infoPanel, infoRect);
+      if (infoRect) placeFixedElement(infoPanel, infoRect.left, infoRect.top, origin);
     }
     if (popup) {
       showAsPopover(popup);
-      if (popupRect) placeFixedElement(popup, popupRect.left, popupRect.top);
+      if (popupRect) placeFixedElement(popup, popupRect.left, popupRect.top, origin);
     }
     refreshComments();
   };
@@ -333,6 +335,7 @@
       showOverlayLayer();
       if (infoPanel) showAsPopover(infoPanel);
       if (popup) showAsPopover(popup);
+      refreshComments();
       return;
     }
     const toolbarRect = copyRect(root);
@@ -342,6 +345,14 @@
     host.appendChild(overlayLayer);
     applyOverlayPlacement(toolbarRect, popupRect, infoRect);
   };
+  let overlayHostSyncFrame = null;
+  const scheduleOverlayHostSync = () => {
+    if (overlayHostSyncFrame !== null) return;
+    overlayHostSyncFrame = requestAnimationFrame(() => {
+      overlayHostSyncFrame = null;
+      syncOverlayHost();
+    });
+  };
   const isOverlayMutation = (record) =>
     isOverlay(record.target) ||
     (record.type === 'childList' &&
@@ -349,7 +360,7 @@
       [...record.addedNodes, ...record.removedNodes].every(isOverlay));
   const modalHostObserver = new MutationObserver((records) => {
     if (records.every(isOverlayMutation)) return;
-    syncOverlayHost();
+    scheduleOverlayHostSync();
   });
   modalHostObserver.observe(document.documentElement, {
     subtree: true,
@@ -360,7 +371,7 @@
   // Mutations inside a shadow tree are invisible to an observer attached to
   // the document. Modal activation normally moves focus, so use the composed
   // focus event as the synchronization signal for those components.
-  document.addEventListener('focusin', syncOverlayHost, true);
+  document.addEventListener('focusin', scheduleOverlayHostSync, true);
   syncOverlayHost();
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {
@@ -432,6 +443,12 @@
   const clearHover = () => {
     if (hovered) hovered.classList.remove('steward-review-hover');
     hovered = null;
+  };
+  const ensureHoverStyle = (node) => {
+    const nodeRoot = node.getRootNode();
+    if (!(nodeRoot instanceof ShadowRoot) || hoverStyleRoots.has(nodeRoot)) return;
+    nodeRoot.appendChild(pageStyle.cloneNode(true));
+    hoverStyleRoots.add(nodeRoot);
   };
   const setMode = (nextMode) => {
     mode = nextMode;
@@ -573,12 +590,12 @@
     for (const node of highlights.get(id) || []) node.remove();
     highlights.delete(id);
   };
-  const drawHighlight = (id, range) => {
+  const drawHighlight = (id, range, origin = containingBlockOrigin()) => {
     removeHighlight(id);
     const nodes = rangeRects(range).map(rect => {
       const highlight = document.createElement('div');
       highlight.className = 'steward-review-ui steward-review-highlight';
-      const point = toContainingBlock(rect.left, rect.top);
+      const point = toContainingBlock(rect.left, rect.top, origin);
       highlight.style.left = `${point.x}px`;
       highlight.style.top = `${point.y}px`;
       highlight.style.width = `${Math.round(rect.width)}px`;
@@ -680,19 +697,32 @@
     count.dataset.count = String(comments.length);
     count.setAttribute('aria-label', `${comments.length} comment${comments.length === 1 ? '' : 's'}`);
   };
-  const anchorForComment = (item) => {
+  const anchorForComment = (item, origin = containingBlockOrigin()) => {
     const fallbackAnchor = () => {
       if (!item.anchor) return null;
-      return item.anchor_coordinate_space === 'viewport'
-        ? toContainingBlock(item.anchor.x, item.anchor.y)
-        : {...item.anchor};
+      const {x, y} = item.anchor;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      if (item.anchor_coordinate_space === 'viewport') return toContainingBlock(x, y, origin);
+      if (item.anchor_coordinate_space) return {x, y};
+
+      // Before coordinate-space metadata existed, document anchors included
+      // scroll offsets and modal anchors were relative to their modal host.
+      const legacyTarget = resolveSelectorReference(item.element);
+      const legacyHost = composedClosest(legacyTarget, MODAL_HOST_SELECTOR);
+      if (!legacyHost) return toContainingBlock(x - window.scrollX, y - window.scrollY, origin);
+      const hostRect = legacyHost.getBoundingClientRect();
+      return toContainingBlock(
+        x + hostRect.left + legacyHost.clientLeft - legacyHost.scrollLeft,
+        y + hostRect.top + legacyHost.clientTop - legacyHost.scrollTop,
+        origin
+      );
     };
     if (item.target_type === 'text' && item.selection) {
       const range = resolveRange(item.selection);
       if (!range) return fallbackAnchor();
-      drawHighlight(item.id, range);
+      drawHighlight(item.id, range, origin);
       const anchor = clientAnchorForRange(range);
-      return anchor ? toContainingBlock(anchor.x, anchor.y) : fallbackAnchor();
+      return anchor ? toContainingBlock(anchor.x, anchor.y, origin) : fallbackAnchor();
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
       const target = resolveElement(item.element);
@@ -700,12 +730,12 @@
       const rect = target.getBoundingClientRect();
       const clientX = rect.left + rect.width * item.anchor_ratio.x;
       const clientY = rect.top + rect.height * item.anchor_ratio.y;
-      return toContainingBlock(clientX, clientY);
+      return toContainingBlock(clientX, clientY, origin);
     }
     return fallbackAnchor();
   };
-  const pinFor = (item) => {
-    const anchor = anchorForComment(item);
+  const pinFor = (item, origin = containingBlockOrigin()) => {
+    const anchor = anchorForComment(item, origin);
     if (!anchor) return;
     const pin = document.createElement('button');
     pin.className = 'steward-review-ui steward-review-pin';
@@ -839,7 +869,8 @@
     textarea.focus();
   };
 
-  comments.forEach(pinFor);
+  const initialOrigin = comments.length ? containingBlockOrigin() : null;
+  comments.forEach(item => pinFor(item, initialOrigin));
   updateCount();
   // Toolbar and page event wiring stays together so capture-phase behavior is
   // easy to audit against the host page's own controls.
@@ -855,6 +886,7 @@
     if (mode !== 'element' || !visible(target)) return;
     clearHover();
     hovered = target;
+    ensureHoverStyle(hovered);
     hovered.classList.add('steward-review-hover');
   }, true);
   document.addEventListener('pointerout', (event) => {
@@ -919,8 +951,9 @@
   }, true);
 
   refreshComments = () => {
+    const origin = containingBlockOrigin();
     for (const item of comments) {
-      const anchor = anchorForComment(item);
+      const anchor = anchorForComment(item, origin);
       const pin = pins.get(item.id);
       if (!pin) continue;
       if (!anchor) {
@@ -933,7 +966,7 @@
       pin.style.top = `${anchor.y}px`;
     }
   };
-  const scheduleCommentRefresh = () => {
+  scheduleCommentRefresh = () => {
     if (refreshCommentsFrame !== null) return;
     refreshCommentsFrame = requestAnimationFrame(() => {
       refreshCommentsFrame = null;

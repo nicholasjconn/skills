@@ -176,7 +176,9 @@ test('the overlay observes modal visibility attributes and targets dialog hosts'
   assert.match(OVERLAY_SCRIPT, /const composedClosest =/)
   assert.match(OVERLAY_SCRIPT, /active\?\.shadowRoot\?\.activeElement/)
   assert.match(OVERLAY_SCRIPT, /if \(node\.shadowRoot\) visit\(node\.shadowRoot\)/)
-  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('focusin', syncOverlayHost, true\)/)
+  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('focusin', scheduleOverlayHostSync, true\)/)
+  assert.match(OVERLAY_SCRIPT, /overlayHostSyncFrame = requestAnimationFrame/)
+  assert.match(OVERLAY_SCRIPT, /if \(overlayLayer\.parentElement === host\)[\s\S]*refreshComments\(\)/)
   assert.match(OVERLAY_SCRIPT, /const activeModalHost =/)
 })
 
@@ -198,7 +200,21 @@ test('new fallback anchors use explicit viewport coordinates across modal repare
   assert.match(OVERLAY_SCRIPT, /anchor_coordinate_space: draft\.anchorCoordinateSpace/)
   assert.match(OVERLAY_SCRIPT, /anchorCoordinateSpace: 'viewport'/)
   assert.match(OVERLAY_SCRIPT, /item\.anchor_coordinate_space === 'viewport'/)
-  assert.match(OVERLAY_SCRIPT, /toContainingBlock\(item\.anchor\.x, item\.anchor\.y\)/)
+  assert.match(OVERLAY_SCRIPT, /toContainingBlock\(x, y, origin\)/)
+})
+
+test('legacy fallback anchors are validated and converted from their original host coordinates', () => {
+  assert.match(OVERLAY_SCRIPT, /Number\.isFinite\(x\).*Number\.isFinite\(y\)/)
+  assert.match(OVERLAY_SCRIPT, /x - window\.scrollX, y - window\.scrollY/)
+  assert.match(OVERLAY_SCRIPT, /x \+ hostRect\.left \+ legacyHost\.clientLeft - legacyHost\.scrollLeft/)
+  assert.match(OVERLAY_SCRIPT, /y \+ hostRect\.top \+ legacyHost\.clientTop - legacyHost\.scrollTop/)
+})
+
+test('one containing-block measurement is shared by each synchronous comment refresh', () => {
+  assert.match(OVERLAY_SCRIPT, /refreshComments = \(\) => \{\s*const origin = containingBlockOrigin\(\)/)
+  assert.match(OVERLAY_SCRIPT, /anchorForComment\(item, origin\)/)
+  assert.match(OVERLAY_SCRIPT, /drawHighlight\(item\.id, range, origin\)/)
+  assert.match(OVERLAY_SCRIPT, /applyOverlayPlacement[\s\S]*const origin = containingBlockOrigin\(\)/)
 })
 
 test('the overlay mounts isolated controls in a zero-size popover layer and never pads the host page', () => {
@@ -209,6 +225,7 @@ test('the overlay mounts isolated controls in a zero-size popover layer and neve
   assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(root\)/)
   assert.match(OVERLAY_SCRIPT, /pageStyle\.textContent = '\.steward-review-hover/)
   assert.match(OVERLAY_SCRIPT, /document\.head\.appendChild\(pageStyle\)/)
+  assert.match(OVERLAY_SCRIPT, /nodeRoot\.appendChild\(pageStyle\.cloneNode\(true\)\)/)
   assert.match(OVERLAY_SCRIPT, /pointer-events:none!important/)
   assert.match(OVERLAY_SCRIPT, /overlayLayer\.showPopover|showAsPopover\(overlayLayer\)/)
   assert.match(OVERLAY_SCRIPT, /:host, :host\(:popover-open\)/)
@@ -232,7 +249,8 @@ test('overlay chrome is clipped to the viewport, not the host dialog', () => {
 
 test('reparenting into a modal keeps overlay screen position and does not replay enter animations', () => {
   assert.match(OVERLAY_SCRIPT, /const toolbarRect = copyRect\(root\)/)
-  assert.match(OVERLAY_SCRIPT, /restoreFixedPosition\(root, toolbarRect\)/)
+  assert.match(OVERLAY_SCRIPT, /restoreFixedPosition\(root, toolbarRect, origin\)/)
+  assert.match(OVERLAY_SCRIPT, /placeFixedElement\(infoPanel, infoRect\.left, infoRect\.top, origin\)/)
   assert.match(OVERLAY_SCRIPT, /\.steward-review-popup\.sr-enter/)
   assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\.sr-enter/)
   assert.doesNotMatch(
