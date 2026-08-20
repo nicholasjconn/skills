@@ -46,6 +46,8 @@ const MIME_TYPES = new Map([
   ['.woff2', 'font/woff2'],
 ])
 
+const UPSTREAM_RESPONSE_TIMEOUT_MS = 30_000
+
 // Source identity is persisted with drafts and submissions so comments cannot
 // be restored onto a different file or application route by accident.
 function loopbackHostname(hostname) {
@@ -111,7 +113,11 @@ export function loadRestoredComments(path, source) {
 }
 
 export function injectHtml(html, endpoint, comments, overlayScript) {
-  const serializedComments = JSON.stringify(comments).replaceAll('<', '\\u003c')
+  const serializedComments = JSON.stringify(comments)
+    .replaceAll('<', '\\u003c')
+    // File reviews append the overlay through a Latin-1 byte round trip, so
+    // keep restored comment data ASCII-only while preserving Unicode values.
+    .replace(/[^\x20-\x7e]/g, unit => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)
   // Replacement callbacks keep `$&` and friends inside comment text literal
   // rather than letting them expand as replacement patterns.
   const script = overlayScript
@@ -159,7 +165,23 @@ function readRequestBody(request) {
 
 function requestHostIsLoopback(request) {
   const host = String(request.headers.host || '')
-  return host.startsWith('127.0.0.1:') || host === '127.0.0.1' || host.startsWith('localhost:') || host === 'localhost'
+  try {
+    return loopbackHostname(new URL(`http://${host}`).hostname)
+  } catch {
+    return false
+  }
+}
+
+function sameOriginRequest(request) {
+  const site = String(request.headers['sec-fetch-site'] || '').toLowerCase()
+  if (site && site !== 'same-origin' && site !== 'none') return false
+  const origin = request.headers.origin
+  if (!origin || Array.isArray(origin)) return !origin
+  try {
+    return new URL(origin).origin === new URL(`http://${request.headers.host}`).origin
+  } catch {
+    return false
+  }
 }
 
 function sendText(response, status, message) {
@@ -180,8 +202,8 @@ function localFilePath(root, pathname) {
   }
   const candidate = resolve(root, `.${decoded}`)
   if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) return null
-  if (!existsSync(candidate)) return candidate
   const realRoot = realpathSync(root)
+  if (!existsSync(candidate)) return candidate
   const realCandidate = realpathSync(candidate)
   if (realCandidate !== realRoot && !realCandidate.startsWith(`${realRoot}${sep}`)) return null
   return realCandidate
@@ -212,7 +234,7 @@ function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   return proxied
 }
 
-function proxyRequest(request, response, requested, source, inject, log, activeResources) {
+function proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs) {
   const upstreamPath = `${requested.pathname}${requested.search}`
   const upstream = httpRequest({
     hostname: upstreamHostname(source.url.hostname),
@@ -246,6 +268,9 @@ function proxyRequest(request, response, requested, source, inject, log, activeR
   })
   activeResources.add(upstream)
   upstream.once('close', () => activeResources.delete(upstream))
+  upstream.setTimeout(upstreamTimeoutMs, () => {
+    upstream.destroy(new Error('the local page did not respond in time'))
+  })
   upstream.on('error', error => {
     log('error', 'Could not reach served-page source', { source: source.url.href, error: error.message })
     if (!response.headersSent) sendText(response, 502, `Could not reach local page: ${error.message}`)
@@ -287,6 +312,7 @@ export async function createReviewServer({
   overlayScript,
   log,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
+  upstreamTimeoutMs = UPSTREAM_RESPONSE_TIMEOUT_MS,
 }) {
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const token = randomBytes(24).toString('base64url')
@@ -335,7 +361,7 @@ export async function createReviewServer({
     }
   }
 
-  const server = createServer(async (request, response) => {
+  const handleRequest = async (request, response) => {
     if (!requestHostIsLoopback(request)) {
       sendText(response, 403, 'Loopback access only')
       return
@@ -387,24 +413,45 @@ export async function createReviewServer({
       serveStaticAsset(request, response, dirname(source.path), log)
       return
     }
-    proxyRequest(request, response, requested, source, inject, log, activeResources)
+    if (!sameOriginRequest(request)) {
+      sendText(response, 403, 'Same-origin access only')
+      return
+    }
+    proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs)
+  }
+
+  const server = createServer((request, response) => {
+    handleRequest(request, response).catch(error => {
+      const requestError = error instanceof Error ? error : new Error(String(error))
+      log('error', 'Review request failed', { url: request.url, error: requestError.message })
+      if (!response.headersSent && !response.writableEnded) sendText(response, 500, 'Review request failed')
+      else if (!response.destroyed) response.destroy(requestError)
+    })
   })
 
   server.on('connection', socket => {
     serverConnections.add(socket)
     socket.once('close', () => serverConnections.delete(socket))
   })
-  if (source.type === 'url') server.on('upgrade', (request, socket, head) => proxyUpgrade(request, socket, head, source, log, activeResources))
+  if (source.type === 'url') server.on('upgrade', (request, socket, head) => {
+    if (!requestHostIsLoopback(request) || !sameOriginRequest(request)) {
+      socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
+      return
+    }
+    proxyUpgrade(request, socket, head, source, log, activeResources)
+  })
   server.on('clientError', (error, socket) => {
     log('error', 'Review server rejected a client connection', { error: error.message })
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
   })
   await new Promise((resolveListen, rejectListen) => {
     server.once('error', rejectListen)
-    server.listen(0, '127.0.0.1', resolveListen)
+    const hostname = source.type === 'url' ? upstreamHostname(source.url.hostname) : '127.0.0.1'
+    server.listen(0, hostname, resolveListen)
   })
   const address = server.address()
-  const reviewUrl = `http://127.0.0.1:${address.port}${reviewPath}${reviewSearch}`
+  const reviewHostname = source.type === 'url' ? source.url.hostname : '127.0.0.1'
+  const reviewUrl = `http://${reviewHostname}:${address.port}${reviewPath}${reviewSearch}`
   log('info', 'Review server ready', { review_url: reviewUrl })
   safetyTimer = setTimeout(() => {
     if (settled) return

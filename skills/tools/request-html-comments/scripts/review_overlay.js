@@ -12,7 +12,7 @@
   };
 
   const overlayCss = String.raw`
-.steward-review-ui, .steward-review-ui * { box-sizing: border-box; }
+.steward-review-ui, .steward-review-ui * { box-sizing: border-box; pointer-events: auto; }
 #steward-review-root { position: fixed; z-index: 2147483647; top: 22px; left: 50%; display: flex; align-items: center; gap: 5px; min-height: 50px; padding: 6px; color: #f8fafc; background: rgba(15,23,42,.96); border: 1px solid rgba(255,255,255,.18); border-radius: 999px; box-shadow: 0 16px 44px rgba(15,23,42,.28), 0 2px 8px rgba(15,23,42,.18); transform: translateX(-50%); font: 14px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; backdrop-filter: blur(14px); user-select: none; }
 #steward-review-root.steward-review-enter { animation: steward-review-enter .18s ease-out; }
 #steward-review-root button, .steward-review-popup button { appearance: none; margin: 0; text-transform: none; letter-spacing: normal; white-space: nowrap; }
@@ -39,10 +39,12 @@
 #steward-review-root .sr-separator { width: 1px; height: 22px; background: rgba(255,255,255,.16); }
 #steward-review-root .sr-status { position: absolute; top: calc(100% + 9px); left: 50%; width: max-content; max-width: min(360px, calc(100vw - 24px)); padding: 7px 11px; color: #f8fafc; background: rgba(15,23,42,.94); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; box-shadow: 0 8px 24px rgba(15,23,42,.2); transform: translateX(-50%); animation: steward-review-status .14s ease-out; font-size: 12px; pointer-events: none; }
 #steward-review-root .sr-status:empty { display: none; }
-.steward-review-pin { position: absolute; z-index: 2147483645; display: grid; width: 31px; height: 31px; cursor: pointer; place-items: center; padding: 0; color: #172554; background: #facc15; border: 2px solid #172554; border-radius: 9px; box-shadow: 0 6px 18px rgba(23,37,84,.28); transform: translate(-50%,-50%); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; animation: steward-review-pin-in .22s cubic-bezier(.2,.8,.2,1.2); font: 800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-pin { position: absolute; z-index: 2147483645; display: grid; width: 31px; height: 31px; cursor: pointer; place-items: center; padding: 0; color: #172554; background: #facc15; border: 2px solid #172554; border-radius: 9px; box-shadow: 0 6px 18px rgba(23,37,84,.28); transform: translate(-50%,-50%); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; font: 800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-pin.sr-enter { animation: steward-review-pin-in .22s cubic-bezier(.2,.8,.2,1.2); }
 .steward-review-pin:hover, .steward-review-pin:focus-visible { background: #fde047; box-shadow: 0 8px 22px rgba(23,37,84,.34); transform: translate(-50%,-50%) scale(1.08); outline: none; }
 .steward-review-highlight { position: absolute; z-index: 2147483644; border-radius: 3px; background: rgba(250,204,21,.42); box-shadow: 0 0 0 1px rgba(202,138,4,.16); pointer-events: none; }
-.steward-review-popup { position: fixed; z-index: 2147483646; width: min(350px, calc(100vw - 24px)); padding: 14px; color: #172033; background: #fff; border: 1px solid #cbd5e1; border-radius: 16px; box-shadow: 0 22px 60px rgba(15,23,42,.3), 0 2px 8px rgba(15,23,42,.1); animation: steward-review-popup-in .16s ease-out; font: 14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-popup { position: fixed; z-index: 2147483646; width: min(350px, calc(100vw - 24px)); padding: 14px; color: #172033; background: #fff; border: 1px solid #cbd5e1; border-radius: 16px; box-shadow: 0 22px 60px rgba(15,23,42,.3), 0 2px 8px rgba(15,23,42,.1); font: 14px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-popup.sr-enter, .steward-review-info.sr-enter { animation: steward-review-popup-in .16s ease-out; }
 .steward-review-popup .sr-popup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 11px; cursor: grab; touch-action: none; user-select: none; }
 .steward-review-popup .sr-popup-head:active { cursor: grabbing; }
 .steward-review-popup .sr-kicker { color: #2563eb; font-size: 11px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; }
@@ -62,7 +64,7 @@
 .steward-review-popup .sr-save:disabled { cursor: not-allowed; opacity: .45; }
 .steward-review-popup .sr-error { min-height: 0; margin-top: 0; color: #b91c1c; font-size: 12px; }
 .steward-review-popup .sr-error:not(:empty) { margin-top: 8px; }
-.steward-review-info { position: fixed; z-index: 2147483646; display: flex; align-items: center; gap: 4px; width: max-content; max-width: calc(100vw - 24px); padding: 7px; color: #172033; background: #fff; border: 1px solid #cbd5e1; border-radius: 13px; box-shadow: 0 18px 48px rgba(15,23,42,.24), 0 2px 7px rgba(15,23,42,.1); animation: steward-review-popup-in .16s ease-out; font: 13px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-info { position: fixed; z-index: 2147483646; display: flex; align-items: center; gap: 4px; width: max-content; max-width: calc(100vw - 24px); padding: 7px; color: #172033; background: #fff; border: 1px solid #cbd5e1; border-radius: 13px; box-shadow: 0 18px 48px rgba(15,23,42,.24), 0 2px 7px rgba(15,23,42,.1); font: 13px/1.3 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 .steward-review-info a { display: inline-flex; align-items: center; justify-content: center; height: 36px; color: #1d4ed8; border-radius: 9px; text-decoration: none; }
 .steward-review-info a:hover { background: #eff6ff; }
 .steward-review-info a:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
@@ -77,15 +79,38 @@
 @keyframes steward-review-popup-in { from { opacity: 0; transform: translateY(-5px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes steward-review-pin-in { from { opacity: 0; transform: translate(-50%,-50%) scale(.55); } to { opacity: 1; transform: translate(-50%,-50%) scale(1); } }
 @media (max-width: 520px) { #steward-review-root .sr-send-label { display: none; } #steward-review-root .sr-send { width: 38px; padding: 0; } .steward-review-popup .sr-hint { display: none; } }
-@media (prefers-reduced-motion: reduce) { #steward-review-root, .steward-review-pin, .steward-review-popup, .steward-review-info, #steward-review-root .sr-status { animation: none; transition: none; } }
+:host, :host(:popover-open) { position: fixed !important; inset: unset !important; top: 0 !important; left: 0 !important; display: block; width: 0 !important; height: 0 !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; margin: 0 !important; padding: 0 !important; border: none !important; overflow: visible !important; background: transparent !important; color: inherit !important; pointer-events: none; z-index: 2147483647; }
+:host::backdrop, .steward-review-popup::backdrop, .steward-review-info::backdrop { display: none; }
+.steward-review-popup, .steward-review-popup:popover-open { position: fixed !important; margin: 0 !important; width: min(350px, calc(100vw - 24px)) !important; height: fit-content !important; overflow: visible !important; }
+.steward-review-info, .steward-review-info:popover-open { position: fixed !important; margin: 0 !important; width: max-content !important; height: fit-content !important; overflow: visible !important; }
+@media (prefers-reduced-motion: reduce) { #steward-review-root, .steward-review-pin, .steward-review-popup, .steward-review-info, .steward-review-pin.sr-enter, .steward-review-popup.sr-enter, .steward-review-info.sr-enter, #steward-review-root .sr-status { animation: none; transition: none; } }
 `;
 
   // Bootstrap one isolated overlay. The server replaces the two sentinel
   // values below before this script reaches the browser.
+  const endpoint = __ENDPOINT__;
+  // This is the only review rule that intentionally targets page content.
+  // Keep it in the document; all review chrome styles live in the shadow root.
+  // Document styles cannot cross a shadow boundary, so the rule is copied into
+  // an open shadow root on demand when one of its elements is hovered.
+  const pageStyle = document.createElement('style');
+  pageStyle.textContent = '.steward-review-hover { outline: 3px solid #3b82f6 !important; outline-offset: 2px !important; cursor: crosshair !important; }';
+  document.head.appendChild(pageStyle);
+  const overlayLayer = document.createElement('div');
+  overlayLayer.className = 'steward-review-ui sr-layer';
+  overlayLayer.setAttribute('popover', 'manual');
+  // The host must remain a descendant of an active modal so native inertness
+  // and library focus traps permit interaction. Keep every visible control in
+  // a shadow tree so broad page rules such as `dialog *` cannot restyle it.
+  // Inline-important host geometry also protects the one node page CSS can
+  // still reach from clipping, sizing, and pointer-event overrides.
+  overlayLayer.style.cssText = 'position:fixed!important;inset:auto!important;top:0!important;left:0!important;display:block!important;width:0!important;height:0!important;min-width:0!important;min-height:0!important;max-width:none!important;max-height:none!important;margin:0!important;padding:0!important;border:0!important;overflow:visible!important;background:transparent!important;pointer-events:none!important;z-index:2147483647!important';
+  // Keep the root open so browser automation and accessibility tooling can
+  // inspect the review controls; shadow CSS isolation does not depend on mode.
+  const overlayShadow = overlayLayer.attachShadow({mode: 'open'});
   const overlayStyle = document.createElement('style');
   overlayStyle.textContent = overlayCss;
-  document.head.appendChild(overlayStyle);
-  const endpoint = __ENDPOINT__;
+  overlayShadow.appendChild(overlayStyle);
   const root = document.createElement('div');
   root.id = 'steward-review-root';
   root.className = 'steward-review-ui steward-review-enter';
@@ -107,7 +132,8 @@
     <button class="sr-icon sr-cancel" aria-label="Cancel review" title="Cancel review">&#215;</button>
     <div class="sr-status" role="status"></div>
   `;
-  document.documentElement.appendChild(root);
+  overlayShadow.appendChild(root);
+  document.documentElement.appendChild(overlayLayer);
   root.addEventListener('animationend', () => root.classList.remove('steward-review-enter'), {once: true});
   setTimeout(() => root.classList.remove('steward-review-enter'), 250);
 
@@ -124,6 +150,7 @@
   const highlights = new Map();
   let mode = 'interact';
   let hovered = null;
+  const hoverStyleRoots = new WeakSet();
   let popup = null;
   let infoPanel = null;
   let draft = null;
@@ -135,6 +162,8 @@
   // is assigned below; referencing a later `const` here would throw in its
   // temporal dead zone and abort every annotation event handler.
   let refreshComments = () => {};
+  let refreshCommentsFrame = null;
+  let scheduleCommentRefresh = () => {};
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
   const isOverlay = (node) => node instanceof Element && Boolean(node.closest('.steward-review-ui'));
@@ -160,41 +189,169 @@
   // `showModal()` sets neither role nor aria-modal, so native dialogs need
   // their own selector to be found alongside library-rendered modals.
   const MODAL_HOST_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog[open]';
-  const activeModalHost = () => {
-    const focusedDialog = document.activeElement instanceof Element
-      ? document.activeElement.closest(MODAL_HOST_SELECTOR)
-      : null;
-    if (focusedDialog && visible(focusedDialog)) return focusedDialog;
-    return [...document.querySelectorAll(MODAL_HOST_SELECTOR)].filter(visible).at(-1) || null;
-  };
-  const hostForNode = (node) => {
-    if (!(node instanceof Element)) return document.documentElement;
-    const host = node.closest(MODAL_HOST_SELECTOR);
-    return (host && visible(host)) ? host : document.documentElement;
-  };
-  const pointInHost = (clientX, clientY, host) => {
-    if (!host || host === document.documentElement) {
-      return {
-        x: Math.round(clientX + window.scrollX),
-        y: Math.round(clientY + window.scrollY)
-      };
+  const composedClosest = (node, selector) => {
+    let current = node instanceof Element ? node : null;
+    while (current) {
+      const match = current.closest(selector);
+      if (match) return match;
+      const currentRoot = current.getRootNode();
+      current = currentRoot instanceof ShadowRoot ? currentRoot.host : null;
     }
-    const rect = host.getBoundingClientRect();
-    return {
-      x: Math.round(clientX - rect.left - host.clientLeft + host.scrollLeft),
-      y: Math.round(clientY - rect.top - host.clientTop + host.scrollTop)
-    };
+    return null;
   };
-  // Native modal dialogs live in the browser's top layer and make the rest of
-  // the document inert. A z-index cannot cross that boundary, so keep the
-  // review controls inside the active modal until it closes or is removed.
+  const deepestActiveElement = () => {
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
+  };
+  const visibleModalHosts = () => {
+    const hosts = [];
+    const visit = (scope) => {
+      for (const node of scope.querySelectorAll(MODAL_HOST_SELECTOR)) {
+        if (visible(node)) hosts.push(node);
+      }
+      for (const node of scope.querySelectorAll('*')) {
+        if (node.shadowRoot) visit(node.shadowRoot);
+      }
+    };
+    visit(document);
+    return hosts;
+  };
+  const activeModalHost = () => {
+    const focusedDialog = composedClosest(deepestActiveElement(), MODAL_HOST_SELECTOR);
+    if (focusedDialog && visible(focusedDialog)) return focusedDialog;
+    return visibleModalHosts().at(-1) || null;
+  };
+  const containingBlockOrigin = () => {
+    const probe = document.createElement('div');
+    probe.className = 'steward-review-ui';
+    probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;margin:0;padding:0;border:0;visibility:hidden;pointer-events:none';
+    overlayShadow.appendChild(probe);
+    const rect = probe.getBoundingClientRect();
+    probe.remove();
+    return { left: rect.left, top: rect.top };
+  };
+  const toContainingBlock = (clientX, clientY, origin = containingBlockOrigin()) => {
+    return { x: clientX - origin.left, y: clientY - origin.top };
+  };
+  const placeToolbarDefault = (origin = containingBlockOrigin()) => {
+    const width = root.offsetWidth;
+    root.style.left = `${Math.round(window.innerWidth / 2 - width / 2 - origin.left)}px`;
+    root.style.top = `${Math.round(22 - origin.top)}px`;
+    root.style.transform = 'none';
+  };
+  const playEnter = (node) => {
+    node.classList.add('sr-enter');
+    node.addEventListener('animationend', () => node.classList.remove('sr-enter'), {once: true});
+  };
+  const copyRect = (node) => {
+    if (!node) return null;
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0
+      ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+      : null;
+  };
+  const restoreFixedPosition = (node, rect, origin = containingBlockOrigin()) => {
+    if (!node || !rect) return;
+    if (node === root) {
+      root.classList.remove('steward-review-enter');
+      root.style.setProperty('transform', 'none', 'important');
+    }
+    node.style.setProperty('right', 'auto');
+    node.style.setProperty('bottom', 'auto');
+    node.style.setProperty('left', `${Math.round(rect.left - origin.left)}px`);
+    node.style.setProperty('top', `${Math.round(rect.top - origin.top)}px`);
+  };
+  const supportsPopover = (node) => typeof node.showPopover === 'function';
+  const hideAsPopover = (node) => {
+    if (!node || !supportsPopover(node) || !node.hasAttribute('popover')) return;
+    try {
+      if (node.matches(':popover-open')) node.hidePopover();
+    } catch {}
+  };
+  const showAsPopover = (node) => {
+    if (!node) return;
+    if (!supportsPopover(node)) {
+      node.removeAttribute('popover');
+      return;
+    }
+    if (!node.hasAttribute('popover')) node.setAttribute('popover', 'manual');
+    try {
+      if (!node.matches(':popover-open')) node.showPopover();
+    } catch {
+      // A failed show would leave [popover] as `display: none`. Drop the
+      // attribute so the overlay stays usable without top-layer promotion.
+      node.removeAttribute('popover');
+    }
+  };
+  const showOverlayLayer = () => showAsPopover(overlayLayer);
+  const viewportClipRect = (padding = 12) => ({
+    left: padding,
+    top: padding,
+    right: window.innerWidth - padding,
+    bottom: window.innerHeight - padding
+  });
+  // Overlay chrome is viewport UI. Never shrink it to a host dialog or other
+  // overflow box; a tiny modal must not clip or squeeze the editor.
+  const visibleClipRect = () => viewportClipRect();
+  const placeFixedElement = (node, clientX, clientY, origin = containingBlockOrigin()) => {
+    const clip = visibleClipRect();
+    const clipWidth = Math.max(0, clip.right - clip.left);
+    if (clipWidth > 0) node.style.maxWidth = `${Math.floor(clipWidth)}px`;
+    const width = node.offsetWidth;
+    const height = node.offsetHeight;
+    const minX = clip.left;
+    const minY = clip.top;
+    const maxX = Math.max(minX, clip.right - width);
+    const maxY = Math.max(minY, clip.bottom - height);
+    const desiredX = clamp(clientX, minX, maxX);
+    const desiredY = clamp(clientY, minY, maxY);
+    restoreFixedPosition(node, {left: desiredX, top: desiredY}, origin);
+  };
+  // A modal dialog makes every node outside it inert. The overlay has to be a
+  // descendant to stay clickable, but that is only a hit-testing hook: geometry
+  // stays viewport-fixed and must not follow the host dialog's size.
+  // Moving an open popover hides it, and CSS enter animations restart on
+  // reparent — preserve screen position and do not replay those animations.
+  const applyOverlayPlacement = (toolbarRect, popupRect, infoRect) => {
+    showOverlayLayer();
+    const origin = containingBlockOrigin();
+    if (toolbarRect) restoreFixedPosition(root, toolbarRect, origin);
+    else placeToolbarDefault(origin);
+    if (infoPanel) {
+      showAsPopover(infoPanel);
+      if (infoRect) placeFixedElement(infoPanel, infoRect.left, infoRect.top, origin);
+    }
+    if (popup) {
+      showAsPopover(popup);
+      if (popupRect) placeFixedElement(popup, popupRect.left, popupRect.top, origin);
+    }
+    refreshComments();
+  };
   const syncOverlayHost = () => {
     if (finished) return;
     const host = activeModalHost() || document.documentElement;
-    if (root.parentElement !== host) host.appendChild(root);
-    if (infoPanel && infoPanel.parentElement !== host) host.appendChild(infoPanel);
-    if (popup && popup.parentElement !== host) host.appendChild(popup);
-    refreshComments();
+    if (overlayLayer.parentElement === host) {
+      showOverlayLayer();
+      if (infoPanel) showAsPopover(infoPanel);
+      if (popup) showAsPopover(popup);
+      refreshComments();
+      return;
+    }
+    const toolbarRect = copyRect(root);
+    const popupRect = copyRect(popup);
+    const infoRect = copyRect(infoPanel);
+    hideAsPopover(overlayLayer);
+    host.appendChild(overlayLayer);
+    applyOverlayPlacement(toolbarRect, popupRect, infoRect);
+  };
+  let overlayHostSyncFrame = null;
+  const scheduleOverlayHostSync = () => {
+    if (overlayHostSyncFrame !== null) return;
+    overlayHostSyncFrame = requestAnimationFrame(() => {
+      overlayHostSyncFrame = null;
+      syncOverlayHost();
+    });
   };
   const isOverlayMutation = (record) =>
     isOverlay(record.target) ||
@@ -203,14 +360,18 @@
       [...record.addedNodes, ...record.removedNodes].every(isOverlay));
   const modalHostObserver = new MutationObserver((records) => {
     if (records.every(isOverlayMutation)) return;
-    syncOverlayHost();
+    scheduleOverlayHostSync();
   });
   modalHostObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['open', 'role', 'aria-modal', 'class', 'style', 'hidden']
+    attributeFilter: ['open', 'role', 'aria-modal', 'class', 'style', 'hidden', 'inert']
   });
+  // Mutations inside a shadow tree are invisible to an observer attached to
+  // the document. Modal activation normally moves focus, so use the composed
+  // focus event as the synchronization signal for those components.
+  document.addEventListener('focusin', scheduleOverlayHostSync, true);
   syncOverlayHost();
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {
@@ -223,6 +384,38 @@
       parts.unshift(part);
     }
     return parts.join(' > ');
+  };
+  const shadowPath = (node) => {
+    const selectors = [];
+    let current = node;
+    while (current instanceof Element) {
+      selectors.unshift(cssPath(current));
+      const currentRoot = current.getRootNode();
+      if (!(currentRoot instanceof ShadowRoot)) break;
+      current = currentRoot.host;
+    }
+    return selectors.length > 1 ? selectors : null;
+  };
+  const resolveSelectorReference = (reference) => {
+    const selectors = reference?.shadow_path?.length
+      ? reference.shadow_path
+      : [reference?.css_selector];
+    let scope = document;
+    let node = null;
+    try {
+      for (let index = 0; index < selectors.length; index += 1) {
+        if (!selectors[index]) return null;
+        node = scope.querySelector(selectors[index]);
+        if (!node) return null;
+        if (index < selectors.length - 1) {
+          if (!node.shadowRoot) return null;
+          scope = node.shadowRoot;
+        }
+      }
+    } catch {
+      return null;
+    }
+    return node;
   };
   const xpath = (node) => {
     const parts = [];
@@ -237,6 +430,7 @@
     const rect = node.getBoundingClientRect();
     return {
       css_selector: cssPath(node),
+      shadow_path: shadowPath(node),
       xpath: xpath(node),
       tag: node.tagName.toLowerCase(),
       id: node.id || null,
@@ -250,6 +444,12 @@
     if (hovered) hovered.classList.remove('steward-review-hover');
     hovered = null;
   };
+  const ensureHoverStyle = (node) => {
+    const nodeRoot = node.getRootNode();
+    if (!(nodeRoot instanceof ShadowRoot) || hoverStyleRoots.has(nodeRoot)) return;
+    nodeRoot.appendChild(pageStyle.cloneNode(true));
+    hoverStyleRoots.add(nodeRoot);
+  };
   const setMode = (nextMode) => {
     mode = nextMode;
     addButton.setAttribute('aria-pressed', String(mode === 'element'));
@@ -262,7 +462,10 @@
   };
 
   const closeInfo = () => {
-    if (infoPanel) infoPanel.remove();
+    if (infoPanel) {
+      hideAsPopover(infoPanel);
+      infoPanel.remove();
+    }
     infoPanel = null;
     infoButton.setAttribute('aria-expanded', 'false');
   };
@@ -270,6 +473,7 @@
     closeInfo();
     infoPanel = document.createElement('aside');
     infoPanel.className = 'steward-review-ui steward-review-info';
+    infoPanel.setAttribute('popover', 'manual');
     infoPanel.setAttribute('aria-label', 'About HTML Review');
     infoPanel.innerHTML = `
       <a class="sr-creator" href="${TOOL_INFO.creatorUrl}" target="_blank" rel="noopener noreferrer">
@@ -283,18 +487,16 @@
       </a>
     `;
     shieldReviewUi(infoPanel);
-    // Keep fixed positioning outside the transformed toolbar; that transform
-    // would otherwise create a different containing block before first drag.
-    (activeModalHost() || document.documentElement).appendChild(infoPanel);
+    overlayShadow.appendChild(infoPanel);
+    showAsPopover(infoPanel);
 
     const buttonRect = infoButton.getBoundingClientRect();
-    const maximumLeft = window.innerWidth - infoPanel.offsetWidth - 12;
-    const left = clamp(buttonRect.right - infoPanel.offsetWidth, 12, maximumLeft);
+    const left = buttonRect.right - infoPanel.offsetWidth;
     const below = buttonRect.bottom + 10;
     const above = buttonRect.top - infoPanel.offsetHeight - 10;
     const top = below + infoPanel.offsetHeight <= window.innerHeight - 12 ? below : Math.max(12, above);
-    infoPanel.style.left = `${Math.round(left)}px`;
-    infoPanel.style.top = `${Math.round(top)}px`;
+    placeFixedElement(infoPanel, left, top);
+    playEnter(infoPanel);
     infoButton.setAttribute('aria-expanded', 'true');
     infoPanel.querySelector('a').focus({preventScroll: true});
   };
@@ -313,7 +515,12 @@
       path.unshift([...parentNode.childNodes].indexOf(current));
       current = parentNode;
     }
-    return { parent_css_selector: cssPath(parent), node_path: path, offset };
+    return {
+      parent_css_selector: cssPath(parent),
+      parent_shadow_path: shadowPath(parent),
+      node_path: path,
+      offset
+    };
   };
   const surroundingText = (range, commonElement) => {
     const beforeRange = document.createRange();
@@ -345,7 +552,10 @@
     };
   };
   const resolveEndpoint = (reference) => {
-    const parent = document.querySelector(reference.parent_css_selector);
+    const parent = resolveSelectorReference({
+      css_selector: reference.parent_css_selector,
+      shadow_path: reference.parent_shadow_path
+    });
     if (!parent || isOverlay(parent)) return null;
     let node = parent;
     for (const index of reference.node_path || []) {
@@ -372,39 +582,35 @@
   };
   const resolveElement = (reference) => {
     if (!reference?.css_selector) return null;
-    try {
-      const node = document.querySelector(reference.css_selector);
-      return visible(node) ? node : null;
-    } catch {
-      return null;
-    }
+    const node = resolveSelectorReference(reference);
+    return visible(node) ? node : null;
   };
   const rangeRects = (range) => [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
   const removeHighlight = (id) => {
     for (const node of highlights.get(id) || []) node.remove();
     highlights.delete(id);
   };
-  const drawHighlight = (id, range, host = document.documentElement) => {
+  const drawHighlight = (id, range, origin = containingBlockOrigin()) => {
     removeHighlight(id);
     const nodes = rangeRects(range).map(rect => {
       const highlight = document.createElement('div');
       highlight.className = 'steward-review-ui steward-review-highlight';
-      const point = pointInHost(rect.left, rect.top, host);
+      const point = toContainingBlock(rect.left, rect.top, origin);
       highlight.style.left = `${point.x}px`;
       highlight.style.top = `${point.y}px`;
       highlight.style.width = `${Math.round(rect.width)}px`;
       highlight.style.height = `${Math.round(rect.height)}px`;
       shieldReviewUi(highlight);
-      host.appendChild(highlight);
+      overlayShadow.appendChild(highlight);
       return highlight;
     });
     highlights.set(id, nodes);
     return nodes;
   };
-  const anchorForRange = (range, host = document.documentElement) => {
+  const clientAnchorForRange = (range) => {
     const rects = rangeRects(range);
     const rect = rects.at(-1);
-    return rect ? pointInHost(rect.right, rect.top, host) : null;
+    return rect ? {x: rect.right, y: rect.top} : null;
   };
 
   // Draft persistence includes unsaved textarea content so an interrupted tab
@@ -420,7 +626,7 @@
       if (index >= 0) recovered[index] = item;
       else recovered.push(item);
     } else {
-      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at });
+      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at });
     }
     return recovered;
   };
@@ -478,7 +684,10 @@
     if (draft?.item) rememberComment(draft.item);
     else if (draft) rememberDeletion(draft.id);
     if (draft?.provisionalId) removeHighlight(draft.provisionalId);
-    if (popup) popup.remove();
+    if (popup) {
+      hideAsPopover(popup);
+      popup.remove();
+    }
     popup = null;
     draft = null;
     queueDraftSave();
@@ -488,33 +697,46 @@
     count.dataset.count = String(comments.length);
     count.setAttribute('aria-label', `${comments.length} comment${comments.length === 1 ? '' : 's'}`);
   };
-  const anchorForComment = (item) => {
+  const anchorForComment = (item, origin = containingBlockOrigin()) => {
+    const fallbackAnchor = () => {
+      if (!item.anchor) return null;
+      const {x, y} = item.anchor;
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+      if (item.anchor_coordinate_space === 'viewport') return toContainingBlock(x, y, origin);
+      if (item.anchor_coordinate_space) return {x, y};
+
+      // Before coordinate-space metadata existed, document anchors included
+      // scroll offsets and modal anchors were relative to their modal host.
+      const legacyTarget = resolveSelectorReference(item.element);
+      const legacyHost = composedClosest(legacyTarget, MODAL_HOST_SELECTOR);
+      if (!legacyHost) return toContainingBlock(x - window.scrollX, y - window.scrollY, origin);
+      const hostRect = legacyHost.getBoundingClientRect();
+      return toContainingBlock(
+        x + hostRect.left + legacyHost.clientLeft - legacyHost.scrollLeft,
+        y + hostRect.top + legacyHost.clientTop - legacyHost.scrollTop,
+        origin
+      );
+    };
     if (item.target_type === 'text' && item.selection) {
       const range = resolveRange(item.selection);
-      if (!range) return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
-      const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-        ? range.commonAncestorContainer
-        : range.commonAncestorContainer.parentElement;
-      const host = hostForNode(commonElement);
-      drawHighlight(item.id, range, host);
-      const anchor = anchorForRange(range, host);
-      return anchor ? { ...anchor, host } : (item.anchor ? { ...item.anchor, host: document.documentElement } : null);
+      if (!range) return fallbackAnchor();
+      drawHighlight(item.id, range, origin);
+      const anchor = clientAnchorForRange(range);
+      return anchor ? toContainingBlock(anchor.x, anchor.y, origin) : fallbackAnchor();
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
       const target = resolveElement(item.element);
-      if (!target) return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
-      const host = hostForNode(target);
+      if (!target) return fallbackAnchor();
       const rect = target.getBoundingClientRect();
       const clientX = rect.left + rect.width * item.anchor_ratio.x;
       const clientY = rect.top + rect.height * item.anchor_ratio.y;
-      return { ...pointInHost(clientX, clientY, host), host };
+      return toContainingBlock(clientX, clientY, origin);
     }
-    return item.anchor ? { ...item.anchor, host: document.documentElement } : null;
+    return fallbackAnchor();
   };
-  const pinFor = (item) => {
-    const anchor = anchorForComment(item);
+  const pinFor = (item, origin = containingBlockOrigin()) => {
+    const anchor = anchorForComment(item, origin);
     if (!anchor) return;
-    const host = anchor.host || document.documentElement;
     const pin = document.createElement('button');
     pin.className = 'steward-review-ui steward-review-pin';
     pin.type = 'button';
@@ -524,7 +746,8 @@
     pin.setAttribute('aria-label', `Open comment ${comments.indexOf(item) + 1}`);
     shieldReviewUi(pin);
     pin.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); openPopup(item, event.clientX, event.clientY); });
-    host.appendChild(pin);
+    overlayShadow.appendChild(pin);
+    playEnter(pin);
     pins.set(item.id, pin);
     updateCount();
   };
@@ -556,7 +779,7 @@
       rememberComment(draft.item);
       savedItem = draft.item;
     } else {
-      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at };
+      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at };
       comments.push(item);
       rememberComment(item);
       pinFor(item);
@@ -570,6 +793,7 @@
     closePopup();
     popup = document.createElement('div');
     popup.className = 'steward-review-ui steward-review-popup';
+    popup.setAttribute('popover', 'manual');
     const number = item ? comments.indexOf(item) + 1 : null;
     popup.innerHTML = `
       <div class="sr-popup-head">
@@ -593,28 +817,19 @@
     // Focus-trapping dialog libraries reject focus outside their content.
     // Keep the editor inside the active dialog so its textarea remains usable
     // without weakening the page's production modal behavior.
-    const popupHost = activeModalHost() || document.documentElement;
-    popupHost.appendChild(popup);
+    overlayShadow.appendChild(popup);
+    showAsPopover(popup);
     draft = item ? { item } : {
       ...target,
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
       created_at: new Date().toISOString()
     };
-    const placePopup = (clientX, clientY) => {
-      const minX = 12;
-      const minY = 12;
-      const maxX = Math.max(minX, window.innerWidth - popup.offsetWidth - 12);
-      const maxY = Math.max(minY, window.innerHeight - popup.offsetHeight - 12);
-      popup.style.left = `${Math.round(clamp(clientX, minX, maxX))}px`;
-      popup.style.top = `${Math.round(clamp(clientY, minY, maxY))}px`;
-    };
+    const placePopup = (nextX, nextY) => placeFixedElement(popup, nextX, nextY);
     placePopup(clientX + 14, clientY + 14);
+    playEnter(popup);
     if (!item && target?.range) {
       draft.provisionalId = `draft-${draft.id}`;
-      const commonElement = target.range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-        ? target.range.commonAncestorContainer
-        : target.range.commonAncestorContainer.parentElement;
-      drawHighlight(draft.provisionalId, target.range, hostForNode(commonElement));
+      drawHighlight(draft.provisionalId, target.range);
       delete draft.range;
     }
     const textarea = popup.querySelector('textarea');
@@ -654,10 +869,12 @@
     textarea.focus();
   };
 
-  comments.forEach(pinFor);
+  const initialOrigin = comments.length ? containingBlockOrigin() : null;
+  comments.forEach(item => pinFor(item, initialOrigin));
   updateCount();
   // Toolbar and page event wiring stays together so capture-phase behavior is
   // easy to audit against the host page's own controls.
+  const eventOrigin = (event) => event.composedPath().find(node => node instanceof Element) || event.target;
   addButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'element' ? 'interact' : 'element'); });
   textButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'text' ? 'interact' : 'text'); });
   infoButton.addEventListener('click', toggleInfo);
@@ -665,28 +882,29 @@
     if (infoPanel && !infoPanel.contains(event.target) && !infoButton.contains(event.target)) closeInfo();
   });
   document.addEventListener('pointerover', (event) => {
-    if (mode !== 'element' || !visible(event.target)) return;
+    const target = eventOrigin(event);
+    if (mode !== 'element' || !visible(target)) return;
     clearHover();
-    hovered = event.target;
+    hovered = target;
+    ensureHoverStyle(hovered);
     hovered.classList.add('steward-review-hover');
   }, true);
   document.addEventListener('pointerout', (event) => {
-    if (event.target === hovered) clearHover();
+    if (eventOrigin(event) === hovered) clearHover();
   }, true);
   document.addEventListener('click', (event) => {
-    if (isOverlay(event.target)) return;
+    const target = eventOrigin(event);
+    if (isOverlay(target)) return;
     if (mode === 'text') {
       event.preventDefault();
       event.stopImmediatePropagation();
       return;
     }
-    if (mode !== 'element' || !visible(event.target)) return;
+    if (mode !== 'element' || !visible(target)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    const target = event.target;
     const element = elementReference(target);
-    const host = hostForNode(target);
-    const anchor = pointInHost(event.clientX, event.clientY, host);
+    const anchor = {x: event.clientX, y: event.clientY};
     const rect = target.getBoundingClientRect();
     const anchorRatio = {
       x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
@@ -694,22 +912,20 @@
     };
     clearHover();
     setMode('interact');
-    openPopup(null, event.clientX, event.clientY, { targetType: 'element', element, anchor, anchorRatio });
+    openPopup(null, event.clientX, event.clientY, { targetType: 'element', element, anchor, anchorCoordinateSpace: 'viewport', anchorRatio });
   }, true);
   document.addEventListener('pointerup', (event) => {
-    if (mode !== 'text' || isOverlay(event.target)) return;
-    const selection = window.getSelection();
+    const target = eventOrigin(event);
+    if (mode !== 'text' || isOverlay(target)) return;
+    const selectionRoot = target.getRootNode();
+    const selection = selectionRoot.getSelection?.() || window.getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
       status.textContent = 'Drag across text to select it - Esc to exit';
       return;
     }
     const range = selection.getRangeAt(0).cloneRange();
     const reference = rangeReference(range);
-    const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
-      ? range.commonAncestorContainer
-      : range.commonAncestorContainer.parentElement;
-    const host = hostForNode(commonElement);
-    const anchor = anchorForRange(range, host);
+    const anchor = clientAnchorForRange(range);
     if (!reference || !reference.selected_text.trim() || !anchor) {
       status.textContent = 'That selection cannot be annotated. Select page text outside the review controls.';
       return;
@@ -720,6 +936,7 @@
       element: reference.common_ancestor,
       selection: reference,
       anchor,
+      anchorCoordinateSpace: 'viewport',
       range
     });
   }, true);
@@ -734,20 +951,34 @@
   }, true);
 
   refreshComments = () => {
+    const origin = containingBlockOrigin();
     for (const item of comments) {
-      const anchor = anchorForComment(item);
+      const anchor = anchorForComment(item, origin);
       const pin = pins.get(item.id);
-      if (anchor && pin) {
-        const host = anchor.host || document.documentElement;
-        if (pin.parentElement !== host) host.appendChild(pin);
-        pin.style.left = `${anchor.x}px`;
-        pin.style.top = `${anchor.y}px`;
+      if (!pin) continue;
+      if (!anchor) {
+        pin.hidden = true;
+        continue;
       }
+      pin.hidden = false;
+      if (pin.parentNode !== overlayShadow) overlayShadow.appendChild(pin);
+      pin.style.left = `${anchor.x}px`;
+      pin.style.top = `${anchor.y}px`;
     }
   };
+  scheduleCommentRefresh = () => {
+    if (refreshCommentsFrame !== null) return;
+    refreshCommentsFrame = requestAnimationFrame(() => {
+      refreshCommentsFrame = null;
+      refreshComments();
+    });
+  };
+  // Element scroll events do not bubble, so listen during capture to keep
+  // comments anchored when any nested scrollable section moves its content.
+  document.addEventListener('scroll', scheduleCommentRefresh, true);
   window.addEventListener('resize', () => {
     closeInfo();
-    requestAnimationFrame(refreshComments);
+    scheduleCommentRefresh();
   });
   if (document.fonts?.ready) document.fonts.ready.then(refreshComments);
 
@@ -759,15 +990,15 @@
     const rect = root.getBoundingClientRect();
     const offsetX = event.clientX - rect.left;
     const offsetY = event.clientY - rect.top;
-    // The initial CSS position is centered with a transform. Convert it to
-    // equivalent pixel coordinates before removing that transform, otherwise
-    // the toolbar jumps on the first drag.
-    root.style.left = `${rect.left}px`;
-    root.style.top = `${rect.top}px`;
+    const origin = containingBlockOrigin();
+    root.style.left = `${rect.left - origin.left}px`;
+    root.style.top = `${rect.top - origin.top}px`;
     root.style.transform = 'none';
     const move = (moveEvent) => {
-      root.style.left = `${clamp(moveEvent.clientX - offsetX, 8, window.innerWidth - root.offsetWidth - 8)}px`;
-      root.style.top = `${clamp(moveEvent.clientY - offsetY, 8, window.innerHeight - root.offsetHeight - 8)}px`;
+      const left = clamp(moveEvent.clientX - offsetX, 8, window.innerWidth - root.offsetWidth - 8);
+      const top = clamp(moveEvent.clientY - offsetY, 8, window.innerHeight - root.offsetHeight - 8);
+      root.style.left = `${left - origin.left}px`;
+      root.style.top = `${top - origin.top}px`;
     };
     const end = () => { dragHandle.removeEventListener('pointermove', move); dragHandle.removeEventListener('pointerup', end); dragHandle.removeEventListener('pointercancel', end); };
     dragHandle.addEventListener('pointermove', move);
