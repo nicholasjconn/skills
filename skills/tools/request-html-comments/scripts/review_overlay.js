@@ -169,7 +169,6 @@
   const registeredDocuments = new Set();
   const watchedFrames = new WeakSet();
   const frameDocuments = new WeakMap();
-  const frameAttachers = new WeakMap();
   const renderedAnchors = new Map();
   const shadowFrameObservers = new WeakMap();
 
@@ -184,6 +183,7 @@
     return node.ownerDocument || document;
   };
   const ownerWindowOf = (node) => ownerDocumentOf(node).defaultView || window;
+  const viewportRect = (view) => ({ left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight, width: view.innerWidth, height: view.innerHeight });
   const isFrameElement = (node) => isElement(node) && /^(IFRAME|FRAME)$/.test(node.tagName);
   const { clampPinToClip, intersectClippedAxes, isAxisAlignedTransform, mapPointToTop, mapRectToTop } = __stewardReviewGeometry;
   const overflowClips = (value) => ['hidden', 'clip', 'auto', 'scroll'].includes(value);
@@ -271,7 +271,7 @@
   });
   const frameGeometryFor = (node) => {
     const view = ownerWindowOf(node);
-    const source = { left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight, width: view.innerWidth, height: view.innerHeight };
+    const source = viewportRect(view);
     const frames = ancestorFramesFor(node);
     if (!frames) return null;
     if (frames.some(transformedFrameAncestor)) return { frame: frames[0] || null, source, hops: [], unavailable: FRAME_TRANSFORM_STATUS };
@@ -294,14 +294,7 @@
         scaleY,
         content,
         visibleClip: visibleFrameContentRect(frame, content),
-        parentSource: {
-          left: 0,
-          top: 0,
-          right: parentView.innerWidth,
-          bottom: parentView.innerHeight,
-          width: parentView.innerWidth,
-          height: parentView.innerHeight
-        }
+        parentSource: viewportRect(parentView)
       };
     });
     const geometry = { frame: frames[0] || null, source, hops };
@@ -571,15 +564,16 @@
       return null;
     }
   };
+  const selectorReference = (node) => ({
+    css_selector: cssPath(node),
+    shadow_path: shadowPath(node),
+    xpath: xpath(node),
+    tag: node.tagName.toLowerCase()
+  });
   const iframePath = (node) => {
     const frames = ancestorFramesFor(node);
     if (!frames?.length) return null;
-    return frames.slice().reverse().map((frame) => ({
-      css_selector: cssPath(frame),
-      shadow_path: shadowPath(frame),
-      xpath: xpath(frame),
-      tag: frame.tagName.toLowerCase()
-    }));
+    return frames.slice().reverse().map(selectorReference);
   };
   const resolveIframePath = (path) => {
     if (!path?.length) return document;
@@ -609,10 +603,7 @@
   const elementReference = (node) => {
     const rect = node.getBoundingClientRect();
     return {
-      css_selector: cssPath(node),
-      shadow_path: shadowPath(node),
-      xpath: xpath(node),
-      tag: node.tagName.toLowerCase(),
+      ...selectorReference(node),
       id: node.id || null,
       classes: [...node.classList].filter(name => !name.startsWith('steward-review-')),
       text_excerpt: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240),
@@ -814,6 +805,13 @@
   const persistableTarget = (draftOrItem) => (
     draftOrItem.iframe_path?.length ? { iframe_path: draftOrItem.iframe_path } : {}
   );
+  const commentFromDraft = (draftItem, comment) => ({
+    id: draftItem.id, target_type: draftItem.targetType,
+    element: draftItem.element, selection: draftItem.selection,
+    ...persistableTarget(draftItem),
+    anchor: draftItem.anchor, anchor_coordinate_space: draftItem.anchorCoordinateSpace,
+    anchor_ratio: draftItem.anchorRatio, comment, created_at: draftItem.created_at
+  });
   // Draft persistence includes unsaved textarea content so an interrupted tab
   // can be recovered without treating it as a submitted review.
   const recoverableComments = () => {
@@ -827,7 +825,7 @@
       if (index >= 0) recovered[index] = item;
       else recovered.push(item);
     } else {
-      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, ...persistableTarget(draft), anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at });
+      recovered.push(commentFromDraft(draft, text));
     }
     return recovered;
   };
@@ -1004,7 +1002,7 @@
       rememberComment(draft.item);
       savedItem = draft.item;
     } else {
-      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, ...persistableTarget(draft), anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at };
+      const item = commentFromDraft(draft, text);
       comments.push(item);
       rememberComment(item);
       refreshComments();
@@ -1203,49 +1201,49 @@
     }
     if (event.key === 'Escape' && mode !== 'interact') { event.preventDefault(); setMode('interact'); }
   };
+  const listenUntilAbort = (target, eventName, listener, options, signal) => {
+    if (!target) return;
+    target.addEventListener(eventName, listener, options);
+    signal?.addEventListener('abort', () => target.removeEventListener(eventName, listener, options), { once: true });
+  };
   const bindAnnotationListeners = (doc, signal) => {
-    const capture = signal ? { capture: true, signal } : true;
     const clearDocumentHover = () => clearHoverInDocument(doc);
-    doc.addEventListener('pointerdown', onPointerDown, signal ? { signal } : undefined);
-    doc.addEventListener('pointermove', onPointerMove, capture);
-    doc.addEventListener('click', onClick, capture);
-    doc.addEventListener('pointerup', onPointerUp, capture);
-    doc.addEventListener('keydown', onKeyDown, capture);
-    doc.documentElement?.addEventListener('pointerleave', clearDocumentHover, signal ? { signal } : undefined);
+    listenUntilAbort(doc, 'pointerdown', onPointerDown, false, signal);
+    listenUntilAbort(doc, 'pointermove', onPointerMove, true, signal);
+    listenUntilAbort(doc, 'click', onClick, true, signal);
+    listenUntilAbort(doc, 'pointerup', onPointerUp, true, signal);
+    listenUntilAbort(doc, 'keydown', onKeyDown, true, signal);
+    listenUntilAbort(doc.documentElement, 'pointerleave', clearDocumentHover, false, signal);
     // Element scroll events do not bubble, so listen during capture to keep
     // comments anchored when any nested scrollable section moves its content.
-    doc.addEventListener('scroll', scheduleCommentRefresh, capture);
+    listenUntilAbort(doc, 'scroll', scheduleCommentRefresh, true, signal);
   };
-  const watchFrame = (frame) => {
-    if (!isFrameElement(frame)) return;
-    if (watchedFrames.has(frame)) {
-      if (!frameDocuments.has(frame)) frameAttachers.get(frame)?.();
-      return;
+  const attachFrameDocument = (frame) => {
+    const nested = accessibleFrameDocument(frame);
+    const previous = frameDocuments.get(frame);
+    if (previous?.doc === nested) return;
+    if (previous) {
+      previous.controller.abort();
+      releaseFrames(previous.doc);
+      registeredDocuments.delete(previous.doc);
+      frameDocuments.delete(frame);
+      clearHoverInDocument(previous.doc);
     }
-    watchedFrames.add(frame);
-    const attachFrameDocument = () => {
-      const nested = accessibleFrameDocument(frame);
-      const previous = frameDocuments.get(frame);
-      if (previous?.doc === nested) return;
-      if (previous) {
-        previous.controller.abort();
-        releaseFrames(previous.doc);
-        registeredDocuments.delete(previous.doc);
-        frameDocuments.delete(frame);
-        clearHoverInDocument(previous.doc);
-      }
-      if (!nested) return;
-      const controller = new AbortController();
+    if (!nested) return;
+    const Controller = nested.defaultView?.AbortController || AbortController;
+    const Observer = nested.defaultView?.MutationObserver || MutationObserver;
+    const controller = new Controller();
+    try {
       registeredDocuments.add(nested);
       ensureDocumentHoverStyle(nested);
       bindAnnotationListeners(nested, controller.signal);
-      nested.defaultView?.addEventListener('resize', scheduleCommentRefresh, { signal: controller.signal });
+      listenUntilAbort(nested.defaultView, 'resize', scheduleCommentRefresh, false, controller.signal);
       if (typeof ResizeObserver === 'function') {
-        const resizeObserver = new ResizeObserver(() => scheduleCommentRefresh());
+        const resizeObserver = new ResizeObserver(scheduleCommentRefresh);
         resizeObserver.observe(frame);
         controller.signal.addEventListener('abort', () => resizeObserver.disconnect(), { once: true });
       }
-      const frameDocumentObserver = new MutationObserver((records) => {
+      const frameDocumentObserver = new Observer((records) => {
         if (records.every(isOverlayMutation)) return;
         for (const record of records) {
           for (const node of record.removedNodes) releaseFrames(node);
@@ -1260,22 +1258,30 @@
         characterData: true
       });
       controller.signal.addEventListener('abort', () => frameDocumentObserver.disconnect(), { once: true });
-      if (nested.fonts?.ready) {
-        nested.fonts.ready.then(() => {
-          if (!controller.signal.aborted) scheduleCommentRefresh();
-        }, () => {});
-      }
+      nested.fonts?.ready?.then(() => {
+        if (!controller.signal.aborted) scheduleCommentRefresh();
+      }, () => {});
       frameDocuments.set(frame, { doc: nested, controller });
       discoverFrames(nested, controller.signal);
       scheduleCommentRefresh();
-    };
-    frameAttachers.set(frame, attachFrameDocument);
-    frame.addEventListener('load', attachFrameDocument);
-    attachFrameDocument();
+    } catch {
+      controller.abort();
+      registeredDocuments.delete(nested);
+      frameDocuments.delete(frame);
+    }
+  };
+  const watchFrame = (frame) => {
+    if (!isFrameElement(frame)) return;
+    if (!watchedFrames.has(frame)) {
+      watchedFrames.add(frame);
+      frame.addEventListener('load', () => attachFrameDocument(frame));
+    }
+    attachFrameDocument(frame);
   };
   const observeShadowFrames = (root, signal) => {
     if (!isShadowRoot(root) || shadowFrameObservers.has(root)) return;
-    const observer = new MutationObserver((records) => {
+    const Observer = ownerWindowOf(root).MutationObserver || MutationObserver;
+    const observer = new Observer((records) => {
       for (const record of records) {
         for (const node of record.removedNodes) releaseFrames(node);
         for (const node of record.addedNodes) discoverFrames(node, signal);

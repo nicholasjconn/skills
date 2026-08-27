@@ -59,46 +59,6 @@ function upstreamHostname(hostname) {
   return hostname === '[::1]' ? '::1' : hostname
 }
 
-function validPort(port) {
-  if (port === undefined) return '80'
-  if (!/^[1-9]\d{0,4}$/.test(port)) return null
-  const numeric = Number(port)
-  return numeric <= 65535 ? String(numeric) : null
-}
-
-function validIpv4(hostname) {
-  if (isIP(hostname) !== 4) return null
-  const octets = hostname.split('.')
-  if (octets.length !== 4) return null
-  if (octets.some(octet => !/^(0|[1-9]\d{0,2})$/.test(octet))) return null
-  return octets.every(octet => Number(octet) <= 255) ? hostname : null
-}
-
-function validHostname(hostname) {
-  if (!/^[A-Za-z0-9.-]+$/.test(hostname)) return null
-  const labels = hostname.split('.')
-  if (labels.every(label => /^\d+$/.test(label) || /^0x[0-9A-Fa-f]+$/.test(label))) return null
-  if (labels.some(label => !label || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label))) return null
-  return hostname.toLowerCase()
-}
-
-export function normalizeHttpAuthority(authority) {
-  if (typeof authority !== 'string' || !authority) return null
-  if (/\s/.test(authority) || /[@/?#]/.test(authority)) return null
-  const bracketedIpv6 = /^\[([0-9A-Fa-f:.]+)\](?::(\d+))?$/.exec(authority)
-  if (bracketedIpv6) {
-    const port = validPort(bracketedIpv6[2])
-    if (!port || isIP(bracketedIpv6[1]) !== 6) return null
-    return `[${bracketedIpv6[1]}]:${port}`
-  }
-  const hostPort = /^([^:[\]]+)(?::(\d+))?$/.exec(authority)
-  if (!hostPort) return null
-  const port = validPort(hostPort[2])
-  if (!port) return null
-  const hostname = validIpv4(hostPort[1]) || validHostname(hostPort[1])
-  return hostname ? `${hostname}:${port}` : null
-}
-
 function httpAuthority(hostname, port) {
   return Number(port) === 80 ? hostname : `${hostname}:${port}`
 }
@@ -225,7 +185,7 @@ function readRequestBody(request) {
 }
 
 function requestHostAllowed(request, allowedAuthority) {
-  return normalizeHttpAuthority(request.headers.host) === normalizeHttpAuthority(allowedAuthority)
+  return String(request.headers.host || '').toLowerCase() === allowedAuthority.toLowerCase()
 }
 
 function sameOriginRequest(request) {

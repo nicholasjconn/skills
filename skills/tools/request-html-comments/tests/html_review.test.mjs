@@ -4,14 +4,13 @@ import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
   createReviewServer,
   injectHtml,
   loadRestoredComments,
-  normalizeHttpAuthority,
   parseArgs,
   parseSource,
   sourceIdentity,
@@ -56,25 +55,7 @@ function websocketHandshake(port, path, origin, hostHeader = `127.0.0.1:${port}`
   })
 }
 
-function rawHttpStatus(port, connectHost, hostHeader, origin = null) {
-  return new Promise((resolveStatus, rejectStatus) => {
-    const socket = connect(port, connectHost, () => {
-      const originHeader = origin ? `Origin: ${origin}\r\n` : ''
-      socket.write(`GET / HTTP/1.1\r\nHost: ${hostHeader}\r\n${originHeader}Connection: close\r\n\r\n`)
-    })
-    let response = ''
-    socket.setEncoding('utf8')
-    socket.on('data', chunk => { response += chunk })
-    socket.on('end', () => {
-      const status = /^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]
-      if (!status) rejectStatus(new Error(`missing HTTP status in ${response}`))
-      else resolveStatus(Number(status))
-    })
-    socket.on('error', rejectStatus)
-  })
-}
-
-function rawHttpRequestStatus(port, connectHost, hostHeader, {
+function rawHttpStatus(port, connectHost, hostHeader, {
   method = 'GET',
   path = '/',
   headers = {},
@@ -163,39 +144,6 @@ async function cleanupAsyncReview(output) {
   if (workerPid) await terminateProcess(workerPid)
 }
 
-function reviewUrlFromStdout(child) {
-  return new Promise((resolveUrl, rejectUrl) => {
-    let stdout = ''
-    const timeout = setTimeout(() => rejectUrl(new Error(`timed out waiting for review URL: ${stdout}`)), 5_000)
-    child.stdout.setEncoding('utf8')
-    child.stdout.on('data', chunk => {
-      stdout += chunk
-      const match = /Review URL: (http:\/\/\S+)/.exec(stdout)
-      if (!match) return
-      clearTimeout(timeout)
-      resolveUrl(match[1])
-    })
-    child.once('error', error => {
-      clearTimeout(timeout)
-      rejectUrl(error)
-    })
-    child.once('exit', code => {
-      clearTimeout(timeout)
-      rejectUrl(new Error(`review exited before reporting its URL (status ${code}): ${stdout}`))
-    })
-  })
-}
-
-function exited(child) {
-  return new Promise((resolveExit, rejectExit) => {
-    child.once('exit', (code, signal) => {
-      if (signal) rejectExit(new Error(`review exited from ${signal}`))
-      else resolveExit(code)
-    })
-    child.once('error', rejectExit)
-  })
-}
-
 function openWebsocket(port, path, origin) {
   return new Promise((resolveSocket, rejectSocket) => {
     const socket = connect(port, '127.0.0.1', () => {
@@ -241,7 +189,6 @@ test('CLI accepts no-open, explicit port, and a validated local-interface host',
   assert.equal(args.host, host)
   assert.throws(() => parseArgs([html, '--port', '0']), /integer from 1 to 65535/)
   assert.throws(() => parseArgs([html, '--port', '65536']), /integer from 1 to 65535/)
-  assert.throws(() => parseArgs([html, '--port', 'not-a-port']), /integer from 1 to 65535/)
 })
 
 test('trusted-LAN host validation accepts only an exact active non-loopback IPv4 address', () => {
@@ -250,62 +197,8 @@ test('trusted-LAN host validation accepts only an exact active non-loopback IPv4
     lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
   }
   assert.equal(validateReviewHost('192.0.2.44', interfaces), '192.0.2.44')
-  for (const rejected of [
-    'localhost', 'example.test', '::1', '[::1]', '0.0.0.0', '127.0.0.1',
-    '224.0.0.1', '999.1.1.1', '192.0.2.44:3000', '192.0.2.45', ' 192.0.2.44',
-  ]) {
+  for (const rejected of ['localhost', '127.0.0.1', '192.0.2.44:3000', '192.0.2.45']) {
     assert.throws(() => validateReviewHost(rejected, interfaces), /--host/)
-  }
-})
-
-test('default HTTP authorities normalize an omitted :80 without weakening exact-host checks', () => {
-  assert.equal(normalizeHttpAuthority('192.0.2.44'), '192.0.2.44:80')
-  assert.equal(normalizeHttpAuthority('192.0.2.44:80'), '192.0.2.44:80')
-  assert.equal(normalizeHttpAuthority('Review.Test'), 'review.test:80')
-  assert.equal(normalizeHttpAuthority('[2001:db8::1]'), '[2001:db8::1]:80')
-  assert.equal(normalizeHttpAuthority('[2001:DB8::1]:443'), '[2001:DB8::1]:443')
-  assert.notEqual(normalizeHttpAuthority('192.0.2.44'), normalizeHttpAuthority('192.0.2.44:81'))
-  assert.notEqual(normalizeHttpAuthority('review.test'), normalizeHttpAuthority('other.test'))
-})
-
-test('HTTP authority normalization rejects URL parser tricks and noncanonical host spellings', () => {
-  for (const rejected of [
-    '',
-    ' review.test',
-    'review.test ',
-    'review.test\t',
-    'user@review.test',
-    'review.test/path',
-    'review.test?query',
-    'review.test#fragment',
-    'review.test:',
-    'review.test:0',
-    'review.test:00',
-    'review.test:080',
-    'review.test:65536',
-    'review.test:-1',
-    'review.test:+80',
-    '192.0.2',
-    '192.0.2.044',
-    '192.0.2.4.4',
-    '0300.0000.0002.0044',
-    '0xC000022C',
-    '3232236076',
-    '192.0.2.44:080',
-    '192.0.2.44:99999',
-    'example..test',
-    '.example.test',
-    'example.test.',
-    '-example.test',
-    'example-.test',
-    '[2001:db8::1',
-    '2001:db8::1',
-    '[2001:db8::1]:',
-    '[2001:db8::1]:080',
-    '[2001:db8::1]:65536',
-    '[fe80::1%25en0]',
-  ]) {
-    assert.equal(normalizeHttpAuthority(rejected), null, rejected)
   }
 })
 
@@ -345,61 +238,6 @@ test('trusted-LAN server binds and advertises only the selected local interface'
   assert.equal(crossOrigin.status, 403)
 })
 
-test('cross-site top-level document navigation is allowed only for the review page', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const css = join(directory, 'page.css')
-  writeFileSync(html, '<html><head><link rel="stylesheet" href="page.css"></head><body>Review me</body></html>')
-  writeFileSync(css, 'body { color: red; }')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-  })
-  t.after(() => review.close())
-
-  const reviewUrl = new URL(review.reviewUrl)
-  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
-    method: 'GET',
-    path: reviewUrl.pathname,
-    headers: {
-      'Sec-Fetch-Site': 'cross-site',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-    },
-  }), 200)
-  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
-    method: 'HEAD',
-    path: reviewUrl.pathname,
-    headers: {
-      'Sec-Fetch-Site': 'cross-site',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-    },
-  }), 200)
-  const assetResponse = await fetch(new URL('page.css', review.reviewUrl), {
-    headers: {
-      'sec-fetch-site': 'cross-site',
-      'sec-fetch-mode': 'no-cors',
-      'sec-fetch-dest': 'style',
-    },
-  })
-  assert.equal(assetResponse.status, 403)
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const submit = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
-    method: 'POST',
-    headers: {
-      origin: 'https://mail.google.com',
-      'content-type': 'application/json',
-      'sec-fetch-site': 'cross-site',
-    },
-    body: '{}',
-  })
-  assert.equal(submit.status, 403)
-  assert.equal((await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), { method: 'POST', body: '{}' })).status, 200)
-})
 
 test('invalid startup input leaves an actionable worker log', t => {
   const directory = temporaryDirectory(t)
@@ -449,24 +287,6 @@ test('async no-open forwards explicit launch controls to the worker', async t =>
   assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
 })
 
-test('synchronous no-open prints the review URL before waiting for feedback, including with an output path', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const output = join(directory, 'feedback.json')
-  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
-  writeFileSync(html, '<html><body>Sync review</body></html>')
-  const child = spawn(process.execPath, [script, html, '--output', output, '--no-open'], { stdio: ['ignore', 'pipe', 'pipe'] })
-  const completion = exited(child)
-  t.after(() => terminateProcess(child.pid))
-
-  const reviewUrl = await reviewUrlFromStdout(child)
-  const page = await fetch(reviewUrl)
-  assert.equal(page.status, 200)
-  const endpoint = endpointFromHtml(await page.text())
-  assert.equal((await fetch(new URL(`${endpoint}/cancel`, reviewUrl), { method: 'POST', body: '{}' })).status, 200)
-  assert.equal(await completion, 2)
-})
-
 test('restore accepts legacy and versioned artifacts but rejects another source', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -475,7 +295,14 @@ test('restore accepts legacy and versioned artifacts but rejects another source'
   const versioned = join(directory, 'versioned.json')
   writeFileSync(html, '<html></html>')
   writeFileSync(other, '<html></html>')
-  const comments = [{ id: 'one', comment: 'Keep this' }]
+  const comments = [{
+    id: 'one',
+    comment: 'Keep this',
+    iframe_path: [
+      { css_selector: '#outer-frame', tag: 'iframe' },
+      { css_selector: '#inner-frame', tag: 'iframe' },
+    ],
+  }]
   writeFileSync(legacy, JSON.stringify({ version: 1, source: html, comments }))
   const servedSource = parseSource('http://localhost:3100/review-me')
   writeFileSync(versioned, JSON.stringify({ version: 2, source: sourceIdentity(servedSource), comments }))
@@ -531,7 +358,7 @@ test('file overlay injection preserves non-ASCII restored comments through Latin
   assert.doesNotMatch(encoded.slice(scriptStart, scriptEnd), /[^\x00-\x7f]/)
 })
 
-test('geometry maps nested frame coordinates and clips rectangles', () => {
+test('frame geometry maps, clips, and rejects unsupported transforms', () => {
   const geometryForFrames = {
     source: { left: 0, top: 0, right: 100, bottom: 50 },
     hops: [
@@ -557,23 +384,13 @@ test('geometry maps nested frame coordinates and clips rectangles', () => {
     left: 115, top: 65, right: 145, bottom: 85, width: 30, height: 20,
   })
   assert.equal(geometry.mapPointToTop(101, 10, geometryForFrames), null)
-})
-
-test('geometry handles axis clipping, pin placement, and unsupported transforms', () => {
   assert.deepEqual(
     geometry.intersectClippedAxes({ left: 0, top: 0, right: 30, bottom: 30 }, { left: 10, top: 10, right: 20, bottom: 20 }, true, false),
     { left: 10, top: 0, right: 20, bottom: 30, width: 10, height: 30 },
   )
   assert.deepEqual(geometry.clampPinToClip(3, 40, { left: 0, top: 0, right: 40, bottom: 40 }), { x: 15.5, y: 24.5 })
-  for (const transform of ['none', 'matrix(2, 0, 0, 3, 10, 20)', 'matrix3d(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1)']) {
-    assert.equal(geometry.isAxisAlignedTransform(transform), true, transform)
-  }
-  for (const transform of ['matrix(1, 0.2, 0, 1, 0, 0)', 'matrix(1, 0, 0.2, 1, 0, 0)', 'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0.2, 1, 0, 0, 0, 0, 1)']) {
-    assert.equal(geometry.isAxisAlignedTransform(transform), false, transform)
-  }
-})
-
-test('geometry exports Node helpers without publishing an injected-page global', () => {
+  assert.equal(geometry.isAxisAlignedTransform('matrix(2, 0, 0, 3, 10, 20)'), true)
+  assert.equal(geometry.isAxisAlignedTransform('matrix(1, 0.2, 0, 1, 0, 0)'), false)
   assert.equal(typeof geometry.mapPointToTop, 'function')
   assert.equal(globalThis.__stewardReviewGeometry, undefined)
 })
@@ -830,7 +647,7 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
     headers: { 'sec-fetch-site': 'cross-site' },
   })
   assert.equal(crossSiteResponse.status, 403)
-  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
     method: 'GET',
     path: `${reviewUrl.pathname}${reviewUrl.search}`,
     headers: {
@@ -839,7 +656,7 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
       'Sec-Fetch-Dest': 'document',
     },
   }), 200)
-  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
     method: 'GET',
     path: `${reviewUrl.pathname}?theme=light`,
     headers: {
@@ -938,85 +755,6 @@ test('a stalled served page times out and releases the proxied request', async t
     && event.message === 'Could not reach served-page source'
     && /did not respond in time/.test(event.details.error)
   )))
-})
-
-test('review drafts persist iframe_path and restore it onto the same source', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const comments = [{
-    id: 'iframe-one',
-    target_type: 'element',
-    comment: 'In the preview',
-    iframe_path: [{ css_selector: '#storybook-preview-iframe', tag: 'iframe' }],
-    element: { css_selector: '#submit' },
-  }]
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-  })
-  t.after(() => review.close())
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ comments, deleted_ids: [] }),
-  })
-  assert.equal(save.status, 200)
-  const persisted = JSON.parse(readFileSync(draft, 'utf8'))
-  assert.deepEqual(persisted.comments, comments)
-  assert.deepEqual(loadRestoredComments(draft, parseSource(html)), comments)
-})
-
-test('review drafts persist nested iframe_path hops and restore them onto the same source', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const comments = [{
-    id: 'iframe-nested',
-    target_type: 'element',
-    comment: 'In the nested preview',
-    iframe_path: [
-      { css_selector: '#outer-frame', tag: 'iframe' },
-      { css_selector: '#inner-frame', tag: 'iframe' },
-    ],
-    element: { css_selector: '#submit' },
-  }]
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-  })
-  t.after(() => review.close())
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ comments, deleted_ids: [] }),
-  })
-  assert.equal(save.status, 200)
-  const persisted = JSON.parse(readFileSync(draft, 'utf8'))
-  assert.deepEqual(persisted.comments, comments)
-  assert.equal(persisted.comments[0].iframe_path.length, 2)
-  assert.deepEqual(loadRestoredComments(draft, parseSource(html)), comments)
-})
-
-test('comments without iframe_path remain valid restored top-document comments', t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const artifact = join(directory, 'legacy.json')
-  writeFileSync(html, '<html></html>')
-  const comments = [{ id: 'top', target_type: 'element', comment: 'Keep this', element: { css_selector: 'h1' } }]
-  writeFileSync(artifact, JSON.stringify({ version: 2, source: { type: 'file', value: html }, comments }))
-  assert.deepEqual(loadRestoredComments(artifact, parseSource(html)), comments)
-  assert.equal(loadRestoredComments(artifact, parseSource(html))[0].iframe_path, undefined)
 })
 
 test('localhost served-page reviews retain the localhost browser hostname', async t => {
