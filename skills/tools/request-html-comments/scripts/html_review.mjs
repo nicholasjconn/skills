@@ -2,7 +2,7 @@
 
 // Zero-dependency runtime for the portable skill. Keeping the local server,
 // loopback proxy, and CLI lifecycle together makes the skill installable as a
-// five-file directory without a package manager or build step.
+// self-contained directory without a package manager or build step.
 
 import {
   appendFileSync,
@@ -19,7 +19,8 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
-import { connect as netConnect } from 'node:net'
+import { connect as netConnect, isIP } from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
@@ -56,6 +57,26 @@ function loopbackHostname(hostname) {
 
 function upstreamHostname(hostname) {
   return hostname === '[::1]' ? '::1' : hostname
+}
+
+function httpAuthority(hostname, port) {
+  return Number(port) === 80 ? hostname : `${hostname}:${port}`
+}
+
+export function validateReviewHost(host, interfaces = networkInterfaces()) {
+  if (typeof host !== 'string' || isIP(host) !== 4) {
+    throw new Error('--host must be a non-loopback IPv4 address assigned to an active local interface')
+  }
+  const firstOctet = Number(host.split('.')[0])
+  if (host === '0.0.0.0' || firstOctet === 127 || (firstOctet >= 224 && firstOctet <= 239)) {
+    throw new Error('--host must be a non-loopback IPv4 address assigned to an active local interface')
+  }
+  const local = Object.values(interfaces).flat().some(address => (
+    address && (address.family === 'IPv4' || address.family === 4)
+    && !address.internal && address.address === host
+  ))
+  if (!local) throw new Error(`--host address ${host} is not assigned to an active local interface`)
+  return host
 }
 
 export function sourceIdentity(source) {
@@ -143,7 +164,7 @@ export function writeJsonAtomic(path, value) {
 }
 
 // HTTP and filesystem boundaries are deliberately narrow: request bodies are
-// capped, incoming hosts must be loopback, and symlinks cannot escape the
+// capped, incoming hosts must match the advertised listener, and symlinks cannot escape the
 // reviewed file's directory.
 function readRequestBody(request) {
   return new Promise((resolveBody, reject) => {
@@ -163,13 +184,8 @@ function readRequestBody(request) {
   })
 }
 
-function requestHostIsLoopback(request) {
-  const host = String(request.headers.host || '')
-  try {
-    return loopbackHostname(new URL(`http://${host}`).hostname)
-  } catch {
-    return false
-  }
+function requestHostAllowed(request, allowedAuthority) {
+  return String(request.headers.host || '').toLowerCase() === allowedAuthority.toLowerCase()
 }
 
 function sameOriginRequest(request) {
@@ -182,6 +198,19 @@ function sameOriginRequest(request) {
   } catch {
     return false
   }
+}
+
+function topLevelDocumentNavigationRequest(request) {
+  if (!['GET', 'HEAD'].includes(request.method)) return false
+  const mode = String(request.headers['sec-fetch-mode'] || '').toLowerCase()
+  const destination = String(request.headers['sec-fetch-dest'] || '').toLowerCase()
+  return (!mode || mode === 'navigate') && (!destination || destination === 'document')
+}
+
+function crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch) {
+  return topLevelDocumentNavigationRequest(request)
+    && requested.pathname === reviewPath
+    && requested.search === reviewSearch
 }
 
 function sendText(response, status, message) {
@@ -232,6 +261,13 @@ function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   if (proxied.origin) proxied.origin = source.url.origin
   if (forceIdentityEncoding) proxied['accept-encoding'] = 'identity'
   return proxied
+}
+
+function trustedLanWarning(source) {
+  if (source.type === 'file') {
+    return `WARNING: --host has no auth; any LAN peer that reaches this review can access the entire allowed file tree under ${dirname(source.path)}.`
+  }
+  return `WARNING: --host has no auth; any LAN peer that reaches this review can proxy arbitrary routes, methods, bodies, and WebSockets to ${source.url.origin}.`
 }
 
 function proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs) {
@@ -311,10 +347,13 @@ export async function createReviewServer({
   initialComments,
   overlayScript,
   log,
+  host = null,
+  port = 0,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
   upstreamTimeoutMs = UPSTREAM_RESPONSE_TIMEOUT_MS,
 }) {
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
+  const trustedLanHost = host === null ? null : validateReviewHost(host)
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
   // Present the document at its original pathname so the browser resolves
@@ -330,6 +369,7 @@ export async function createReviewServer({
   const sourceRecord = sourceIdentity(source)
   const serverConnections = new Set()
   const activeResources = new Set()
+  let allowedAuthority = null
 
   const finish = (action, comments = []) => {
     if (settled) return
@@ -362,11 +402,15 @@ export async function createReviewServer({
   }
 
   const handleRequest = async (request, response) => {
-    if (!requestHostIsLoopback(request)) {
-      sendText(response, 403, 'Loopback access only')
+    const requested = new URL(request.url, 'http://review.local')
+    if (!requestHostAllowed(request, allowedAuthority)) {
+      sendText(response, 403, 'Review host not allowed')
       return
     }
-    const requested = new URL(request.url, 'http://review.local')
+    if (!sameOriginRequest(request) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
+      sendText(response, 403, 'Same-origin access only')
+      return
+    }
     const action = requested.pathname.slice(endpoint.length + 1)
     if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'submit', 'cancel'].includes(action)) {
       let payload = {}
@@ -393,13 +437,14 @@ export async function createReviewServer({
 
     const inject = html => injectHtml(html, endpoint, draftComments, overlayScript)
     if (source.type === 'file') {
-      if (request.method === 'GET' && requested.pathname === reviewPath) {
+      if (['GET', 'HEAD'].includes(request.method) && requested.pathname === reviewPath) {
         try {
           // Latin-1 provides a one-byte round trip, preserving the source
           // file's bytes while appending the ASCII overlay script.
           const body = Buffer.from(inject(readFileSync(source.path, 'latin1')), 'latin1')
           response.writeHead(200, { 'content-type': 'text/html', 'content-length': body.length, 'cache-control': 'no-store' })
-          response.end(body)
+          if (request.method === 'HEAD') response.end()
+          else response.end(body)
         } catch (error) {
           log('error', 'Could not serve reviewed HTML file', { path: source.path, error: error.message })
           sendText(response, 500, error.message)
@@ -411,10 +456,6 @@ export async function createReviewServer({
         return
       }
       serveStaticAsset(request, response, dirname(source.path), log)
-      return
-    }
-    if (!sameOriginRequest(request)) {
-      sendText(response, 403, 'Same-origin access only')
       return
     }
     proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs)
@@ -433,26 +474,32 @@ export async function createReviewServer({
     serverConnections.add(socket)
     socket.once('close', () => serverConnections.delete(socket))
   })
-  if (source.type === 'url') server.on('upgrade', (request, socket, head) => {
-    if (!requestHostIsLoopback(request) || !sameOriginRequest(request)) {
+  server.on('upgrade', (request, socket, head) => {
+    if (!requestHostAllowed(request, allowedAuthority) || !sameOriginRequest(request)) {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
       return
     }
-    proxyUpgrade(request, socket, head, source, log, activeResources)
+    if (source.type === 'url') proxyUpgrade(request, socket, head, source, log, activeResources)
+    else socket.end('HTTP/1.1 404 Not Found\r\n\r\n')
   })
   server.on('clientError', (error, socket) => {
     log('error', 'Review server rejected a client connection', { error: error.message })
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
   })
   await new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    const hostname = source.type === 'url' ? upstreamHostname(source.url.hostname) : '127.0.0.1'
-    server.listen(0, hostname, resolveListen)
+    const hostname = trustedLanHost || (source.type === 'url' ? upstreamHostname(source.url.hostname) : '127.0.0.1')
+    const onError = error => rejectListen(new Error(`could not bind review server to ${hostname}:${port || 'an available port'}: ${error.message}`, { cause: error }))
+    server.once('error', onError)
+    server.listen(port, hostname, () => {
+      server.off('error', onError)
+      resolveListen()
+    })
   })
   const address = server.address()
-  const reviewHostname = source.type === 'url' ? source.url.hostname : '127.0.0.1'
-  const reviewUrl = `http://${reviewHostname}:${address.port}${reviewPath}${reviewSearch}`
-  log('info', 'Review server ready', { review_url: reviewUrl })
+  const reviewHostname = trustedLanHost || (source.type === 'url' ? source.url.hostname : '127.0.0.1')
+  allowedAuthority = httpAuthority(reviewHostname, address.port)
+  const reviewUrl = `http://${allowedAuthority}${reviewPath}${reviewSearch}`
+  log('info', 'Review server ready', { review_url: reviewUrl, bind_host: reviewHostname, port: address.port })
   safetyTimer = setTimeout(() => {
     if (settled) return
     log('info', 'Review reached the safety timeout; stopping worker', { timeout_ms: safetyTimeoutMs })
@@ -486,7 +533,10 @@ export async function createReviewServer({
 // state lives in the result, draft, and log companions.
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
-const OVERLAY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')
+const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
+// Keep helpers private to this single injected payload while allowing the
+// overlay source to use its geometry binding directly.
+const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n})();`
 
 function usage() {
   console.log(`Usage: node html_review.mjs <HTML-file-or-loopback-URL> [options]
@@ -497,6 +547,9 @@ Options:
   --output PATH             Write submitted feedback JSON to PATH
   --async                   Return after opening; requires --output
   --restore-comments PATH   Restore comments from submitted or draft JSON
+  --no-open                 Start the server without opening a browser
+  --port PORT               Bind the review server to a specific port
+  --host IPV4               Bind and advertise one active non-loopback local IPv4 address
   --help                    Show this help
 
 The source may be an existing .html/.htm file or an http:// URL on localhost,
@@ -504,7 +557,7 @@ The source may be an existing .html/.htm file or an http:// URL on localhost,
 }
 
 function parseArgs(argv) {
-  const args = { asynchronous: false, worker: false }
+  const args = { asynchronous: false, worker: false, no_open: false, port: 0, host: null }
   const positionals = []
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -513,8 +566,20 @@ function parseArgs(argv) {
       return null
     }
     if (argument === '--async') args.asynchronous = true
+    else if (argument === '--no-open') args.no_open = true
     else if (argument === '--worker') args.worker = true
-    else if (argument === '--output' || argument === '--restore-comments' || argument === '--ready-file') {
+    else if (argument === '--port') {
+      const value = argv[++index]
+      if (!value) throw new Error('--port requires a value')
+      if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) {
+        throw new Error('--port must be an integer from 1 to 65535')
+      }
+      args.port = Number(value)
+    } else if (argument === '--host') {
+      const value = argv[++index]
+      if (!value) throw new Error('--host requires a value')
+      args.host = validateReviewHost(value)
+    } else if (argument === '--output' || argument === '--restore-comments' || argument === '--ready-file') {
       const value = argv[++index]
       if (!value) throw new Error(`${argument} requires a value`)
       args[argument.slice(2).replaceAll('-', '_')] = resolve(value)
@@ -550,6 +615,13 @@ function createLogger(path) {
   }
 }
 
+function emitTrustedLanWarning(log, args, reviewUrl, { stdout = true, fileLog = true } = {}) {
+  if (!args.host) return
+  const warning = trustedLanWarning(args.source)
+  if (fileLog) log('warn', warning, { review_url: reviewUrl, host: args.host })
+  if (stdout) console.log(warning)
+}
+
 function browserCommand(url) {
   if (process.platform === 'darwin') return { command: 'open', args: [url] }
   if (process.platform === 'win32') return { command: 'cmd', args: ['/c', 'start', '', url] }
@@ -582,6 +654,9 @@ function initializeLog(path, args) {
     result: args.output || null,
     draft: args.output ? draftPath(args.output) : null,
     restored_comments: args.restore_comments || null,
+    no_open: args.no_open,
+    port: args.port || null,
+    host: args.host,
     pid: process.pid,
   })
 }
@@ -623,8 +698,15 @@ async function runReview(args) {
       initialComments,
       overlayScript: OVERLAY_SCRIPT,
       log,
+      host: args.host,
+      port: args.port,
     })
-    await openBrowser(server.reviewUrl, log)
+    emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
+    if (args.no_open) {
+      log('info', 'Skipped default browser launch', { review_url: server.reviewUrl })
+      if (!args.worker) process.stdout.write(`Review URL: ${server.reviewUrl}\n`)
+    }
+    else await openBrowser(server.reviewUrl, log)
     if (args.ready_file) writeFileSync(args.ready_file, `${server.reviewUrl}\n`)
     const result = await server.completion
     if (result.action !== 'submit') {
@@ -660,6 +742,9 @@ async function launchAsync(args) {
   const log = createLogger(logOutput)
   const childArgs = [SCRIPT_PATH, args.source.type === 'file' ? args.source.path : args.source.url.href, '--output', output, '--worker', '--ready-file', readyFile]
   if (args.restore_comments) childArgs.push('--restore-comments', args.restore_comments)
+  if (args.no_open) childArgs.push('--no-open')
+  if (args.port) childArgs.push('--port', String(args.port))
+  if (args.host) childArgs.push('--host', args.host)
   const descriptor = openSync(logOutput, 'a')
   const child = spawn(process.execPath, childArgs, {
     detached: true,
@@ -672,9 +757,12 @@ async function launchAsync(args) {
   const deadline = Date.now() + 10_000
   while (Date.now() < deadline) {
     if (existsSync(readyFile)) {
+      const readyUrl = readFileSync(readyFile, 'utf8').trim()
       rmSync(readyFile)
-      log('info', 'Review opened successfully', { worker_pid: child.pid })
-      console.log(`Review opened. Submitted feedback: ${output}`)
+      emitTrustedLanWarning(log, args, readyUrl, { fileLog: false })
+      log('info', args.no_open ? 'Review server started successfully' : 'Review opened successfully', { worker_pid: child.pid })
+      if (args.no_open) console.log(`Review URL: ${readyUrl}`)
+      console.log(`${args.no_open ? 'Review server started' : 'Review opened'}. Submitted feedback: ${output}`)
       console.log(`Recoverable draft: ${draftOutput}`)
       console.log(`Worker log: ${logOutput}`)
       if (args.restore_comments) console.log(`Restored comments from: ${args.restore_comments}`)

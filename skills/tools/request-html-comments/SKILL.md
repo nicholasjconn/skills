@@ -1,48 +1,33 @@
 ---
 name: request-html-comments
-description: Use to request and return element- or text-linked comments on a local HTML file or loopback-served page through an interactive browser overlay. Trigger when the user wants to comment on or annotate local HTML. Do not use for remote URLs, browser automation, or code review.
+description: Request and return element- or text-linked comments on a local HTML file or loopback-served page through an interactive browser overlay. Use when the user wants to annotate local HTML; do not use for remote URLs, browser automation, or code review.
+license: MIT
 ---
 
 # Request HTML Comments
 
-## Requirements
+Collect comments on an existing `.html`/`.htm` file or an already-running `http://` loopback page. File reviews may load assets only from the file's directory tree. Served-page reviews proxy the chosen loopback origin, including APIs and WebSockets.
 
-- Use an existing `.html` or `.htm` file, or an already-running `http://` page
-  on `localhost`, `127.0.0.1`, or `::1`.
-- Keep the reviewed page and its assets on the user's machine. For an HTML
-  file, the review server can load only that file's parent directory and its
-  subdirectories. Embed assets in the HTML or place them within that boundary.
-  For a running page, use a URL on one loopback origin, such as
-  `http://localhost:3000/page`. The review server proxies requests to that
-  origin, including assets, APIs, and WebSockets, and preserves client
-  rerenders.
+The overlay annotates the top document and nested same-origin frames, including frames in open shadow roots, while preserving `iframe_path` through multiple levels. Same-origin frame support covers ordinary and axis-aligned scale/translation layouts only; targets behind rotated, skewed, or 3D frame ancestry are unavailable for annotation. Cross-origin, opaque-origin, and closed-shadow-root frames are context only: never try to inspect them or inject review controls into them.
 
 ## Launch
 
-Choose a new output path in a temporary directory. Inspect live help:
+Inspect live help, then choose a new output path in a temporary directory:
 
 ```bash
 SCRIPT="<skill-directory>/scripts/html_review.mjs"
 node "$SCRIPT" --help
-```
-
-For a file:
-
-```bash
 node "$SCRIPT" /absolute/path/to/page.html --async \
   --output /absolute/path/to/result.json
-```
-
-For an already-running loopback page:
-
-```bash
 node "$SCRIPT" http://localhost:3000/page --async \
   --output /absolute/path/to/result.json
 ```
 
-Each new invocation starts with zero comments. Use `--restore-comments` only
-when the user explicitly asks to recover comments from an interrupted review;
-never use it to preload previously submitted feedback. Use a new output path:
+Use `--no-open` for automation-only validation and `--port PORT` when the URL must retain a specific available port. Bind failures are fatal rather than silently selecting another port.
+
+For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback IPv4 address assigned to this machine. The server binds and advertises only that address, never `0.0.0.0`. The review server has no authentication: any LAN peer that reaches that interface can access the entire allowed file tree or, for loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to the local app. Use this mode only with the user's authorization and an appropriately trusted network.
+
+Each invocation starts with zero comments. Use `--restore-comments` only when the user explicitly asks to recover an interrupted review, never to preload submitted feedback, and always use a new output path:
 
 ```bash
 node "$SCRIPT" /absolute/path/to/page.html --async \
@@ -50,25 +35,22 @@ node "$SCRIPT" /absolute/path/to/page.html --async \
   --restore-comments /absolute/path/to/prior-result.draft.json
 ```
 
-For an output named `result.json`, the tool reports these paths:
+For `result.json`, record:
 
-- `result.json` — the submitted feedback; created only after **Send**
-- `result.draft.json` — autosaved comments for recovery
-- `result.log` — worker diagnostics
+- `result.json`: submitted feedback, created only after **Send**
+- `result.draft.json`: autosaved recovery state
+- `result.log`: worker diagnostics
 
-Record the reported paths, then end the turn while the user reviews the page.
-Do not poll or keep the worker attached. Browser activity does not resume the
-conversation; the user must send another chat message.
+Then end the turn while the user reviews. Do not poll or keep the worker attached; the user must send another chat message.
 
-## Resume
+## Validation and recovery
 
-- **Feedback sent:** Check the submission file once. If it is missing, inspect
-  the log once and report the failure.
-- **Browser closed or crashed:** Recover the draft only if the user explicitly
-  asks. Identify recovered comments as autosaved, not submitted.
-- **Review cancelled:** Do not recover the draft unless the user asks.
+Before a complex transformed, adopted, iframe-based, or dynamically rendered surface is handed to the user, perform representative browser validation through the injected overlay. Confirm nested descendants can be targeted and that a temporary comment records the intended selector and iframe path. Run that check with `--no-open`, cancel it, close the automation browser, and open exactly one fresh user-facing review with a new output path. Simpler static pages do not require an elaborate smoke run.
 
-## Return
+On the next user message:
 
-- Return every comment with its target data intact.
-- Address the comments once submitted.
+- If feedback was sent, read the submission once and return every comment with target data intact.
+- If the browser closed or crashed, inspect the log once. Recover the draft only when explicitly requested, and identify it as autosaved rather than submitted.
+- If the review was cancelled, do not recover the draft unless asked.
+
+Address submitted comments after returning them.

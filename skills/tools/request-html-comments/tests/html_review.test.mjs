@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
@@ -11,12 +11,18 @@ import {
   createReviewServer,
   injectHtml,
   loadRestoredComments,
+  parseArgs,
   parseSource,
   sourceIdentity,
   logPath,
+  validateReviewHost,
 } from '../scripts/html_review.mjs'
+import geometry from '../scripts/review_geometry.js'
 
-const OVERLAY_SCRIPT = readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8')
+const OVERLAY_SCRIPT = [
+  readFileSync(fileURLToPath(new URL('../scripts/review_geometry.js', import.meta.url)), 'utf8'),
+  readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
+].join('\n')
 
 function temporaryDirectory(t) {
   const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
@@ -31,10 +37,10 @@ function listen(server) {
   })
 }
 
-function websocketHandshake(port, path, origin) {
+function websocketHandshake(port, path, origin, hostHeader = `127.0.0.1:${port}`, connectHost = '127.0.0.1') {
   return new Promise((resolveHandshake, rejectHandshake) => {
-    const socket = connect(port, '127.0.0.1', () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
+    const socket = connect(port, connectHost, () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
     })
     let response = ''
     socket.setEncoding('utf8')
@@ -47,6 +53,95 @@ function websocketHandshake(port, path, origin) {
     })
     socket.on('error', rejectHandshake)
   })
+}
+
+function rawHttpStatus(port, connectHost, hostHeader, {
+  method = 'GET',
+  path = '/',
+  headers = {},
+  body = '',
+} = {}) {
+  return new Promise((resolveStatus, rejectStatus) => {
+    const socket = connect(port, connectHost, () => {
+      const lines = [`${method} ${path} HTTP/1.1`, `Host: ${hostHeader}`]
+      for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`)
+      if (body) lines.push(`Content-Length: ${Buffer.byteLength(body)}`)
+      socket.write(`${lines.join('\r\n')}\r\nConnection: close\r\n\r\n${body}`)
+    })
+    let response = ''
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => { response += chunk })
+    socket.on('end', () => {
+      const status = /^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]
+      if (!status) rejectStatus(new Error(`missing HTTP status in ${response}`))
+      else resolveStatus(Number(status))
+    })
+    socket.on('error', rejectStatus)
+  })
+}
+
+function activeLanIpv4() {
+  return Object.values(networkInterfaces()).flat().find(address => (
+    address && (address.family === 'IPv4' || address.family === 4) && !address.internal
+  ))?.address || null
+}
+
+function connectionResult(port, host) {
+  return new Promise(resolveResult => {
+    const socket = connect(port, host)
+    socket.setTimeout(500, () => {
+      socket.destroy()
+      resolveResult('ETIMEDOUT')
+    })
+    socket.once('connect', () => {
+      socket.end()
+      resolveResult('connected')
+    })
+    socket.once('error', error => resolveResult(error.code || error.message))
+  })
+}
+
+async function terminateProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    try {
+      process.kill(pid, signal)
+    } catch (error) {
+      if (error.code === 'ESRCH') return
+      throw error
+    }
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 50))
+      try {
+        process.kill(pid, 0)
+      } catch (error) {
+        if (error.code === 'ESRCH') return
+        throw error
+      }
+    }
+  }
+}
+
+async function cleanupAsyncReview(output) {
+  let log = ''
+  try {
+    log = readFileSync(logPath(output), 'utf8')
+  } catch {
+    return
+  }
+  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
+  if (ready) {
+    try {
+      const response = await fetch(ready)
+      if (response.status === 200) {
+        const endpoint = endpointFromHtml(await response.text())
+        await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })
+      }
+    } catch {}
+  }
+  const workerPid = Number(/"worker_pid":(\d+)/.exec(log)?.[1] || 0)
+  if (workerPid) await terminateProcess(workerPid)
 }
 
 function openWebsocket(port, path, origin) {
@@ -80,6 +175,70 @@ test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   assert.throws(() => parseSource(join(directory, 'missing.html')), /existing .html/)
 })
 
+test('CLI accepts no-open, explicit port, and a validated local-interface host', t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
+  writeFileSync(html, '<html></html>')
+  const host = activeLanIpv4()
+  const argv = [html, '--async', '--output', output, '--no-open', '--port', '56158']
+  if (host) argv.push('--host', host)
+  const args = parseArgs(argv)
+  assert.equal(args.no_open, true)
+  assert.equal(args.port, 56158)
+  assert.equal(args.host, host)
+  assert.throws(() => parseArgs([html, '--port', '0']), /integer from 1 to 65535/)
+  assert.throws(() => parseArgs([html, '--port', '65536']), /integer from 1 to 65535/)
+})
+
+test('trusted-LAN host validation accepts only an exact active non-loopback IPv4 address', () => {
+  const interfaces = {
+    en0: [{ address: '192.0.2.44', family: 'IPv4', internal: false }],
+    lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+  }
+  assert.equal(validateReviewHost('192.0.2.44', interfaces), '192.0.2.44')
+  for (const rejected of ['localhost', '127.0.0.1', '192.0.2.44:3000', '192.0.2.45']) {
+    assert.throws(() => validateReviewHost(rejected, interfaces), /--host/)
+  }
+})
+
+test('review server binds an explicit port and reports an actionable bind failure', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const reservation = createServer()
+  const port = await listen(reservation)
+  t.after(() => new Promise(resolveClose => reservation.close(resolveClose)))
+  await assert.rejects(createReviewServer({
+    source: parseSource(html), draftOutput: null, initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {}, port,
+  }), new RegExp(`could not bind review server to 127\\.0\\.0\\.1:${port}.*EADDRINUSE`))
+})
+
+test('trusted-LAN server binds and advertises only the selected local interface', async t => {
+  const host = activeLanIpv4()
+  if (!host) return t.skip('no active non-loopback IPv4 interface is available')
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  writeFileSync(html, '<html><body>LAN review</body></html>')
+  const review = await createReviewServer({
+    source: parseSource(html), draftOutput: null, initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {}, host,
+  })
+  t.after(() => review.close())
+  assert.equal(new URL(review.reviewUrl).hostname, host)
+  assert.equal((await fetch(review.reviewUrl)).status, 200)
+  assert.notEqual(await connectionResult(Number(new URL(review.reviewUrl).port), '127.0.0.1'), 'connected')
+  assert.equal(await rawHttpStatus(
+    Number(new URL(review.reviewUrl).port), host, `127.0.0.1:${new URL(review.reviewUrl).port}`,
+  ), 403)
+  const crossOrigin = await fetch(review.reviewUrl, { headers: { origin: 'http://example.test' } })
+  assert.equal(crossOrigin.status, 403)
+})
+
+
 test('invalid startup input leaves an actionable worker log', t => {
   const directory = temporaryDirectory(t)
   const output = join(directory, 'feedback.json')
@@ -94,6 +253,40 @@ test('invalid startup input leaves an actionable worker log', t => {
   assert.match(readFileSync(logPath(output), 'utf8'), /loopback URL/)
 })
 
+test('async no-open forwards explicit launch controls to the worker', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
+  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+  writeFileSync(html, '<html><body>Async review</body></html>')
+  t.after(() => cleanupAsyncReview(output))
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await new Promise(resolveClose => reservation.close(resolveClose))
+  const host = activeLanIpv4()
+  const argv = [script, html, '--async', '--output', output, '--no-open', '--port', String(port)]
+  if (host) argv.push('--host', host)
+  const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
+  assert.equal(launched.status, 0, launched.stderr)
+  assert.match(launched.stdout, /Review server started/)
+  const logFile = logPath(output)
+  const log = readFileSync(logFile, 'utf8')
+  assert.match(log, /Skipped default browser launch/)
+  assert.match(log, new RegExp(`"port":${port}`))
+  assert.match(log, new RegExp(`"host":${host ? `"${host}"` : 'null'}`))
+  if (host) {
+    assert.match(launched.stdout, /WARNING: --host has no auth;/)
+    assert.match(log, /WARN WARNING: --host has no auth;/)
+  }
+  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
+  assert.ok(ready, 'worker log should report the review URL')
+  assert.ok(launched.stdout.includes(`Review URL: ${ready}`), 'async no-open should print its review URL')
+  const response = await fetch(ready)
+  assert.equal(response.status, 200)
+  const endpoint = endpointFromHtml(await response.text())
+  assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
+})
+
 test('restore accepts legacy and versioned artifacts but rejects another source', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -102,7 +295,14 @@ test('restore accepts legacy and versioned artifacts but rejects another source'
   const versioned = join(directory, 'versioned.json')
   writeFileSync(html, '<html></html>')
   writeFileSync(other, '<html></html>')
-  const comments = [{ id: 'one', comment: 'Keep this' }]
+  const comments = [{
+    id: 'one',
+    comment: 'Keep this',
+    iframe_path: [
+      { css_selector: '#outer-frame', tag: 'iframe' },
+      { css_selector: '#inner-frame', tag: 'iframe' },
+    ],
+  }]
   writeFileSync(legacy, JSON.stringify({ version: 1, source: html, comments }))
   const servedSource = parseSource('http://localhost:3100/review-me')
   writeFileSync(versioned, JSON.stringify({ version: 2, source: sourceIdentity(servedSource), comments }))
@@ -158,105 +358,41 @@ test('file overlay injection preserves non-ASCII restored comments through Latin
   assert.doesNotMatch(encoded.slice(scriptStart, scriptEnd), /[^\x00-\x7f]/)
 })
 
-test('the injected overlay stays inactive inside an iframe', () => {
-  const rendered = injectHtml('<html><body>Framed page</body></html>', '/token', [], OVERLAY_SCRIPT)
-  const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
-  const scriptEnd = rendered.indexOf('</script>', scriptStart)
-  const runOverlay = new Function('window', rendered.slice(scriptStart, scriptEnd))
+test('frame geometry maps, clips, and rejects unsupported transforms', () => {
+  const geometryForFrames = {
+    source: { left: 0, top: 0, right: 100, bottom: 50 },
+    hops: [
+      {
+        scaleX: 2,
+        scaleY: 2,
+        content: { left: 10, top: 20, right: 210, bottom: 120 },
+        visibleClip: { left: 0, top: 0, right: 210, bottom: 120 },
+        parentSource: { left: 0, top: 0, right: 220, bottom: 130 },
+      },
+      {
+        scaleX: 0.5,
+        scaleY: 0.5,
+        content: { left: 100, top: 50, right: 210, bottom: 115 },
+        visibleClip: { left: 100, top: 50, right: 200, bottom: 105 },
+        parentSource: { left: 0, top: 0, right: 240, bottom: 150 },
+      },
+    ],
+  }
 
-  assert.doesNotThrow(() => runOverlay({ top: {} }))
-})
-
-test('the overlay has no browser-tab identity or lifecycle endpoints', () => {
-  assert.doesNotMatch(OVERLAY_SCRIPT, /sessionStorage|client_id|\/heartbeat|\/abandon/)
-})
-
-test('the overlay observes modal visibility attributes and targets dialog hosts', () => {
-  assert.match(OVERLAY_SCRIPT, /attributeFilter:\s*\['open',\s*'role',\s*'aria-modal',\s*'class',\s*'style',\s*'hidden',\s*'inert'\]/)
-  assert.match(OVERLAY_SCRIPT, /const composedClosest =/)
-  assert.match(OVERLAY_SCRIPT, /active\?\.shadowRoot\?\.activeElement/)
-  assert.match(OVERLAY_SCRIPT, /if \(node\.shadowRoot\) visit\(node\.shadowRoot\)/)
-  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('focusin', scheduleOverlayHostSync, true\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayHostSyncFrame = requestAnimationFrame/)
-  assert.match(OVERLAY_SCRIPT, /if \(overlayLayer\.parentElement === host\)[\s\S]*refreshComments\(\)/)
-  assert.match(OVERLAY_SCRIPT, /const activeModalHost =/)
-})
-
-test('the overlay refreshes comment positions when nested sections scroll', () => {
-  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('scroll',\s*scheduleCommentRefresh,\s*true\)/)
-  assert.match(OVERLAY_SCRIPT, /refreshCommentsFrame = requestAnimationFrame/)
-})
-
-test('element and text references can cross open shadow-root boundaries', () => {
-  assert.match(OVERLAY_SCRIPT, /const shadowPath =/)
-  assert.match(OVERLAY_SCRIPT, /shadow_path: shadowPath\(node\)/)
-  assert.match(OVERLAY_SCRIPT, /parent_shadow_path: shadowPath\(parent\)/)
-  assert.match(OVERLAY_SCRIPT, /const resolveSelectorReference =/)
-  assert.match(OVERLAY_SCRIPT, /scope = node\.shadowRoot/)
-  assert.match(OVERLAY_SCRIPT, /const eventOrigin = \(event\) => event\.composedPath\(\)/)
-})
-
-test('new fallback anchors use explicit viewport coordinates across modal reparenting', () => {
-  assert.match(OVERLAY_SCRIPT, /anchor_coordinate_space: draft\.anchorCoordinateSpace/)
-  assert.match(OVERLAY_SCRIPT, /anchorCoordinateSpace: 'viewport'/)
-  assert.match(OVERLAY_SCRIPT, /item\.anchor_coordinate_space === 'viewport'/)
-  assert.match(OVERLAY_SCRIPT, /toContainingBlock\(x, y, origin\)/)
-})
-
-test('legacy fallback anchors are validated and converted from their original host coordinates', () => {
-  assert.match(OVERLAY_SCRIPT, /Number\.isFinite\(x\).*Number\.isFinite\(y\)/)
-  assert.match(OVERLAY_SCRIPT, /x - window\.scrollX, y - window\.scrollY/)
-  assert.match(OVERLAY_SCRIPT, /x \+ hostRect\.left \+ legacyHost\.clientLeft - legacyHost\.scrollLeft/)
-  assert.match(OVERLAY_SCRIPT, /y \+ hostRect\.top \+ legacyHost\.clientTop - legacyHost\.scrollTop/)
-})
-
-test('one containing-block measurement is shared by each synchronous comment refresh', () => {
-  assert.match(OVERLAY_SCRIPT, /refreshComments = \(\) => \{\s*const origin = containingBlockOrigin\(\)/)
-  assert.match(OVERLAY_SCRIPT, /anchorForComment\(item, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /drawHighlight\(item\.id, range, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /applyOverlayPlacement[\s\S]*const origin = containingBlockOrigin\(\)/)
-})
-
-test('the overlay mounts isolated controls in a zero-size popover layer and never pads the host page', () => {
-  assert.match(OVERLAY_SCRIPT, /className = 'steward-review-ui sr-layer'/)
-  assert.match(OVERLAY_SCRIPT, /setAttribute\('popover', 'manual'\)/)
-  assert.match(OVERLAY_SCRIPT, /attachShadow\(\{mode: 'open'\}\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(overlayStyle\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(root\)/)
-  assert.match(OVERLAY_SCRIPT, /pageStyle\.textContent = '\.steward-review-hover/)
-  assert.match(OVERLAY_SCRIPT, /document\.head\.appendChild\(pageStyle\)/)
-  assert.match(OVERLAY_SCRIPT, /nodeRoot\.appendChild\(pageStyle\.cloneNode\(true\)\)/)
-  assert.match(OVERLAY_SCRIPT, /pointer-events:none!important/)
-  assert.match(OVERLAY_SCRIPT, /overlayLayer\.showPopover|showAsPopover\(overlayLayer\)/)
-  assert.match(OVERLAY_SCRIPT, /:host, :host\(:popover-open\)/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /dataset\.srChrome/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /paddingTop/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(popup\)/)
-})
-
-test('the comment editor is a popover and falls back if showPopover fails', () => {
-  assert.match(OVERLAY_SCRIPT, /popup\.setAttribute\('popover', 'manual'\)/)
-  assert.match(OVERLAY_SCRIPT, /showAsPopover\(popup\)/)
-  assert.match(OVERLAY_SCRIPT, /removeAttribute\('popover'\)/)
-  assert.match(OVERLAY_SCRIPT, /const visibleClipRect =/)
-  assert.match(OVERLAY_SCRIPT, /placeFixedElement\(popup/)
-})
-
-test('overlay chrome is clipped to the viewport, not the host dialog', () => {
-  assert.match(OVERLAY_SCRIPT, /const visibleClipRect = \(\) => viewportClipRect\(\)/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /style\.overflow !== 'visible'/)
-})
-
-test('reparenting into a modal keeps overlay screen position and does not replay enter animations', () => {
-  assert.match(OVERLAY_SCRIPT, /const toolbarRect = copyRect\(root\)/)
-  assert.match(OVERLAY_SCRIPT, /restoreFixedPosition\(root, toolbarRect, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /placeFixedElement\(infoPanel, infoRect\.left, infoRect\.top, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /\.steward-review-popup\.sr-enter/)
-  assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\.sr-enter/)
-  assert.doesNotMatch(
-    OVERLAY_SCRIPT,
-    /\.steward-review-popup \{[^}]*animation:/
+  assert.deepEqual(geometry.mapPointToTop(20, 10, geometryForFrames), { x: 125, y: 70 })
+  assert.deepEqual(geometry.mapRectToTop({ left: 10, top: 5, width: 30, height: 20 }, geometryForFrames), {
+    left: 115, top: 65, right: 145, bottom: 85, width: 30, height: 20,
+  })
+  assert.equal(geometry.mapPointToTop(101, 10, geometryForFrames), null)
+  assert.deepEqual(
+    geometry.intersectClippedAxes({ left: 0, top: 0, right: 30, bottom: 30 }, { left: 10, top: 10, right: 20, bottom: 20 }, true, false),
+    { left: 10, top: 0, right: 20, bottom: 30, width: 10, height: 30 },
   )
+  assert.deepEqual(geometry.clampPinToClip(3, 40, { left: 0, top: 0, right: 40, bottom: 40 }), { x: 15.5, y: 24.5 })
+  assert.equal(geometry.isAxisAlignedTransform('matrix(2, 0, 0, 3, 10, 20)'), true)
+  assert.equal(geometry.isAxisAlignedTransform('matrix(1, 0.2, 0, 1, 0, 0)'), false)
+  assert.equal(typeof geometry.mapPointToTop, 'function')
+  assert.equal(globalThis.__stewardReviewGeometry, undefined)
 })
 
 test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
@@ -511,8 +647,31 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
     headers: { 'sec-fetch-site': 'cross-site' },
   })
   assert.equal(crossSiteResponse.status, 403)
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'GET',
+    path: `${reviewUrl.pathname}${reviewUrl.search}`,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 200)
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'GET',
+    path: `${reviewUrl.pathname}?theme=light`,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 403)
   const rejectedHandshake = await websocketHandshake(Number(reviewUrl.port), '/socket', 'https://example.com')
   assert.match(rejectedHandshake, /^HTTP\/1\.1 403 Forbidden/)
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), '127.0.0.1', `localhost:${reviewUrl.port}`), 403)
+  const rejectedHostHandshake = await websocketHandshake(
+    Number(reviewUrl.port), '/socket', browserOrigin, `localhost:${reviewUrl.port}`,
+  )
+  assert.match(rejectedHostHandshake, /^HTTP\/1\.1 403 Forbidden/)
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

@@ -40,6 +40,7 @@
 #steward-review-root .sr-status { position: absolute; top: calc(100% + 9px); left: 50%; width: max-content; max-width: min(360px, calc(100vw - 24px)); padding: 7px 11px; color: #f8fafc; background: rgba(15,23,42,.94); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; box-shadow: 0 8px 24px rgba(15,23,42,.2); transform: translateX(-50%); animation: steward-review-status .14s ease-out; font-size: 12px; pointer-events: none; }
 #steward-review-root .sr-status:empty { display: none; }
 .steward-review-pin { position: absolute; z-index: 2147483645; display: grid; width: 31px; height: 31px; cursor: pointer; place-items: center; padding: 0; color: #172554; background: #facc15; border: 2px solid #172554; border-radius: 9px; box-shadow: 0 6px 18px rgba(23,37,84,.28); transform: translate(-50%,-50%); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; font: 800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+.steward-review-pin[hidden] { display: none !important; }
 .steward-review-pin.sr-enter { animation: steward-review-pin-in .22s cubic-bezier(.2,.8,.2,1.2); }
 .steward-review-pin:hover, .steward-review-pin:focus-visible { background: #fde047; box-shadow: 0 8px 22px rgba(23,37,84,.34); transform: translate(-50%,-50%) scale(1.08); outline: none; }
 .steward-review-highlight { position: absolute; z-index: 2147483644; border-radius: 3px; background: rgba(250,204,21,.42); box-shadow: 0 0 0 1px rgba(202,138,4,.16); pointer-events: none; }
@@ -94,6 +95,7 @@
   // Document styles cannot cross a shadow boundary, so the rule is copied into
   // an open shadow root on demand when one of its elements is hovered.
   const pageStyle = document.createElement('style');
+  pageStyle.id = 'steward-review-page-style';
   pageStyle.textContent = '.steward-review-hover { outline: 3px solid #3b82f6 !important; outline-offset: 2px !important; cursor: crosshair !important; }';
   document.head.appendChild(pageStyle);
   const overlayLayer = document.createElement('div');
@@ -164,9 +166,142 @@
   let refreshComments = () => {};
   let refreshCommentsFrame = null;
   let scheduleCommentRefresh = () => {};
+  const registeredDocuments = new Set();
+  const watchedFrames = new WeakSet();
+  const frameDocuments = new WeakMap();
+  const renderedAnchors = new Map();
+  const shadowFrameObservers = new WeakMap();
 
   const clamp = (value, minimum, maximum) => Math.min(Math.max(minimum, value), maximum);
-  const isOverlay = (node) => node instanceof Element && Boolean(node.closest('.steward-review-ui'));
+  // Same-origin iframe documents are a different JS realm. Top-window
+  // constructor checks fail there, so helpers use nodeType instead.
+  const isElement = (node) => Boolean(node) && node.nodeType === 1;
+  const isShadowRoot = (node) => Boolean(node) && node.nodeType === 11 && Boolean(node.host);
+  const ownerDocumentOf = (node) => {
+    if (!node) return document;
+    if (node.nodeType === 9) return node;
+    return node.ownerDocument || document;
+  };
+  const ownerWindowOf = (node) => ownerDocumentOf(node).defaultView || window;
+  const viewportRect = (view) => ({ left: 0, top: 0, right: view.innerWidth, bottom: view.innerHeight, width: view.innerWidth, height: view.innerHeight });
+  const isFrameElement = (node) => isElement(node) && /^(IFRAME|FRAME)$/.test(node.tagName);
+  const { clampPinToClip, intersectClippedAxes, isAxisAlignedTransform, mapPointToTop, mapRectToTop } = __stewardReviewGeometry;
+  const overflowClips = (value) => ['hidden', 'clip', 'auto', 'scroll'].includes(value);
+  const composedAncestors = (node) => {
+    const ancestors = [];
+    for (let current = node; current;) {
+      if (isElement(current)) ancestors.push(current);
+      if (current.parentElement) {
+        current = current.parentElement;
+        continue;
+      }
+      const root = current.getRootNode?.();
+      current = isShadowRoot(root) ? root.host : null;
+    }
+    return ancestors;
+  };
+  // A frame's content box can itself be cut down by any scrolling or
+  // overflow-clipping ancestor in the parent document. Only same-origin
+  // ancestors are considered; inaccessible frame geometry is never guessed.
+  const visibleFrameContentRect = (frame, contentRect) => {
+    let visibleRect = contentRect;
+    const view = ownerWindowOf(frame);
+    const frameDocument = ownerDocumentOf(frame);
+    const root = frameDocument.documentElement;
+    for (const ancestor of composedAncestors(frame).slice(1)) {
+      if (!visibleRect) break;
+      // The root is clipped by the viewport through parentSource below, not
+      // by its document-sized border box. Treating it as an ancestor clip
+      // incorrectly hides frames after a deeply scrolled document moves the
+      // root rect away from the viewport.
+      if (ancestor === root) continue;
+      const style = view.getComputedStyle(ancestor);
+      let clipX = overflowClips(style.overflowX);
+      let clipY = overflowClips(style.overflowY);
+      // When root overflow is visible, body overflow propagates to the
+      // viewport. parentSource already provides that viewport clip, so body
+      // must not apply a second document-sized clip on that axis.
+      if (ancestor === frameDocument.body && root) {
+        const rootStyle = view.getComputedStyle(root);
+        if (rootStyle.overflowX === 'visible') clipX = false;
+        if (rootStyle.overflowY === 'visible') clipY = false;
+      }
+      if (!clipX && !clipY) continue;
+      const rect = ancestor.getBoundingClientRect();
+      const scaleX = ancestor.offsetWidth ? rect.width / ancestor.offsetWidth : 1;
+      const scaleY = ancestor.offsetHeight ? rect.height / ancestor.offsetHeight : 1;
+      const paddingBox = {
+        left: rect.left + ancestor.clientLeft * scaleX,
+        top: rect.top + ancestor.clientTop * scaleY,
+        right: rect.left + (ancestor.clientLeft + ancestor.clientWidth) * scaleX,
+        bottom: rect.top + (ancestor.clientTop + ancestor.clientHeight) * scaleY
+      };
+      visibleRect = intersectClippedAxes(visibleRect, paddingBox, clipX, clipY);
+    }
+    return visibleRect;
+  };
+  const directFrameFor = (node) => {
+    const view = ownerWindowOf(node);
+    if (view === window) return null;
+    try {
+      const frame = view.frameElement;
+      return isFrameElement(frame) ? frame : null;
+    } catch {
+      return null;
+    }
+  };
+  // Innermost frame first. Null means an inaccessible (usually cross-origin)
+  // hop, so callers must not persist a partial path or guess geometry.
+  const ancestorFramesFor = (node) => {
+    const frames = [];
+    let current = node;
+    while (true) {
+      const frame = directFrameFor(current);
+      if (!frame) return ownerWindowOf(current) === window ? frames : null;
+      frames.push(frame);
+      current = frame;
+    }
+  };
+  const FRAME_TRANSFORM_STATUS = 'Comments inside this iframe cannot be annotated because its frame layout uses a rotated, skewed, or 3D transform.';
+  const transformedFrameAncestor = (frame) => composedAncestors(frame).find((ancestor) => {
+    const style = ownerWindowOf(frame).getComputedStyle(ancestor);
+    return !isAxisAlignedTransform(style.transform)
+      || (style.rotate && style.rotate !== 'none')
+      || (style.perspective && style.perspective !== 'none');
+  });
+  const frameGeometryFor = (node) => {
+    const view = ownerWindowOf(node);
+    const source = viewportRect(view);
+    const frames = ancestorFramesFor(node);
+    if (!frames) return null;
+    if (frames.some(transformedFrameAncestor)) return { frame: frames[0] || null, source, hops: [], unavailable: FRAME_TRANSFORM_STATUS };
+    const hops = frames.map((frame) => {
+      const rect = frame.getBoundingClientRect();
+      const scaleX = frame.offsetWidth ? rect.width / frame.offsetWidth : 1;
+      const scaleY = frame.offsetHeight ? rect.height / frame.offsetHeight : 1;
+      const left = rect.left + frame.clientLeft * scaleX;
+      const top = rect.top + frame.clientTop * scaleY;
+      const parentView = ownerWindowOf(frame);
+      const content = {
+        left,
+        top,
+        right: left + frame.clientWidth * scaleX,
+        bottom: top + frame.clientHeight * scaleY
+      };
+      return {
+        frame,
+        scaleX,
+        scaleY,
+        content,
+        visibleClip: visibleFrameContentRect(frame, content),
+        parentSource: viewportRect(parentView)
+      };
+    });
+    const geometry = { frame: frames[0] || null, source, hops };
+    if (hops.length) geometry.clip = mapRectToTop(source, geometry);
+    return geometry;
+  };
+  const isOverlay = (node) => isElement(node) && Boolean(node.closest('.steward-review-ui'));
   // Review controls must be inert from the host page's perspective. Let each
   // control receive the event, then stop it at the nearest review UI boundary
   // before document-level outside-click handlers, shortcuts, or analytics do.
@@ -181,8 +316,8 @@
   };
   shieldReviewUi(root);
   const visible = (node) => {
-    if (!(node instanceof Element) || isOverlay(node)) return false;
-    const style = getComputedStyle(node);
+    if (!isElement(node) || isOverlay(node)) return false;
+    const style = ownerWindowOf(node).getComputedStyle(node);
     const rect = node.getBoundingClientRect();
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
@@ -190,12 +325,12 @@
   // their own selector to be found alongside library-rendered modals.
   const MODAL_HOST_SELECTOR = '[role="dialog"], [aria-modal="true"], dialog[open]';
   const composedClosest = (node, selector) => {
-    let current = node instanceof Element ? node : null;
+    let current = isElement(node) ? node : null;
     while (current) {
       const match = current.closest(selector);
       if (match) return match;
       const currentRoot = current.getRootNode();
-      current = currentRoot instanceof ShadowRoot ? currentRoot.host : null;
+      current = isShadowRoot(currentRoot) ? currentRoot.host : null;
     }
     return null;
   };
@@ -375,8 +510,9 @@
   syncOverlayHost();
   const esc = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^a-zA-Z0-9_-]/g, '\\$&');
   const cssPath = (node) => {
+    const rootElement = ownerDocumentOf(node).documentElement;
     const parts = [];
-    for (let current = node; current && current.nodeType === 1 && current !== document.documentElement; current = current.parentElement) {
+    for (let current = node; current && current.nodeType === 1 && current !== rootElement; current = current.parentElement) {
       if (current.id && current.id !== 'steward-review-root') { parts.unshift(`#${esc(current.id)}`); break; }
       let part = current.tagName.toLowerCase();
       const siblings = current.parentElement ? [...current.parentElement.children].filter(item => item.tagName === current.tagName) : [];
@@ -388,19 +524,20 @@
   const shadowPath = (node) => {
     const selectors = [];
     let current = node;
-    while (current instanceof Element) {
+    while (isElement(current)) {
       selectors.unshift(cssPath(current));
       const currentRoot = current.getRootNode();
-      if (!(currentRoot instanceof ShadowRoot)) break;
+      if (!isShadowRoot(currentRoot)) break;
       current = currentRoot.host;
     }
     return selectors.length > 1 ? selectors : null;
   };
-  const resolveSelectorReference = (reference) => {
+  const resolveSelectorReference = (reference, scopeDocument = document) => {
+    if (!scopeDocument) return null;
     const selectors = reference?.shadow_path?.length
       ? reference.shadow_path
       : [reference?.css_selector];
-    let scope = document;
+    let scope = scopeDocument;
     let node = null;
     try {
       for (let index = 0; index < selectors.length; index += 1) {
@@ -417,6 +554,43 @@
     }
     return node;
   };
+  const accessibleFrameDocument = (frame) => {
+    try {
+      const doc = frame.contentDocument;
+      if (!doc) return null;
+      void frame.contentWindow?.location?.href;
+      return doc;
+    } catch {
+      return null;
+    }
+  };
+  const selectorReference = (node) => ({
+    css_selector: cssPath(node),
+    shadow_path: shadowPath(node),
+    xpath: xpath(node),
+    tag: node.tagName.toLowerCase()
+  });
+  const iframePath = (node) => {
+    const frames = ancestorFramesFor(node);
+    if (!frames?.length) return null;
+    return frames.slice().reverse().map(selectorReference);
+  };
+  const resolveIframePath = (path) => {
+    if (!path?.length) return document;
+    let scopeDocument = document;
+    for (const hop of path) {
+      const frame = resolveSelectorReference(hop, scopeDocument);
+      if (!isFrameElement(frame)) return null;
+      scopeDocument = accessibleFrameDocument(frame);
+      if (!scopeDocument) return null;
+    }
+    return scopeDocument;
+  };
+  const documentForComment = (item) => {
+    if (!item?.iframe_path?.length) return document;
+    return resolveIframePath(item.iframe_path);
+  };
+  const toTopClientPoint = (x, y, node, geometry = frameGeometryFor(node)) => mapPointToTop(x, y, geometry);
   const xpath = (node) => {
     const parts = [];
     for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
@@ -429,10 +603,7 @@
   const elementReference = (node) => {
     const rect = node.getBoundingClientRect();
     return {
-      css_selector: cssPath(node),
-      shadow_path: shadowPath(node),
-      xpath: xpath(node),
-      tag: node.tagName.toLowerCase(),
+      ...selectorReference(node),
       id: node.id || null,
       classes: [...node.classList].filter(name => !name.startsWith('steward-review-')),
       text_excerpt: (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240),
@@ -444,11 +615,23 @@
     if (hovered) hovered.classList.remove('steward-review-hover');
     hovered = null;
   };
+  const clearHoverInDocument = (doc) => {
+    if (hovered && ownerDocumentOf(hovered) === doc) clearHover();
+  };
   const ensureHoverStyle = (node) => {
     const nodeRoot = node.getRootNode();
-    if (!(nodeRoot instanceof ShadowRoot) || hoverStyleRoots.has(nodeRoot)) return;
+    if (!isShadowRoot(nodeRoot) || hoverStyleRoots.has(nodeRoot)) return;
     nodeRoot.appendChild(pageStyle.cloneNode(true));
     hoverStyleRoots.add(nodeRoot);
+  };
+  const clearSelections = () => {
+    for (const doc of [...registeredDocuments]) {
+      try {
+        doc.defaultView?.getSelection()?.removeAllRanges();
+      } catch {
+        registeredDocuments.delete(doc);
+      }
+    }
   };
   const setMode = (nextMode) => {
     mode = nextMode;
@@ -458,7 +641,7 @@
     else if (mode === 'text') status.textContent = 'Select text to comment - Esc to exit';
     else status.textContent = '';
     if (mode !== 'element') clearHover();
-    if (mode !== 'text') window.getSelection()?.removeAllRanges();
+    if (mode !== 'text') clearSelections();
   };
 
   const closeInfo = () => {
@@ -505,7 +688,7 @@
   // Element and text references are intentionally redundant. Selectors locate
   // the target; text, offsets, and surrounding context disambiguate repeats.
   const endpointReference = (container, offset) => {
-    const parent = container.nodeType === Node.ELEMENT_NODE ? container : container.parentElement;
+    const parent = container.nodeType === 1 ? container : container.parentElement;
     if (!parent || isOverlay(parent)) return null;
     const path = [];
     let current = container;
@@ -523,10 +706,11 @@
     };
   };
   const surroundingText = (range, commonElement) => {
-    const beforeRange = document.createRange();
+    const doc = ownerDocumentOf(commonElement);
+    const beforeRange = doc.createRange();
     beforeRange.selectNodeContents(commonElement);
     beforeRange.setEnd(range.startContainer, range.startOffset);
-    const afterRange = document.createRange();
+    const afterRange = doc.createRange();
     afterRange.selectNodeContents(commonElement);
     afterRange.setStart(range.endContainer, range.endOffset);
     return {
@@ -535,7 +719,7 @@
     };
   };
   const rangeReference = (range) => {
-    const commonElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    const commonElement = range.commonAncestorContainer.nodeType === 1
       ? range.commonAncestorContainer
       : range.commonAncestorContainer.parentElement;
     const start = endpointReference(range.startContainer, range.startOffset);
@@ -551,28 +735,28 @@
       context_after: context.after
     };
   };
-  const resolveEndpoint = (reference) => {
+  const resolveEndpoint = (reference, scopeDocument) => {
     const parent = resolveSelectorReference({
       css_selector: reference.parent_css_selector,
       shadow_path: reference.parent_shadow_path
-    });
+    }, scopeDocument);
     if (!parent || isOverlay(parent)) return null;
     let node = parent;
     for (const index of reference.node_path || []) {
       node = node.childNodes[index];
       if (!node) return null;
     }
-    const maximum = node.nodeType === Node.TEXT_NODE ? node.data.length : node.childNodes.length;
+    const maximum = node.nodeType === 3 ? node.data.length : node.childNodes.length;
     if (!Number.isInteger(reference.offset) || reference.offset < 0 || reference.offset > maximum) return null;
     return { node, offset: reference.offset };
   };
-  const resolveRange = (selection) => {
-    if (!selection?.start || !selection?.end) return null;
-    const start = resolveEndpoint(selection.start);
-    const end = resolveEndpoint(selection.end);
+  const resolveRange = (selection, scopeDocument = document) => {
+    if (!selection?.start || !selection?.end || !scopeDocument) return null;
+    const start = resolveEndpoint(selection.start, scopeDocument);
+    const end = resolveEndpoint(selection.end, scopeDocument);
     if (!start || !end) return null;
     try {
-      const range = document.createRange();
+      const range = ownerDocumentOf(start.node).createRange();
       range.setStart(start.node, start.offset);
       range.setEnd(end.node, end.offset);
       return range.toString() === selection.selected_text ? range : null;
@@ -580,9 +764,9 @@
       return null;
     }
   };
-  const resolveElement = (reference) => {
-    if (!reference?.css_selector) return null;
-    const node = resolveSelectorReference(reference);
+  const resolveElement = (reference, scopeDocument = document) => {
+    if (!reference?.css_selector || !scopeDocument) return null;
+    const node = resolveSelectorReference(reference, scopeDocument);
     return visible(node) ? node : null;
   };
   const rangeRects = (range) => [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
@@ -590,29 +774,44 @@
     for (const node of highlights.get(id) || []) node.remove();
     highlights.delete(id);
   };
-  const drawHighlight = (id, range, origin = containingBlockOrigin()) => {
+  const drawHighlight = (id, range, origin = containingBlockOrigin(), geometry = null) => {
     removeHighlight(id);
-    const nodes = rangeRects(range).map(rect => {
+    const geo = geometry || frameGeometryFor(range.commonAncestorContainer);
+    if (!geo) return [];
+    const nodes = rangeRects(range).flatMap(rect => {
+      const clipped = mapRectToTop(rect, geo);
+      if (!clipped) return [];
       const highlight = document.createElement('div');
       highlight.className = 'steward-review-ui steward-review-highlight';
-      const point = toContainingBlock(rect.left, rect.top, origin);
+      const point = toContainingBlock(clipped.left, clipped.top, origin);
       highlight.style.left = `${point.x}px`;
       highlight.style.top = `${point.y}px`;
-      highlight.style.width = `${Math.round(rect.width)}px`;
-      highlight.style.height = `${Math.round(rect.height)}px`;
+      highlight.style.width = `${Math.round(clipped.width)}px`;
+      highlight.style.height = `${Math.round(clipped.height)}px`;
       shieldReviewUi(highlight);
       overlayShadow.appendChild(highlight);
-      return highlight;
+      return [highlight];
     });
     highlights.set(id, nodes);
     return nodes;
   };
-  const clientAnchorForRange = (range) => {
+  const clientAnchorForRange = (range, geometry = frameGeometryFor(range.commonAncestorContainer)) => {
     const rects = rangeRects(range);
     const rect = rects.at(-1);
-    return rect ? {x: rect.right, y: rect.top} : null;
+    if (!rect) return null;
+    return toTopClientPoint(rect.right, rect.top, range.commonAncestorContainer, geometry);
   };
 
+  const persistableTarget = (draftOrItem) => (
+    draftOrItem.iframe_path?.length ? { iframe_path: draftOrItem.iframe_path } : {}
+  );
+  const commentFromDraft = (draftItem, comment) => ({
+    id: draftItem.id, target_type: draftItem.targetType,
+    element: draftItem.element, selection: draftItem.selection,
+    ...persistableTarget(draftItem),
+    anchor: draftItem.anchor, anchor_coordinate_space: draftItem.anchorCoordinateSpace,
+    anchor_ratio: draftItem.anchorRatio, comment, created_at: draftItem.created_at
+  });
   // Draft persistence includes unsaved textarea content so an interrupted tab
   // can be recovered without treating it as a submitted review.
   const recoverableComments = () => {
@@ -626,7 +825,7 @@
       if (index >= 0) recovered[index] = item;
       else recovered.push(item);
     } else {
-      recovered.push({ id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at });
+      recovered.push(commentFromDraft(draft, text));
     }
     return recovered;
   };
@@ -697,9 +896,16 @@
     count.dataset.count = String(comments.length);
     count.setAttribute('aria-label', `${comments.length} comment${comments.length === 1 ? '' : 's'}`);
   };
+  const hideCommentAnchor = (item) => {
+    removeHighlight(item.id);
+    return null;
+  };
   const anchorForComment = (item, origin = containingBlockOrigin()) => {
+    const frameDocument = documentForComment(item);
+    if (item.iframe_path?.length && !frameDocument) return hideCommentAnchor(item);
     const fallbackAnchor = () => {
-      if (!item.anchor) return null;
+      removeHighlight(item.id);
+      if (item.iframe_path?.length || !item.anchor) return null;
       const {x, y} = item.anchor;
       if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
       if (item.anchor_coordinate_space === 'viewport') return toContainingBlock(x, y, origin);
@@ -707,7 +913,7 @@
 
       // Before coordinate-space metadata existed, document anchors included
       // scroll offsets and modal anchors were relative to their modal host.
-      const legacyTarget = resolveSelectorReference(item.element);
+      const legacyTarget = resolveSelectorReference(item.element, frameDocument);
       const legacyHost = composedClosest(legacyTarget, MODAL_HOST_SELECTOR);
       if (!legacyHost) return toContainingBlock(x - window.scrollX, y - window.scrollY, origin);
       const hostRect = legacyHost.getBoundingClientRect();
@@ -718,38 +924,55 @@
       );
     };
     if (item.target_type === 'text' && item.selection) {
-      const range = resolveRange(item.selection);
+      const range = resolveRange(item.selection, frameDocument);
       if (!range) return fallbackAnchor();
-      drawHighlight(item.id, range, origin);
-      const anchor = clientAnchorForRange(range);
-      return anchor ? toContainingBlock(anchor.x, anchor.y, origin) : fallbackAnchor();
+      const geometry = frameGeometryFor(range.commonAncestorContainer);
+      if (!geometry || (geometry.frame && !geometry.clip)) return hideCommentAnchor(item);
+      drawHighlight(item.id, range, origin, geometry);
+      let lastVisible = null;
+      for (const rect of rangeRects(range)) {
+        const mapped = mapRectToTop(rect, geometry);
+        if (mapped) lastVisible = mapped;
+      }
+      if (!lastVisible) return geometry.frame ? hideCommentAnchor(item) : renderedAnchors.get(item.id) || fallbackAnchor();
+      const point = geometry.frame
+        ? clampPinToClip(lastVisible.right, lastVisible.top, lastVisible)
+        : { x: lastVisible.right, y: lastVisible.top };
+      return point ? toContainingBlock(point.x, point.y, origin) : null;
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
-      const target = resolveElement(item.element);
+      const target = resolveElement(item.element, frameDocument);
       if (!target) return fallbackAnchor();
+      const geometry = frameGeometryFor(target);
+      if (!geometry || (geometry.frame && !geometry.clip)) return hideCommentAnchor(item);
       const rect = target.getBoundingClientRect();
+      const visibleRect = mapRectToTop(rect, geometry);
+      if (!visibleRect) return geometry.frame ? hideCommentAnchor(item) : renderedAnchors.get(item.id) || fallbackAnchor();
       const clientX = rect.left + rect.width * item.anchor_ratio.x;
       const clientY = rect.top + rect.height * item.anchor_ratio.y;
-      return toContainingBlock(clientX, clientY, origin);
+      const mapped = mapPointToTop(clientX, clientY, geometry, false);
+      const point = geometry.frame
+        ? clampPinToClip(mapped?.x ?? visibleRect.left, mapped?.y ?? visibleRect.top, visibleRect)
+        : mapped;
+      if (!point) return hideCommentAnchor(item);
+      return toContainingBlock(point.x, point.y, origin);
     }
     return fallbackAnchor();
   };
-  const pinFor = (item, origin = containingBlockOrigin()) => {
-    const anchor = anchorForComment(item, origin);
-    if (!anchor) return;
-    const pin = document.createElement('button');
+  const ensurePin = (item) => {
+    let pin = pins.get(item.id);
+    if (pin) return pin;
+    pin = document.createElement('button');
     pin.className = 'steward-review-ui steward-review-pin';
     pin.type = 'button';
-    pin.textContent = String(comments.indexOf(item) + 1);
-    pin.style.left = `${anchor.x}px`;
-    pin.style.top = `${anchor.y}px`;
-    pin.setAttribute('aria-label', `Open comment ${comments.indexOf(item) + 1}`);
+    pin.hidden = true;
+    pin.textContent = String(Math.max(1, comments.indexOf(item) + 1));
+    pin.setAttribute('aria-label', `Open comment ${Math.max(1, comments.indexOf(item) + 1)}`);
     shieldReviewUi(pin);
     pin.addEventListener('click', (event) => { event.preventDefault(); event.stopPropagation(); openPopup(item, event.clientX, event.clientY); });
     overlayShadow.appendChild(pin);
-    playEnter(pin);
     pins.set(item.id, pin);
-    updateCount();
+    return pin;
   };
   const renumberPins = () => comments.forEach((item, index) => {
     const pin = pins.get(item.id);
@@ -779,12 +1002,13 @@
       rememberComment(draft.item);
       savedItem = draft.item;
     } else {
-      const item = { id: draft.id, target_type: draft.targetType, element: draft.element, selection: draft.selection, anchor: draft.anchor, anchor_coordinate_space: draft.anchorCoordinateSpace, anchor_ratio: draft.anchorRatio, comment: text, created_at: draft.created_at };
+      const item = commentFromDraft(draft, text);
       comments.push(item);
       rememberComment(item);
-      pinFor(item);
+      refreshComments();
       savedItem = item;
     }
+    updateCount();
     draft = { item: savedItem, provisionalId: draft.provisionalId };
     closePopup();
   };
@@ -869,30 +1093,37 @@
     textarea.focus();
   };
 
-  const initialOrigin = comments.length ? containingBlockOrigin() : null;
-  comments.forEach(item => pinFor(item, initialOrigin));
+  comments.forEach(ensurePin);
   updateCount();
   // Toolbar and page event wiring stays together so capture-phase behavior is
   // easy to audit against the host page's own controls.
-  const eventOrigin = (event) => event.composedPath().find(node => node instanceof Element) || event.target;
-  addButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'element' ? 'interact' : 'element'); });
-  textButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'text' ? 'interact' : 'text'); });
-  infoButton.addEventListener('click', toggleInfo);
-  document.addEventListener('pointerdown', (event) => {
+  const eventOrigin = (event) => event.composedPath().find(isElement) || event.target;
+  const ensureDocumentHoverStyle = (doc) => {
+    if (!doc) return;
+    const rootNode = doc.head || doc.documentElement;
+    if (!rootNode || doc.getElementById('steward-review-page-style')) return;
+    const style = doc.createElement('style');
+    style.id = 'steward-review-page-style';
+    style.textContent = pageStyle.textContent;
+    rootNode.appendChild(style);
+  };
+  const onPointerDown = (event) => {
     if (infoPanel && !infoPanel.contains(event.target) && !infoButton.contains(event.target)) closeInfo();
-  });
-  document.addEventListener('pointerover', (event) => {
+  };
+  const onPointerMove = (event) => {
     const target = eventOrigin(event);
-    if (mode !== 'element' || !visible(target)) return;
+    if (target === hovered) return;
+    if (mode !== 'element') return;
+    if (isOverlay(target) || !visible(target)) {
+      clearHover();
+      return;
+    }
     clearHover();
     hovered = target;
     ensureHoverStyle(hovered);
     hovered.classList.add('steward-review-hover');
-  }, true);
-  document.addEventListener('pointerout', (event) => {
-    if (eventOrigin(event) === hovered) clearHover();
-  }, true);
-  document.addEventListener('click', (event) => {
+  };
+  const onClick = (event) => {
     const target = eventOrigin(event);
     if (isOverlay(target)) return;
     if (mode === 'text') {
@@ -903,8 +1134,15 @@
     if (mode !== 'element' || !visible(target)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    const geometry = frameGeometryFor(target);
+    const topPoint = toTopClientPoint(event.clientX, event.clientY, target, geometry);
+    if (!topPoint) {
+      clearHover();
+      setMode('interact');
+      status.textContent = geometry?.unavailable || 'That element cannot be annotated because its position could not be mapped.';
+      return;
+    }
     const element = elementReference(target);
-    const anchor = {x: event.clientX, y: event.clientY};
     const rect = target.getBoundingClientRect();
     const anchorRatio = {
       x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
@@ -912,35 +1150,49 @@
     };
     clearHover();
     setMode('interact');
-    openPopup(null, event.clientX, event.clientY, { targetType: 'element', element, anchor, anchorCoordinateSpace: 'viewport', anchorRatio });
-  }, true);
-  document.addEventListener('pointerup', (event) => {
+    openPopup(null, topPoint.x, topPoint.y, {
+      targetType: 'element',
+      element,
+      iframe_path: iframePath(target),
+      anchor: {x: topPoint.x, y: topPoint.y},
+      anchorCoordinateSpace: 'viewport',
+      anchorRatio
+    });
+  };
+  const onPointerUp = (event) => {
     const target = eventOrigin(event);
     if (mode !== 'text' || isOverlay(target)) return;
-    const selectionRoot = target.getRootNode();
-    const selection = selectionRoot.getSelection?.() || window.getSelection();
+    const selectionRoot = target.getRootNode?.() || ownerDocumentOf(target);
+    const selection = selectionRoot.getSelection?.() || ownerWindowOf(target).getSelection();
     if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) {
       status.textContent = 'Drag across text to select it - Esc to exit';
       return;
     }
     const range = selection.getRangeAt(0).cloneRange();
     const reference = rangeReference(range);
-    const anchor = clientAnchorForRange(range);
+    const geometry = frameGeometryFor(range.commonAncestorContainer);
+    if (geometry?.unavailable) {
+      status.textContent = geometry.unavailable;
+      return;
+    }
+    const anchor = clientAnchorForRange(range, geometry);
     if (!reference || !reference.selected_text.trim() || !anchor) {
       status.textContent = 'That selection cannot be annotated. Select page text outside the review controls.';
       return;
     }
+    const topPoint = toTopClientPoint(event.clientX, event.clientY, target, geometry) || anchor;
     setMode('interact');
-    openPopup(null, event.clientX, event.clientY, {
+    openPopup(null, topPoint.x, topPoint.y, {
       targetType: 'text',
       element: reference.common_ancestor,
       selection: reference,
+      iframe_path: iframePath(range.commonAncestorContainer),
       anchor,
       anchorCoordinateSpace: 'viewport',
       range
     });
-  }, true);
-  document.addEventListener('keydown', (event) => {
+  };
+  const onKeyDown = (event) => {
     if (event.key === 'Escape' && infoPanel) {
       event.preventDefault();
       closeInfo();
@@ -948,22 +1200,182 @@
       return;
     }
     if (event.key === 'Escape' && mode !== 'interact') { event.preventDefault(); setMode('interact'); }
-  }, true);
+  };
+  const listenUntilAbort = (target, eventName, listener, options, signal) => {
+    if (!target) return;
+    target.addEventListener(eventName, listener, options);
+    signal?.addEventListener('abort', () => target.removeEventListener(eventName, listener, options), { once: true });
+  };
+  const bindAnnotationListeners = (doc, signal) => {
+    const clearDocumentHover = () => clearHoverInDocument(doc);
+    listenUntilAbort(doc, 'pointerdown', onPointerDown, false, signal);
+    listenUntilAbort(doc, 'pointermove', onPointerMove, true, signal);
+    listenUntilAbort(doc, 'click', onClick, true, signal);
+    listenUntilAbort(doc, 'pointerup', onPointerUp, true, signal);
+    listenUntilAbort(doc, 'keydown', onKeyDown, true, signal);
+    listenUntilAbort(doc.documentElement, 'pointerleave', clearDocumentHover, false, signal);
+    // Element scroll events do not bubble, so listen during capture to keep
+    // comments anchored when any nested scrollable section moves its content.
+    listenUntilAbort(doc, 'scroll', scheduleCommentRefresh, true, signal);
+  };
+  const attachFrameDocument = (frame) => {
+    const nested = accessibleFrameDocument(frame);
+    const previous = frameDocuments.get(frame);
+    if (previous?.doc === nested) return;
+    if (previous) {
+      previous.controller.abort();
+      releaseFrames(previous.doc);
+      registeredDocuments.delete(previous.doc);
+      frameDocuments.delete(frame);
+      clearHoverInDocument(previous.doc);
+    }
+    if (!nested) return;
+    const Controller = nested.defaultView?.AbortController || AbortController;
+    const Observer = nested.defaultView?.MutationObserver || MutationObserver;
+    const controller = new Controller();
+    try {
+      registeredDocuments.add(nested);
+      ensureDocumentHoverStyle(nested);
+      bindAnnotationListeners(nested, controller.signal);
+      listenUntilAbort(nested.defaultView, 'resize', scheduleCommentRefresh, false, controller.signal);
+      if (typeof ResizeObserver === 'function') {
+        const resizeObserver = new ResizeObserver(scheduleCommentRefresh);
+        resizeObserver.observe(frame);
+        controller.signal.addEventListener('abort', () => resizeObserver.disconnect(), { once: true });
+      }
+      const frameDocumentObserver = new Observer((records) => {
+        if (records.every(isOverlayMutation)) return;
+        for (const record of records) {
+          for (const node of record.removedNodes) releaseFrames(node);
+          for (const node of record.addedNodes) discoverFrames(node, controller.signal);
+        }
+        scheduleCommentRefresh();
+      });
+      frameDocumentObserver.observe(nested, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true
+      });
+      controller.signal.addEventListener('abort', () => frameDocumentObserver.disconnect(), { once: true });
+      nested.fonts?.ready?.then(() => {
+        if (!controller.signal.aborted) scheduleCommentRefresh();
+      }, () => {});
+      frameDocuments.set(frame, { doc: nested, controller });
+      discoverFrames(nested, controller.signal);
+      scheduleCommentRefresh();
+    } catch {
+      controller.abort();
+      registeredDocuments.delete(nested);
+      frameDocuments.delete(frame);
+    }
+  };
+  const watchFrame = (frame) => {
+    if (!isFrameElement(frame)) return;
+    if (!watchedFrames.has(frame)) {
+      watchedFrames.add(frame);
+      frame.addEventListener('load', () => attachFrameDocument(frame));
+    }
+    attachFrameDocument(frame);
+  };
+  const observeShadowFrames = (root, signal) => {
+    if (!isShadowRoot(root) || shadowFrameObservers.has(root)) return;
+    const Observer = ownerWindowOf(root).MutationObserver || MutationObserver;
+    const observer = new Observer((records) => {
+      for (const record of records) {
+        for (const node of record.removedNodes) releaseFrames(node);
+        for (const node of record.addedNodes) discoverFrames(node, signal);
+      }
+      scheduleCommentRefresh();
+    });
+    observer.observe(root, { subtree: true, childList: true });
+    shadowFrameObservers.set(root, observer);
+    signal?.addEventListener('abort', () => {
+      observer.disconnect();
+      shadowFrameObservers.delete(root);
+    }, { once: true });
+  };
+  const shadowRootsIn = (node) => {
+    const hosts = [];
+    if (isElement(node)) hosts.push(node);
+    if (node?.querySelectorAll) hosts.push(...node.querySelectorAll('*'));
+    return hosts.flatMap((host) => isOverlay(host) || !host.shadowRoot ? [] : [host.shadowRoot]);
+  };
+  const discoverFrames = (node, signal) => {
+    if (isFrameElement(node)) watchFrame(node);
+    if (node?.querySelectorAll) {
+      for (const frame of node.querySelectorAll('iframe, frame')) watchFrame(frame);
+    }
+    for (const root of shadowRootsIn(node)) {
+      observeShadowFrames(root, signal);
+      discoverFrames(root, signal);
+    }
+  };
+  const releaseFrame = (frame) => {
+    const tracked = frameDocuments.get(frame);
+    if (!tracked) return;
+    const nested = tracked.doc;
+    tracked.controller.abort();
+    registeredDocuments.delete(nested);
+    frameDocuments.delete(frame);
+    if (nested) releaseFrames(nested);
+    scheduleCommentRefresh();
+  };
+  const releaseFrames = (node) => {
+    if (isFrameElement(node)) {
+      releaseFrame(node);
+      return;
+    }
+    if (node?.querySelectorAll) {
+      for (const frame of node.querySelectorAll('iframe, frame')) releaseFrame(frame);
+    }
+    for (const root of shadowRootsIn(node)) {
+      shadowFrameObservers.get(root)?.disconnect();
+      shadowFrameObservers.delete(root);
+      releaseFrames(root);
+    }
+  };
+  const frameObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.removedNodes) releaseFrames(node);
+      for (const node of record.addedNodes) discoverFrames(node);
+    }
+  });
+  frameObserver.observe(document.documentElement, { subtree: true, childList: true });
+  const toggleAnnotationMode = (nextMode) => {
+    closeInfo();
+    closePopup();
+    const entering = mode !== nextMode;
+    // Attaching an open shadow root does not emit a DOM mutation. Rescan only
+    // when annotation begins so late-created frame trees become interactive
+    // without polling or another document-wide observer.
+    if (entering) discoverFrames(document);
+    setMode(entering ? nextMode : 'interact');
+  };
+  addButton.addEventListener('click', () => toggleAnnotationMode('element'));
+  textButton.addEventListener('click', () => toggleAnnotationMode('text'));
+  infoButton.addEventListener('click', toggleInfo);
 
   refreshComments = () => {
     const origin = containingBlockOrigin();
     for (const item of comments) {
+      const pin = ensurePin(item);
       const anchor = anchorForComment(item, origin);
-      const pin = pins.get(item.id);
-      if (!pin) continue;
       if (!anchor) {
         pin.hidden = true;
+        renderedAnchors.delete(item.id);
         continue;
       }
+      const wasHidden = pin.hidden;
       pin.hidden = false;
       if (pin.parentNode !== overlayShadow) overlayShadow.appendChild(pin);
       pin.style.left = `${anchor.x}px`;
       pin.style.top = `${anchor.y}px`;
+      renderedAnchors.set(item.id, anchor);
+      if (wasHidden && pin.dataset.entered !== 'true') {
+        pin.dataset.entered = 'true';
+        playEnter(pin);
+      }
     }
   };
   scheduleCommentRefresh = () => {
@@ -973,9 +1385,10 @@
       refreshComments();
     });
   };
-  // Element scroll events do not bubble, so listen during capture to keep
-  // comments anchored when any nested scrollable section moves its content.
-  document.addEventListener('scroll', scheduleCommentRefresh, true);
+  registeredDocuments.add(document);
+  bindAnnotationListeners(document);
+  discoverFrames(document);
+  refreshComments();
   window.addEventListener('resize', () => {
     closeInfo();
     scheduleCommentRefresh();
