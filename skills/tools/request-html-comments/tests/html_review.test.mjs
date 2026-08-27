@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { connect } from 'node:net'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
@@ -11,9 +11,12 @@ import {
   createReviewServer,
   injectHtml,
   loadRestoredComments,
+  normalizeHttpAuthority,
+  parseArgs,
   parseSource,
   sourceIdentity,
   logPath,
+  validateReviewHost,
 } from '../scripts/html_review.mjs'
 
 const OVERLAY_SCRIPT = readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8')
@@ -31,10 +34,10 @@ function listen(server) {
   })
 }
 
-function websocketHandshake(port, path, origin) {
+function websocketHandshake(port, path, origin, hostHeader = `127.0.0.1:${port}`, connectHost = '127.0.0.1') {
   return new Promise((resolveHandshake, rejectHandshake) => {
-    const socket = connect(port, '127.0.0.1', () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
+    const socket = connect(port, connectHost, () => {
+      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
     })
     let response = ''
     socket.setEncoding('utf8')
@@ -47,6 +50,113 @@ function websocketHandshake(port, path, origin) {
     })
     socket.on('error', rejectHandshake)
   })
+}
+
+function rawHttpStatus(port, connectHost, hostHeader, origin = null) {
+  return new Promise((resolveStatus, rejectStatus) => {
+    const socket = connect(port, connectHost, () => {
+      const originHeader = origin ? `Origin: ${origin}\r\n` : ''
+      socket.write(`GET / HTTP/1.1\r\nHost: ${hostHeader}\r\n${originHeader}Connection: close\r\n\r\n`)
+    })
+    let response = ''
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => { response += chunk })
+    socket.on('end', () => {
+      const status = /^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]
+      if (!status) rejectStatus(new Error(`missing HTTP status in ${response}`))
+      else resolveStatus(Number(status))
+    })
+    socket.on('error', rejectStatus)
+  })
+}
+
+function rawHttpRequestStatus(port, connectHost, hostHeader, {
+  method = 'GET',
+  path = '/',
+  headers = {},
+  body = '',
+} = {}) {
+  return new Promise((resolveStatus, rejectStatus) => {
+    const socket = connect(port, connectHost, () => {
+      const lines = [`${method} ${path} HTTP/1.1`, `Host: ${hostHeader}`]
+      for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`)
+      if (body) lines.push(`Content-Length: ${Buffer.byteLength(body)}`)
+      socket.write(`${lines.join('\r\n')}\r\nConnection: close\r\n\r\n${body}`)
+    })
+    let response = ''
+    socket.setEncoding('utf8')
+    socket.on('data', chunk => { response += chunk })
+    socket.on('end', () => {
+      const status = /^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]
+      if (!status) rejectStatus(new Error(`missing HTTP status in ${response}`))
+      else resolveStatus(Number(status))
+    })
+    socket.on('error', rejectStatus)
+  })
+}
+
+function activeLanIpv4() {
+  return Object.values(networkInterfaces()).flat().find(address => (
+    address && (address.family === 'IPv4' || address.family === 4) && !address.internal
+  ))?.address || null
+}
+
+function connectionResult(port, host) {
+  return new Promise(resolveResult => {
+    const socket = connect(port, host)
+    socket.setTimeout(500, () => {
+      socket.destroy()
+      resolveResult('ETIMEDOUT')
+    })
+    socket.once('connect', () => {
+      socket.end()
+      resolveResult('connected')
+    })
+    socket.once('error', error => resolveResult(error.code || error.message))
+  })
+}
+
+async function terminateProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return
+  for (const signal of ['SIGTERM', 'SIGKILL']) {
+    try {
+      process.kill(pid, signal)
+    } catch (error) {
+      if (error.code === 'ESRCH') return
+      throw error
+    }
+    const deadline = Date.now() + 2_000
+    while (Date.now() < deadline) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 50))
+      try {
+        process.kill(pid, 0)
+      } catch (error) {
+        if (error.code === 'ESRCH') return
+        throw error
+      }
+    }
+  }
+}
+
+async function cleanupAsyncReview(output) {
+  let log = ''
+  try {
+    log = readFileSync(logPath(output), 'utf8')
+  } catch {
+    return
+  }
+  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
+  if (ready) {
+    try {
+      const response = await fetch(ready)
+      if (response.status === 200) {
+        const endpoint = endpointFromHtml(await response.text())
+        await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })
+      }
+    } catch {}
+  }
+  const workerPid = Number(/"worker_pid":(\d+)/.exec(log)?.[1] || 0)
+  if (workerPid) await terminateProcess(workerPid)
 }
 
 function openWebsocket(port, path, origin) {
@@ -80,6 +190,180 @@ test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
   assert.throws(() => parseSource(join(directory, 'missing.html')), /existing .html/)
 })
 
+test('CLI accepts no-open, explicit port, and a validated local-interface host', t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
+  writeFileSync(html, '<html></html>')
+  const host = activeLanIpv4()
+  const argv = [html, '--async', '--output', output, '--no-open', '--port', '56158']
+  if (host) argv.push('--host', host)
+  const args = parseArgs(argv)
+  assert.equal(args.no_open, true)
+  assert.equal(args.port, 56158)
+  assert.equal(args.host, host)
+  assert.throws(() => parseArgs([html, '--port', '0']), /integer from 1 to 65535/)
+  assert.throws(() => parseArgs([html, '--port', '65536']), /integer from 1 to 65535/)
+  assert.throws(() => parseArgs([html, '--port', 'not-a-port']), /integer from 1 to 65535/)
+})
+
+test('trusted-LAN host validation accepts only an exact active non-loopback IPv4 address', () => {
+  const interfaces = {
+    en0: [{ address: '192.0.2.44', family: 'IPv4', internal: false }],
+    lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+  }
+  assert.equal(validateReviewHost('192.0.2.44', interfaces), '192.0.2.44')
+  for (const rejected of [
+    'localhost', 'example.test', '::1', '[::1]', '0.0.0.0', '127.0.0.1',
+    '224.0.0.1', '999.1.1.1', '192.0.2.44:3000', '192.0.2.45', ' 192.0.2.44',
+  ]) {
+    assert.throws(() => validateReviewHost(rejected, interfaces), /--host/)
+  }
+})
+
+test('default HTTP authorities normalize an omitted :80 without weakening exact-host checks', () => {
+  assert.equal(normalizeHttpAuthority('192.0.2.44'), '192.0.2.44:80')
+  assert.equal(normalizeHttpAuthority('192.0.2.44:80'), '192.0.2.44:80')
+  assert.equal(normalizeHttpAuthority('Review.Test'), 'review.test:80')
+  assert.equal(normalizeHttpAuthority('[2001:db8::1]'), '[2001:db8::1]:80')
+  assert.equal(normalizeHttpAuthority('[2001:DB8::1]:443'), '[2001:DB8::1]:443')
+  assert.notEqual(normalizeHttpAuthority('192.0.2.44'), normalizeHttpAuthority('192.0.2.44:81'))
+  assert.notEqual(normalizeHttpAuthority('review.test'), normalizeHttpAuthority('other.test'))
+})
+
+test('HTTP authority normalization rejects URL parser tricks and noncanonical host spellings', () => {
+  for (const rejected of [
+    '',
+    ' review.test',
+    'review.test ',
+    'review.test\t',
+    'user@review.test',
+    'review.test/path',
+    'review.test?query',
+    'review.test#fragment',
+    'review.test:',
+    'review.test:0',
+    'review.test:00',
+    'review.test:080',
+    'review.test:65536',
+    'review.test:-1',
+    'review.test:+80',
+    '192.0.2',
+    '192.0.2.044',
+    '192.0.2.4.4',
+    '0300.0000.0002.0044',
+    '0xC000022C',
+    '3232236076',
+    '192.0.2.44:080',
+    '192.0.2.44:99999',
+    'example..test',
+    '.example.test',
+    'example.test.',
+    '-example.test',
+    'example-.test',
+    '[2001:db8::1',
+    '2001:db8::1',
+    '[2001:db8::1]:',
+    '[2001:db8::1]:080',
+    '[2001:db8::1]:65536',
+    '[fe80::1%25en0]',
+  ]) {
+    assert.equal(normalizeHttpAuthority(rejected), null, rejected)
+  }
+})
+
+test('review server binds an explicit port and reports an actionable bind failure', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const reservation = createServer()
+  const port = await listen(reservation)
+  t.after(() => new Promise(resolveClose => reservation.close(resolveClose)))
+  await assert.rejects(createReviewServer({
+    source: parseSource(html), draftOutput: null, initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {}, port,
+  }), new RegExp(`could not bind review server to 127\\.0\\.0\\.1:${port}.*EADDRINUSE`))
+})
+
+test('trusted-LAN server binds and advertises only the selected local interface', async t => {
+  const host = activeLanIpv4()
+  if (!host) return t.skip('no active non-loopback IPv4 interface is available')
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  writeFileSync(html, '<html><body>LAN review</body></html>')
+  const review = await createReviewServer({
+    source: parseSource(html), draftOutput: null, initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {}, host,
+  })
+  t.after(() => review.close())
+  assert.equal(new URL(review.reviewUrl).hostname, host)
+  assert.equal((await fetch(review.reviewUrl)).status, 200)
+  assert.notEqual(await connectionResult(Number(new URL(review.reviewUrl).port), '127.0.0.1'), 'connected')
+  assert.equal(await rawHttpStatus(
+    Number(new URL(review.reviewUrl).port), host, `127.0.0.1:${new URL(review.reviewUrl).port}`,
+  ), 403)
+  const crossOrigin = await fetch(review.reviewUrl, { headers: { origin: 'http://example.test' } })
+  assert.equal(crossOrigin.status, 403)
+})
+
+test('cross-site top-level document navigation is allowed only for the review page', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const css = join(directory, 'page.css')
+  writeFileSync(html, '<html><head><link rel="stylesheet" href="page.css"></head><body>Review me</body></html>')
+  writeFileSync(css, 'body { color: red; }')
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: null,
+    initialComments: [],
+    overlayScript: OVERLAY_SCRIPT,
+    log: () => {},
+  })
+  t.after(() => review.close())
+
+  const reviewUrl = new URL(review.reviewUrl)
+  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'GET',
+    path: reviewUrl.pathname,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 200)
+  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'HEAD',
+    path: reviewUrl.pathname,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 200)
+  const assetResponse = await fetch(new URL('page.css', review.reviewUrl), {
+    headers: {
+      'sec-fetch-site': 'cross-site',
+      'sec-fetch-mode': 'no-cors',
+      'sec-fetch-dest': 'style',
+    },
+  })
+  assert.equal(assetResponse.status, 403)
+  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
+  const submit = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
+    method: 'POST',
+    headers: {
+      origin: 'https://mail.google.com',
+      'content-type': 'application/json',
+      'sec-fetch-site': 'cross-site',
+    },
+    body: '{}',
+  })
+  assert.equal(submit.status, 403)
+  assert.equal((await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), { method: 'POST', body: '{}' })).status, 200)
+})
+
 test('invalid startup input leaves an actionable worker log', t => {
   const directory = temporaryDirectory(t)
   const output = join(directory, 'feedback.json')
@@ -92,6 +376,39 @@ test('invalid startup input leaves an actionable worker log', t => {
   assert.match(result.stderr, /loopback URL/)
   // Async mode detaches, so the log file is the only diagnostic the caller gets.
   assert.match(readFileSync(logPath(output), 'utf8'), /loopback URL/)
+})
+
+test('async no-open forwards explicit launch controls to the worker', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
+  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+  writeFileSync(html, '<html><body>Async review</body></html>')
+  t.after(() => cleanupAsyncReview(output))
+  const reservation = createServer()
+  const port = await listen(reservation)
+  await new Promise(resolveClose => reservation.close(resolveClose))
+  const host = activeLanIpv4()
+  const argv = [script, html, '--async', '--output', output, '--no-open', '--port', String(port)]
+  if (host) argv.push('--host', host)
+  const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
+  assert.equal(launched.status, 0, launched.stderr)
+  assert.match(launched.stdout, /Review server started/)
+  const logFile = logPath(output)
+  const log = readFileSync(logFile, 'utf8')
+  assert.match(log, /Skipped default browser launch/)
+  assert.match(log, new RegExp(`"port":${port}`))
+  assert.match(log, new RegExp(`"host":${host ? `"${host}"` : 'null'}`))
+  if (host) {
+    assert.match(launched.stdout, /WARNING: --host has no auth;/)
+    assert.match(log, /WARN WARNING: --host has no auth;/)
+  }
+  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
+  assert.ok(ready, 'worker log should report the review URL')
+  const response = await fetch(ready)
+  assert.equal(response.status, 200)
+  const endpoint = endpointFromHtml(await response.text())
+  assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
 })
 
 test('restore accepts legacy and versioned artifacts but rejects another source', t => {
@@ -158,7 +475,7 @@ test('file overlay injection preserves non-ASCII restored comments through Latin
   assert.doesNotMatch(encoded.slice(scriptStart, scriptEnd), /[^\x00-\x7f]/)
 })
 
-test('the injected overlay stays inactive inside an iframe', () => {
+test('the injected script does not create duplicate controls when loaded inside an iframe', () => {
   const rendered = injectHtml('<html><body>Framed page</body></html>', '/token', [], OVERLAY_SCRIPT)
   const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
   const scriptEnd = rendered.indexOf('</script>', scriptStart)
@@ -183,8 +500,75 @@ test('the overlay observes modal visibility attributes and targets dialog hosts'
 })
 
 test('the overlay refreshes comment positions when nested sections scroll', () => {
-  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('scroll',\s*scheduleCommentRefresh,\s*true\)/)
+  assert.match(OVERLAY_SCRIPT, /addEventListener\('scroll',\s*scheduleCommentRefresh,\s*capture\)/)
+  assert.match(OVERLAY_SCRIPT, /const capture = signal \? \{ capture: true, signal \} : true/)
   assert.match(OVERLAY_SCRIPT, /refreshCommentsFrame = requestAnimationFrame/)
+})
+
+test('the overlay resolves nested same-origin iframe paths and maps cumulative geometry', () => {
+  assert.doesNotMatch(OVERLAY_SCRIPT, /path\.length !== 1/)
+  assert.match(OVERLAY_SCRIPT, /const ancestorFramesFor =/)
+  assert.match(OVERLAY_SCRIPT, /frames\.slice\(\)\.reverse\(\)\.map/)
+  assert.match(OVERLAY_SCRIPT, /for \(const hop of path\)/)
+  assert.match(OVERLAY_SCRIPT, /scopeDocument = accessibleFrameDocument\(frame\)/)
+  assert.match(OVERLAY_SCRIPT, /for \(const hop of geometry\.hops\)/)
+  assert.match(OVERLAY_SCRIPT, /mappedX = hop\.content\.left \+ mappedX \* hop\.scaleX/)
+  assert.match(OVERLAY_SCRIPT, /mapped = intersectRects\(next, parentClip\)/)
+  assert.match(OVERLAY_SCRIPT, /if \(hops\.length\) geometry\.clip = mapRectToTop\(source, geometry\)/)
+})
+
+test('top-document mapping returns unclipped geometry before iframe clipping begins', () => {
+  assert.match(
+    OVERLAY_SCRIPT,
+    /if \(!geometry\) return null;\s*if \(!geometry\.hops\?\.length\) return \{ x, y \};\s*if \(!pointInRect\(x, y, geometry\.source\)\) return null;/,
+  )
+  assert.match(
+    OVERLAY_SCRIPT,
+    /if \(!geometry\) return null;\s*if \(!geometry\.hops\?\.length\) return asBox\(rect\);\s*let mapped = intersectRects\(asBox\(rect\), geometry\.source\);/,
+  )
+})
+
+test('top-document pins keep prior positions while framed pins still hide on lost clip', () => {
+  assert.match(OVERLAY_SCRIPT, /if \(!lastVisible\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
+  assert.match(OVERLAY_SCRIPT, /if \(!visibleRect\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
+  assert.match(OVERLAY_SCRIPT, /renderedAnchors\.set\(item\.id, anchor\)/)
+  assert.match(OVERLAY_SCRIPT, /renderedAnchors\.delete\(item\.id\)/)
+})
+
+test('hover clears on overlay chrome or document exit without remeasuring the same target', () => {
+  assert.match(OVERLAY_SCRIPT, /if \(target === hovered\) return/)
+  assert.match(OVERLAY_SCRIPT, /if \(isOverlay\(target\) \|\| !visible\(target\)\) \{\s*clearHover\(\);/)
+  assert.match(OVERLAY_SCRIPT, /doc\.documentElement\?\.addEventListener\('pointerleave', clearDocumentHover/)
+})
+
+test('frame bookkeeping is deleted when a watched frame becomes inaccessible', () => {
+  assert.match(OVERLAY_SCRIPT, /frameDocuments\.delete\(frame\);\s*clearHoverInDocument\(previous\.doc\);\s*\}\s*if \(!nested\) return;/)
+})
+
+test('pins animate only on first reveal instead of every hide-show cycle', () => {
+  assert.match(OVERLAY_SCRIPT, /if \(wasHidden && pin\.dataset\.entered !== 'true'\) \{/)
+  assert.match(OVERLAY_SCRIPT, /pin\.dataset\.entered = 'true';\s*playEnter\(pin\);/)
+})
+
+test('iframe mapping clips to overflow ancestors and clamps partially visible anchors', () => {
+  assert.match(OVERLAY_SCRIPT, /\['hidden', 'clip', 'auto', 'scroll'\]/)
+  assert.match(OVERLAY_SCRIPT, /for \(let ancestor = frame\.parentElement/)
+  assert.match(OVERLAY_SCRIPT, /visibleClip: visibleFrameContentRect\(frame, content\)/)
+  assert.match(OVERLAY_SCRIPT, /intersectRects\(hop\.visibleClip, hop\.parentSource\)/)
+  assert.match(OVERLAY_SCRIPT, /const visibleRect = mapRectToTop\(rect, geometry\)/)
+  assert.match(OVERLAY_SCRIPT, /clampPinToClip\([\s\S]*visibleRect\)/)
+  assert.match(OVERLAY_SCRIPT, /if \(!visibleRect\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
+})
+
+test('the overlay observes attached iframe documents and their font readiness', () => {
+  assert.match(OVERLAY_SCRIPT, /frameDocumentObserver\.observe\(nested/)
+  assert.match(OVERLAY_SCRIPT, /characterData: true/)
+  assert.match(OVERLAY_SCRIPT, /discoverFrames\(nested\)/)
+  assert.match(OVERLAY_SCRIPT, /nested\.fonts\?\.ready/)
+  assert.match(OVERLAY_SCRIPT, /if \(!controller\.signal\.aborted\) scheduleCommentRefresh\(\)/)
+  assert.match(OVERLAY_SCRIPT, /new ResizeObserver\(\(\) => scheduleCommentRefresh\(\)\)/)
+  assert.match(OVERLAY_SCRIPT, /for \(const node of record\.removedNodes\) releaseFrames\(node\)/)
+  assert.match(OVERLAY_SCRIPT, /tracked\.controller\.abort\(\)/)
 })
 
 test('element and text references can cross open shadow-root boundaries', () => {
@@ -194,6 +578,8 @@ test('element and text references can cross open shadow-root boundaries', () => 
   assert.match(OVERLAY_SCRIPT, /const resolveSelectorReference =/)
   assert.match(OVERLAY_SCRIPT, /scope = node\.shadowRoot/)
   assert.match(OVERLAY_SCRIPT, /const eventOrigin = \(event\) => event\.composedPath\(\)/)
+  assert.match(OVERLAY_SCRIPT, /addEventListener\('pointermove', onPointerMove, capture\)/)
+  assert.match(OVERLAY_SCRIPT, /if \(target === hovered\) return/)
 })
 
 test('new fallback anchors use explicit viewport coordinates across modal reparenting', () => {
@@ -211,9 +597,12 @@ test('legacy fallback anchors are validated and converted from their original ho
 })
 
 test('one containing-block measurement is shared by each synchronous comment refresh', () => {
-  assert.match(OVERLAY_SCRIPT, /refreshComments = \(\) => \{\s*const origin = containingBlockOrigin\(\)/)
+  assert.match(
+    OVERLAY_SCRIPT,
+    /refreshComments = \(\) => \{\s*const origin = containingBlockOrigin\(\);\s*for \(const item of comments\)/,
+  )
   assert.match(OVERLAY_SCRIPT, /anchorForComment\(item, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /drawHighlight\(item\.id, range, origin\)/)
+  assert.match(OVERLAY_SCRIPT, /drawHighlight\(item\.id, range, origin/)
   assert.match(OVERLAY_SCRIPT, /applyOverlayPlacement[\s\S]*const origin = containingBlockOrigin\(\)/)
 })
 
@@ -253,6 +642,7 @@ test('reparenting into a modal keeps overlay screen position and does not replay
   assert.match(OVERLAY_SCRIPT, /placeFixedElement\(infoPanel, infoRect\.left, infoRect\.top, origin\)/)
   assert.match(OVERLAY_SCRIPT, /\.steward-review-popup\.sr-enter/)
   assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\.sr-enter/)
+  assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\[hidden\] \{ display: none !important; \}/)
   assert.doesNotMatch(
     OVERLAY_SCRIPT,
     /\.steward-review-popup \{[^}]*animation:/
@@ -511,8 +901,31 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
     headers: { 'sec-fetch-site': 'cross-site' },
   })
   assert.equal(crossSiteResponse.status, 403)
+  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'GET',
+    path: `${reviewUrl.pathname}${reviewUrl.search}`,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 200)
+  assert.equal(await rawHttpRequestStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
+    method: 'GET',
+    path: `${reviewUrl.pathname}?theme=light`,
+    headers: {
+      'Sec-Fetch-Site': 'cross-site',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+    },
+  }), 403)
   const rejectedHandshake = await websocketHandshake(Number(reviewUrl.port), '/socket', 'https://example.com')
   assert.match(rejectedHandshake, /^HTTP\/1\.1 403 Forbidden/)
+  assert.equal(await rawHttpStatus(Number(reviewUrl.port), '127.0.0.1', `localhost:${reviewUrl.port}`), 403)
+  const rejectedHostHandshake = await websocketHandshake(
+    Number(reviewUrl.port), '/socket', browserOrigin, `localhost:${reviewUrl.port}`,
+  )
+  assert.match(rejectedHostHandshake, /^HTTP\/1\.1 403 Forbidden/)
   await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -596,6 +1009,107 @@ test('a stalled served page times out and releases the proxied request', async t
     && event.message === 'Could not reach served-page source'
     && /did not respond in time/.test(event.details.error)
   )))
+})
+
+test('file review injects one overlay into the top page and not iframe assets', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const inner = join(directory, 'inner.html')
+  writeFileSync(html, '<html><body><iframe src="inner.html"></iframe></body></html>')
+  writeFileSync(inner, '<html><body>Inner page</body></html>')
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: null,
+    initialComments: [],
+    overlayScript: OVERLAY_SCRIPT,
+    log: () => {},
+  })
+  t.after(() => review.close())
+
+  const page = await (await fetch(review.reviewUrl)).text()
+  const nested = await (await fetch(new URL('inner.html', review.reviewUrl))).text()
+  assert.match(page, /steward-review-root/)
+  assert.match(page, /if \(window\.top !== window\) return/)
+  assert.equal(nested, '<html><body>Inner page</body></html>')
+})
+
+test('review drafts persist iframe_path and restore it onto the same source', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const draft = join(directory, 'feedback.draft.json')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const comments = [{
+    id: 'iframe-one',
+    target_type: 'element',
+    comment: 'In the preview',
+    iframe_path: [{ css_selector: '#storybook-preview-iframe', tag: 'iframe' }],
+    element: { css_selector: '#submit' },
+  }]
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: draft,
+    initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {},
+  })
+  t.after(() => review.close())
+  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
+  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ comments, deleted_ids: [] }),
+  })
+  assert.equal(save.status, 200)
+  const persisted = JSON.parse(readFileSync(draft, 'utf8'))
+  assert.deepEqual(persisted.comments, comments)
+  assert.deepEqual(loadRestoredComments(draft, parseSource(html)), comments)
+})
+
+test('review drafts persist nested iframe_path hops and restore them onto the same source', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const draft = join(directory, 'feedback.draft.json')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const comments = [{
+    id: 'iframe-nested',
+    target_type: 'element',
+    comment: 'In the nested preview',
+    iframe_path: [
+      { css_selector: '#outer-frame', tag: 'iframe' },
+      { css_selector: '#inner-frame', tag: 'iframe' },
+    ],
+    element: { css_selector: '#submit' },
+  }]
+  const review = await createReviewServer({
+    source: parseSource(html),
+    draftOutput: draft,
+    initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {},
+  })
+  t.after(() => review.close())
+  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
+  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ comments, deleted_ids: [] }),
+  })
+  assert.equal(save.status, 200)
+  const persisted = JSON.parse(readFileSync(draft, 'utf8'))
+  assert.deepEqual(persisted.comments, comments)
+  assert.equal(persisted.comments[0].iframe_path.length, 2)
+  assert.deepEqual(loadRestoredComments(draft, parseSource(html)), comments)
+})
+
+test('comments without iframe_path remain valid restored top-document comments', t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const artifact = join(directory, 'legacy.json')
+  writeFileSync(html, '<html></html>')
+  const comments = [{ id: 'top', target_type: 'element', comment: 'Keep this', element: { css_selector: 'h1' } }]
+  writeFileSync(artifact, JSON.stringify({ version: 2, source: { type: 'file', value: html }, comments }))
+  assert.deepEqual(loadRestoredComments(artifact, parseSource(html)), comments)
+  assert.equal(loadRestoredComments(artifact, parseSource(html))[0].iframe_path, undefined)
 })
 
 test('localhost served-page reviews retain the localhost browser hostname', async t => {
