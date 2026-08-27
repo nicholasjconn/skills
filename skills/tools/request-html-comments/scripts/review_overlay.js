@@ -185,7 +185,7 @@
   };
   const ownerWindowOf = (node) => ownerDocumentOf(node).defaultView || window;
   const isFrameElement = (node) => isElement(node) && /^(IFRAME|FRAME)$/.test(node.tagName);
-  const { clampPinToClip, intersectClippedAxes, isAxisAlignedTransform, mapPointToTop, mapRectToTop } = globalThis.__stewardReviewGeometry;
+  const { clampPinToClip, intersectClippedAxes, isAxisAlignedTransform, mapPointToTop, mapRectToTop } = __stewardReviewGeometry;
   const overflowClips = (value) => ['hidden', 'clip', 'auto', 'scroll'].includes(value);
   const composedAncestors = (node) => {
     const ancestors = [];
@@ -206,11 +206,26 @@
   const visibleFrameContentRect = (frame, contentRect) => {
     let visibleRect = contentRect;
     const view = ownerWindowOf(frame);
+    const frameDocument = ownerDocumentOf(frame);
+    const root = frameDocument.documentElement;
     for (const ancestor of composedAncestors(frame).slice(1)) {
       if (!visibleRect) break;
+      // The root is clipped by the viewport through parentSource below, not
+      // by its document-sized border box. Treating it as an ancestor clip
+      // incorrectly hides frames after a deeply scrolled document moves the
+      // root rect away from the viewport.
+      if (ancestor === root) continue;
       const style = view.getComputedStyle(ancestor);
-      const clipX = overflowClips(style.overflowX);
-      const clipY = overflowClips(style.overflowY);
+      let clipX = overflowClips(style.overflowX);
+      let clipY = overflowClips(style.overflowY);
+      // When root overflow is visible, body overflow propagates to the
+      // viewport. parentSource already provides that viewport clip, so body
+      // must not apply a second document-sized clip on that axis.
+      if (ancestor === frameDocument.body && root) {
+        const rootStyle = view.getComputedStyle(root);
+        if (rootStyle.overflowX === 'visible') clipX = false;
+        if (rootStyle.overflowY === 'visible') clipY = false;
+      }
       if (!clipX && !clipY) continue;
       const rect = ancestor.getBoundingClientRect();
       const scaleX = ancestor.offsetWidth ? rect.width / ancestor.offsetWidth : 1;
@@ -250,7 +265,9 @@
   const FRAME_TRANSFORM_STATUS = 'Comments inside this iframe cannot be annotated because its frame layout uses a rotated, skewed, or 3D transform.';
   const transformedFrameAncestor = (frame) => composedAncestors(frame).find((ancestor) => {
     const style = ownerWindowOf(frame).getComputedStyle(ancestor);
-    return !isAxisAlignedTransform(style.transform) || (style.perspective && style.perspective !== 'none');
+    return !isAxisAlignedTransform(style.transform)
+      || (style.rotate && style.rotate !== 'none')
+      || (style.perspective && style.perspective !== 'none');
   });
   const frameGeometryFor = (node) => {
     const view = ownerWindowOf(node);
@@ -1122,7 +1139,9 @@
     const geometry = frameGeometryFor(target);
     const topPoint = toTopClientPoint(event.clientX, event.clientY, target, geometry);
     if (!topPoint) {
-      if (geometry?.unavailable) status.textContent = geometry.unavailable;
+      clearHover();
+      setMode('interact');
+      status.textContent = geometry?.unavailable || 'That element cannot be annotated because its position could not be mapped.';
       return;
     }
     const element = elementReference(target);
@@ -1317,8 +1336,18 @@
     }
   });
   frameObserver.observe(document.documentElement, { subtree: true, childList: true });
-  addButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'element' ? 'interact' : 'element'); });
-  textButton.addEventListener('click', () => { closeInfo(); closePopup(); setMode(mode === 'text' ? 'interact' : 'text'); });
+  const toggleAnnotationMode = (nextMode) => {
+    closeInfo();
+    closePopup();
+    const entering = mode !== nextMode;
+    // Attaching an open shadow root does not emit a DOM mutation. Rescan only
+    // when annotation begins so late-created frame trees become interactive
+    // without polling or another document-wide observer.
+    if (entering) discoverFrames(document);
+    setMode(entering ? nextMode : 'interact');
+  };
+  addButton.addEventListener('click', () => toggleAnnotationMode('element'));
+  textButton.addEventListener('click', () => toggleAnnotationMode('text'));
   infoButton.addEventListener('click', toggleInfo);
 
   refreshComments = () => {

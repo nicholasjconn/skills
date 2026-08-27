@@ -574,7 +574,9 @@ export async function createReviewServer({
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
 const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
-const OVERLAY_SCRIPT = `${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}`
+// Keep helpers private to this single injected payload while allowing the
+// overlay source to use its geometry binding directly.
+const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n})();`
 
 function usage() {
   console.log(`Usage: node html_review.mjs <HTML-file-or-loopback-URL> [options]
@@ -742,7 +744,7 @@ async function runReview(args) {
     emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
     if (args.no_open) {
       log('info', 'Skipped default browser launch', { review_url: server.reviewUrl })
-      if (!args.asynchronous && !output) process.stdout.write(`Review URL: ${server.reviewUrl}\n`)
+      if (!args.worker) process.stdout.write(`Review URL: ${server.reviewUrl}\n`)
     }
     else await openBrowser(server.reviewUrl, log)
     if (args.ready_file) writeFileSync(args.ready_file, `${server.reviewUrl}\n`)
@@ -799,6 +801,7 @@ async function launchAsync(args) {
       rmSync(readyFile)
       emitTrustedLanWarning(log, args, readyUrl, { fileLog: false })
       log('info', args.no_open ? 'Review server started successfully' : 'Review opened successfully', { worker_pid: child.pid })
+      if (args.no_open) console.log(`Review URL: ${readyUrl}`)
       console.log(`${args.no_open ? 'Review server started' : 'Review opened'}. Submitted feedback: ${output}`)
       console.log(`Recoverable draft: ${draftOutput}`)
       console.log(`Worker log: ${logOutput}`)

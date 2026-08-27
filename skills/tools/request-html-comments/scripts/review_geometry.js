@@ -1,4 +1,7 @@
-var __stewardReviewGeometry = (() => {
+// This lexical binding is shared with review_overlay.js because both sources
+// are combined into one injected script. Do not assign it to globalThis: the
+// reviewed page must not receive a geometry-helper global.
+const __stewardReviewGeometry = (() => {
   const EPSILON = 1e-7
   const nearZero = value => Math.abs(value) <= EPSILON
   const nearOne = value => Math.abs(value - 1) <= EPSILON
@@ -114,5 +117,6 @@ var __stewardReviewGeometry = (() => {
   }
 })();
 
-globalThis.__stewardReviewGeometry = __stewardReviewGeometry;
+// Keep direct Node behavioral tests and local helper consumers working without
+// making the browser injection depend on a CommonJS global.
 if (typeof module !== 'undefined' && module.exports) module.exports = __stewardReviewGeometry;

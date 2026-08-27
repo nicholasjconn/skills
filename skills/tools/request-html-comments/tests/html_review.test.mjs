@@ -442,18 +442,20 @@ test('async no-open forwards explicit launch controls to the worker', async t =>
   }
   const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
   assert.ok(ready, 'worker log should report the review URL')
+  assert.ok(launched.stdout.includes(`Review URL: ${ready}`), 'async no-open should print its review URL')
   const response = await fetch(ready)
   assert.equal(response.status, 200)
   const endpoint = endpointFromHtml(await response.text())
   assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
 })
 
-test('synchronous no-open prints the review URL before waiting for feedback', async t => {
+test('synchronous no-open prints the review URL before waiting for feedback, including with an output path', async t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
   const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
   writeFileSync(html, '<html><body>Sync review</body></html>')
-  const child = spawn(process.execPath, [script, html, '--no-open'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, [script, html, '--output', output, '--no-open'], { stdio: ['ignore', 'pipe', 'pipe'] })
   const completion = exited(child)
   t.after(() => terminateProcess(child.pid))
 
@@ -569,6 +571,11 @@ test('geometry handles axis clipping, pin placement, and unsupported transforms'
   for (const transform of ['matrix(1, 0.2, 0, 1, 0, 0)', 'matrix(1, 0, 0.2, 1, 0, 0)', 'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0.2, 1, 0, 0, 0, 0, 1)']) {
     assert.equal(geometry.isAxisAlignedTransform(transform), false, transform)
   }
+})
+
+test('geometry exports Node helpers without publishing an injected-page global', () => {
+  assert.equal(typeof geometry.mapPointToTop, 'function')
+  assert.equal(globalThis.__stewardReviewGeometry, undefined)
 })
 
 test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
