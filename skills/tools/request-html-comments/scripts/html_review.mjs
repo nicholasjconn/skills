@@ -573,7 +573,8 @@ export async function createReviewServer({
 // state lives in the result, draft, and log companions.
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
-const OVERLAY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')
+const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
+const OVERLAY_SCRIPT = `${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}`
 
 function usage() {
   console.log(`Usage: node html_review.mjs <HTML-file-or-loopback-URL> [options]
@@ -739,7 +740,10 @@ async function runReview(args) {
       port: args.port,
     })
     emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
-    if (args.no_open) log('info', 'Skipped default browser launch', { review_url: server.reviewUrl })
+    if (args.no_open) {
+      log('info', 'Skipped default browser launch', { review_url: server.reviewUrl })
+      if (!args.asynchronous && !output) process.stdout.write(`Review URL: ${server.reviewUrl}\n`)
+    }
     else await openBrowser(server.reviewUrl, log)
     if (args.ready_file) writeFileSync(args.ready_file, `${server.reviewUrl}\n`)
     const result = await server.completion

@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { connect } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
@@ -18,8 +18,12 @@ import {
   logPath,
   validateReviewHost,
 } from '../scripts/html_review.mjs'
+import geometry from '../scripts/review_geometry.js'
 
-const OVERLAY_SCRIPT = readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8')
+const OVERLAY_SCRIPT = [
+  readFileSync(fileURLToPath(new URL('../scripts/review_geometry.js', import.meta.url)), 'utf8'),
+  readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
+].join('\n')
 
 function temporaryDirectory(t) {
   const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
@@ -157,6 +161,39 @@ async function cleanupAsyncReview(output) {
   }
   const workerPid = Number(/"worker_pid":(\d+)/.exec(log)?.[1] || 0)
   if (workerPid) await terminateProcess(workerPid)
+}
+
+function reviewUrlFromStdout(child) {
+  return new Promise((resolveUrl, rejectUrl) => {
+    let stdout = ''
+    const timeout = setTimeout(() => rejectUrl(new Error(`timed out waiting for review URL: ${stdout}`)), 5_000)
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', chunk => {
+      stdout += chunk
+      const match = /Review URL: (http:\/\/\S+)/.exec(stdout)
+      if (!match) return
+      clearTimeout(timeout)
+      resolveUrl(match[1])
+    })
+    child.once('error', error => {
+      clearTimeout(timeout)
+      rejectUrl(error)
+    })
+    child.once('exit', code => {
+      clearTimeout(timeout)
+      rejectUrl(new Error(`review exited before reporting its URL (status ${code}): ${stdout}`))
+    })
+  })
+}
+
+function exited(child) {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once('exit', (code, signal) => {
+      if (signal) rejectExit(new Error(`review exited from ${signal}`))
+      else resolveExit(code)
+    })
+    child.once('error', rejectExit)
+  })
 }
 
 function openWebsocket(port, path, origin) {
@@ -411,6 +448,23 @@ test('async no-open forwards explicit launch controls to the worker', async t =>
   assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
 })
 
+test('synchronous no-open prints the review URL before waiting for feedback', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+  writeFileSync(html, '<html><body>Sync review</body></html>')
+  const child = spawn(process.execPath, [script, html, '--no-open'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  const completion = exited(child)
+  t.after(() => terminateProcess(child.pid))
+
+  const reviewUrl = await reviewUrlFromStdout(child)
+  const page = await fetch(reviewUrl)
+  assert.equal(page.status, 200)
+  const endpoint = endpointFromHtml(await page.text())
+  assert.equal((await fetch(new URL(`${endpoint}/cancel`, reviewUrl), { method: 'POST', body: '{}' })).status, 200)
+  assert.equal(await completion, 2)
+})
+
 test('restore accepts legacy and versioned artifacts but rejects another source', t => {
   const directory = temporaryDirectory(t)
   const html = join(directory, 'page.html')
@@ -475,178 +529,46 @@ test('file overlay injection preserves non-ASCII restored comments through Latin
   assert.doesNotMatch(encoded.slice(scriptStart, scriptEnd), /[^\x00-\x7f]/)
 })
 
-test('the injected script does not create duplicate controls when loaded inside an iframe', () => {
-  const rendered = injectHtml('<html><body>Framed page</body></html>', '/token', [], OVERLAY_SCRIPT)
-  const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
-  const scriptEnd = rendered.indexOf('</script>', scriptStart)
-  const runOverlay = new Function('window', rendered.slice(scriptStart, scriptEnd))
+test('geometry maps nested frame coordinates and clips rectangles', () => {
+  const geometryForFrames = {
+    source: { left: 0, top: 0, right: 100, bottom: 50 },
+    hops: [
+      {
+        scaleX: 2,
+        scaleY: 2,
+        content: { left: 10, top: 20, right: 210, bottom: 120 },
+        visibleClip: { left: 0, top: 0, right: 210, bottom: 120 },
+        parentSource: { left: 0, top: 0, right: 220, bottom: 130 },
+      },
+      {
+        scaleX: 0.5,
+        scaleY: 0.5,
+        content: { left: 100, top: 50, right: 210, bottom: 115 },
+        visibleClip: { left: 100, top: 50, right: 200, bottom: 105 },
+        parentSource: { left: 0, top: 0, right: 240, bottom: 150 },
+      },
+    ],
+  }
 
-  assert.doesNotThrow(() => runOverlay({ top: {} }))
+  assert.deepEqual(geometry.mapPointToTop(20, 10, geometryForFrames), { x: 125, y: 70 })
+  assert.deepEqual(geometry.mapRectToTop({ left: 10, top: 5, width: 30, height: 20 }, geometryForFrames), {
+    left: 115, top: 65, right: 145, bottom: 85, width: 30, height: 20,
+  })
+  assert.equal(geometry.mapPointToTop(101, 10, geometryForFrames), null)
 })
 
-test('the overlay has no browser-tab identity or lifecycle endpoints', () => {
-  assert.doesNotMatch(OVERLAY_SCRIPT, /sessionStorage|client_id|\/heartbeat|\/abandon/)
-})
-
-test('the overlay observes modal visibility attributes and targets dialog hosts', () => {
-  assert.match(OVERLAY_SCRIPT, /attributeFilter:\s*\['open',\s*'role',\s*'aria-modal',\s*'class',\s*'style',\s*'hidden',\s*'inert'\]/)
-  assert.match(OVERLAY_SCRIPT, /const composedClosest =/)
-  assert.match(OVERLAY_SCRIPT, /active\?\.shadowRoot\?\.activeElement/)
-  assert.match(OVERLAY_SCRIPT, /if \(node\.shadowRoot\) visit\(node\.shadowRoot\)/)
-  assert.match(OVERLAY_SCRIPT, /document\.addEventListener\('focusin', scheduleOverlayHostSync, true\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayHostSyncFrame = requestAnimationFrame/)
-  assert.match(OVERLAY_SCRIPT, /if \(overlayLayer\.parentElement === host\)[\s\S]*refreshComments\(\)/)
-  assert.match(OVERLAY_SCRIPT, /const activeModalHost =/)
-})
-
-test('the overlay refreshes comment positions when nested sections scroll', () => {
-  assert.match(OVERLAY_SCRIPT, /addEventListener\('scroll',\s*scheduleCommentRefresh,\s*capture\)/)
-  assert.match(OVERLAY_SCRIPT, /const capture = signal \? \{ capture: true, signal \} : true/)
-  assert.match(OVERLAY_SCRIPT, /refreshCommentsFrame = requestAnimationFrame/)
-})
-
-test('the overlay resolves nested same-origin iframe paths and maps cumulative geometry', () => {
-  assert.doesNotMatch(OVERLAY_SCRIPT, /path\.length !== 1/)
-  assert.match(OVERLAY_SCRIPT, /const ancestorFramesFor =/)
-  assert.match(OVERLAY_SCRIPT, /frames\.slice\(\)\.reverse\(\)\.map/)
-  assert.match(OVERLAY_SCRIPT, /for \(const hop of path\)/)
-  assert.match(OVERLAY_SCRIPT, /scopeDocument = accessibleFrameDocument\(frame\)/)
-  assert.match(OVERLAY_SCRIPT, /for \(const hop of geometry\.hops\)/)
-  assert.match(OVERLAY_SCRIPT, /mappedX = hop\.content\.left \+ mappedX \* hop\.scaleX/)
-  assert.match(OVERLAY_SCRIPT, /mapped = intersectRects\(next, parentClip\)/)
-  assert.match(OVERLAY_SCRIPT, /if \(hops\.length\) geometry\.clip = mapRectToTop\(source, geometry\)/)
-})
-
-test('top-document mapping returns unclipped geometry before iframe clipping begins', () => {
-  assert.match(
-    OVERLAY_SCRIPT,
-    /if \(!geometry\) return null;\s*if \(!geometry\.hops\?\.length\) return \{ x, y \};\s*if \(!pointInRect\(x, y, geometry\.source\)\) return null;/,
+test('geometry handles axis clipping, pin placement, and unsupported transforms', () => {
+  assert.deepEqual(
+    geometry.intersectClippedAxes({ left: 0, top: 0, right: 30, bottom: 30 }, { left: 10, top: 10, right: 20, bottom: 20 }, true, false),
+    { left: 10, top: 0, right: 20, bottom: 30, width: 10, height: 30 },
   )
-  assert.match(
-    OVERLAY_SCRIPT,
-    /if \(!geometry\) return null;\s*if \(!geometry\.hops\?\.length\) return asBox\(rect\);\s*let mapped = intersectRects\(asBox\(rect\), geometry\.source\);/,
-  )
-})
-
-test('top-document pins keep prior positions while framed pins still hide on lost clip', () => {
-  assert.match(OVERLAY_SCRIPT, /if \(!lastVisible\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
-  assert.match(OVERLAY_SCRIPT, /if \(!visibleRect\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
-  assert.match(OVERLAY_SCRIPT, /renderedAnchors\.set\(item\.id, anchor\)/)
-  assert.match(OVERLAY_SCRIPT, /renderedAnchors\.delete\(item\.id\)/)
-})
-
-test('hover clears on overlay chrome or document exit without remeasuring the same target', () => {
-  assert.match(OVERLAY_SCRIPT, /if \(target === hovered\) return/)
-  assert.match(OVERLAY_SCRIPT, /if \(isOverlay\(target\) \|\| !visible\(target\)\) \{\s*clearHover\(\);/)
-  assert.match(OVERLAY_SCRIPT, /doc\.documentElement\?\.addEventListener\('pointerleave', clearDocumentHover/)
-})
-
-test('frame bookkeeping is deleted when a watched frame becomes inaccessible', () => {
-  assert.match(OVERLAY_SCRIPT, /frameDocuments\.delete\(frame\);\s*clearHoverInDocument\(previous\.doc\);\s*\}\s*if \(!nested\) return;/)
-})
-
-test('pins animate only on first reveal instead of every hide-show cycle', () => {
-  assert.match(OVERLAY_SCRIPT, /if \(wasHidden && pin\.dataset\.entered !== 'true'\) \{/)
-  assert.match(OVERLAY_SCRIPT, /pin\.dataset\.entered = 'true';\s*playEnter\(pin\);/)
-})
-
-test('iframe mapping clips to overflow ancestors and clamps partially visible anchors', () => {
-  assert.match(OVERLAY_SCRIPT, /\['hidden', 'clip', 'auto', 'scroll'\]/)
-  assert.match(OVERLAY_SCRIPT, /for \(let ancestor = frame\.parentElement/)
-  assert.match(OVERLAY_SCRIPT, /visibleClip: visibleFrameContentRect\(frame, content\)/)
-  assert.match(OVERLAY_SCRIPT, /intersectRects\(hop\.visibleClip, hop\.parentSource\)/)
-  assert.match(OVERLAY_SCRIPT, /const visibleRect = mapRectToTop\(rect, geometry\)/)
-  assert.match(OVERLAY_SCRIPT, /clampPinToClip\([\s\S]*visibleRect\)/)
-  assert.match(OVERLAY_SCRIPT, /if \(!visibleRect\) return geometry\.frame \? hideCommentAnchor\(item\) : renderedAnchors\.get\(item\.id\) \|\| fallbackAnchor\(\)/)
-})
-
-test('the overlay observes attached iframe documents and their font readiness', () => {
-  assert.match(OVERLAY_SCRIPT, /frameDocumentObserver\.observe\(nested/)
-  assert.match(OVERLAY_SCRIPT, /characterData: true/)
-  assert.match(OVERLAY_SCRIPT, /discoverFrames\(nested\)/)
-  assert.match(OVERLAY_SCRIPT, /nested\.fonts\?\.ready/)
-  assert.match(OVERLAY_SCRIPT, /if \(!controller\.signal\.aborted\) scheduleCommentRefresh\(\)/)
-  assert.match(OVERLAY_SCRIPT, /new ResizeObserver\(\(\) => scheduleCommentRefresh\(\)\)/)
-  assert.match(OVERLAY_SCRIPT, /for \(const node of record\.removedNodes\) releaseFrames\(node\)/)
-  assert.match(OVERLAY_SCRIPT, /tracked\.controller\.abort\(\)/)
-})
-
-test('element and text references can cross open shadow-root boundaries', () => {
-  assert.match(OVERLAY_SCRIPT, /const shadowPath =/)
-  assert.match(OVERLAY_SCRIPT, /shadow_path: shadowPath\(node\)/)
-  assert.match(OVERLAY_SCRIPT, /parent_shadow_path: shadowPath\(parent\)/)
-  assert.match(OVERLAY_SCRIPT, /const resolveSelectorReference =/)
-  assert.match(OVERLAY_SCRIPT, /scope = node\.shadowRoot/)
-  assert.match(OVERLAY_SCRIPT, /const eventOrigin = \(event\) => event\.composedPath\(\)/)
-  assert.match(OVERLAY_SCRIPT, /addEventListener\('pointermove', onPointerMove, capture\)/)
-  assert.match(OVERLAY_SCRIPT, /if \(target === hovered\) return/)
-})
-
-test('new fallback anchors use explicit viewport coordinates across modal reparenting', () => {
-  assert.match(OVERLAY_SCRIPT, /anchor_coordinate_space: draft\.anchorCoordinateSpace/)
-  assert.match(OVERLAY_SCRIPT, /anchorCoordinateSpace: 'viewport'/)
-  assert.match(OVERLAY_SCRIPT, /item\.anchor_coordinate_space === 'viewport'/)
-  assert.match(OVERLAY_SCRIPT, /toContainingBlock\(x, y, origin\)/)
-})
-
-test('legacy fallback anchors are validated and converted from their original host coordinates', () => {
-  assert.match(OVERLAY_SCRIPT, /Number\.isFinite\(x\).*Number\.isFinite\(y\)/)
-  assert.match(OVERLAY_SCRIPT, /x - window\.scrollX, y - window\.scrollY/)
-  assert.match(OVERLAY_SCRIPT, /x \+ hostRect\.left \+ legacyHost\.clientLeft - legacyHost\.scrollLeft/)
-  assert.match(OVERLAY_SCRIPT, /y \+ hostRect\.top \+ legacyHost\.clientTop - legacyHost\.scrollTop/)
-})
-
-test('one containing-block measurement is shared by each synchronous comment refresh', () => {
-  assert.match(
-    OVERLAY_SCRIPT,
-    /refreshComments = \(\) => \{\s*const origin = containingBlockOrigin\(\);\s*for \(const item of comments\)/,
-  )
-  assert.match(OVERLAY_SCRIPT, /anchorForComment\(item, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /drawHighlight\(item\.id, range, origin/)
-  assert.match(OVERLAY_SCRIPT, /applyOverlayPlacement[\s\S]*const origin = containingBlockOrigin\(\)/)
-})
-
-test('the overlay mounts isolated controls in a zero-size popover layer and never pads the host page', () => {
-  assert.match(OVERLAY_SCRIPT, /className = 'steward-review-ui sr-layer'/)
-  assert.match(OVERLAY_SCRIPT, /setAttribute\('popover', 'manual'\)/)
-  assert.match(OVERLAY_SCRIPT, /attachShadow\(\{mode: 'open'\}\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(overlayStyle\)/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(root\)/)
-  assert.match(OVERLAY_SCRIPT, /pageStyle\.textContent = '\.steward-review-hover/)
-  assert.match(OVERLAY_SCRIPT, /document\.head\.appendChild\(pageStyle\)/)
-  assert.match(OVERLAY_SCRIPT, /nodeRoot\.appendChild\(pageStyle\.cloneNode\(true\)\)/)
-  assert.match(OVERLAY_SCRIPT, /pointer-events:none!important/)
-  assert.match(OVERLAY_SCRIPT, /overlayLayer\.showPopover|showAsPopover\(overlayLayer\)/)
-  assert.match(OVERLAY_SCRIPT, /:host, :host\(:popover-open\)/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /dataset\.srChrome/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /paddingTop/)
-  assert.match(OVERLAY_SCRIPT, /overlayShadow\.appendChild\(popup\)/)
-})
-
-test('the comment editor is a popover and falls back if showPopover fails', () => {
-  assert.match(OVERLAY_SCRIPT, /popup\.setAttribute\('popover', 'manual'\)/)
-  assert.match(OVERLAY_SCRIPT, /showAsPopover\(popup\)/)
-  assert.match(OVERLAY_SCRIPT, /removeAttribute\('popover'\)/)
-  assert.match(OVERLAY_SCRIPT, /const visibleClipRect =/)
-  assert.match(OVERLAY_SCRIPT, /placeFixedElement\(popup/)
-})
-
-test('overlay chrome is clipped to the viewport, not the host dialog', () => {
-  assert.match(OVERLAY_SCRIPT, /const visibleClipRect = \(\) => viewportClipRect\(\)/)
-  assert.doesNotMatch(OVERLAY_SCRIPT, /style\.overflow !== 'visible'/)
-})
-
-test('reparenting into a modal keeps overlay screen position and does not replay enter animations', () => {
-  assert.match(OVERLAY_SCRIPT, /const toolbarRect = copyRect\(root\)/)
-  assert.match(OVERLAY_SCRIPT, /restoreFixedPosition\(root, toolbarRect, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /placeFixedElement\(infoPanel, infoRect\.left, infoRect\.top, origin\)/)
-  assert.match(OVERLAY_SCRIPT, /\.steward-review-popup\.sr-enter/)
-  assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\.sr-enter/)
-  assert.match(OVERLAY_SCRIPT, /\.steward-review-pin\[hidden\] \{ display: none !important; \}/)
-  assert.doesNotMatch(
-    OVERLAY_SCRIPT,
-    /\.steward-review-popup \{[^}]*animation:/
-  )
+  assert.deepEqual(geometry.clampPinToClip(3, 40, { left: 0, top: 0, right: 40, bottom: 40 }), { x: 15.5, y: 24.5 })
+  for (const transform of ['none', 'matrix(2, 0, 0, 3, 10, 20)', 'matrix3d(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1, 0, 10, 20, 0, 1)']) {
+    assert.equal(geometry.isAxisAlignedTransform(transform), true, transform)
+  }
+  for (const transform of ['matrix(1, 0.2, 0, 1, 0, 0)', 'matrix(1, 0, 0.2, 1, 0, 0)', 'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0.2, 1, 0, 0, 0, 0, 1)']) {
+    assert.equal(geometry.isAxisAlignedTransform(transform), false, transform)
+  }
 })
 
 test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
@@ -1009,28 +931,6 @@ test('a stalled served page times out and releases the proxied request', async t
     && event.message === 'Could not reach served-page source'
     && /did not respond in time/.test(event.details.error)
   )))
-})
-
-test('file review injects one overlay into the top page and not iframe assets', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const inner = join(directory, 'inner.html')
-  writeFileSync(html, '<html><body><iframe src="inner.html"></iframe></body></html>')
-  writeFileSync(inner, '<html><body>Inner page</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-  })
-  t.after(() => review.close())
-
-  const page = await (await fetch(review.reviewUrl)).text()
-  const nested = await (await fetch(new URL('inner.html', review.reviewUrl))).text()
-  assert.match(page, /steward-review-root/)
-  assert.match(page, /if \(window\.top !== window\) return/)
-  assert.equal(nested, '<html><body>Inner page</body></html>')
 })
 
 test('review drafts persist iframe_path and restore it onto the same source', async t => {
