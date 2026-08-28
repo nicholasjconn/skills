@@ -17,10 +17,11 @@ import {
   logPath,
   validateReviewHost,
 } from '../scripts/html_review.mjs'
-import geometry from '../scripts/review_geometry.cjs'
 
+const GEOMETRY_SCRIPT = readFileSync(fileURLToPath(new URL('../scripts/review_geometry.js', import.meta.url)), 'utf8')
+const geometry = new Function(`${GEOMETRY_SCRIPT}\nreturn __stewardReviewGeometry`)()
 const OVERLAY_SCRIPT = [
-  readFileSync(fileURLToPath(new URL('../scripts/review_geometry.cjs', import.meta.url)), 'utf8'),
+  GEOMETRY_SCRIPT,
   readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
 ].join('\n')
 

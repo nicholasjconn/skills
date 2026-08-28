@@ -533,7 +533,7 @@ export async function createReviewServer({
 // state lives in the result, draft, and log companions.
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
-const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.cjs'), 'utf8')
+const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
 // Keep helpers private to this single injected payload while allowing the
 // overlay source to use its geometry binding directly.
 const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n})();`
