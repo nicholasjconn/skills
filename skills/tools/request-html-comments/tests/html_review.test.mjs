@@ -17,10 +17,10 @@ import {
   logPath,
   validateReviewHost,
 } from '../scripts/html_review.mjs'
-import geometry from '../scripts/review_geometry.js'
+import geometry from '../scripts/review_geometry.cjs'
 
 const OVERLAY_SCRIPT = [
-  readFileSync(fileURLToPath(new URL('../scripts/review_geometry.js', import.meta.url)), 'utf8'),
+  readFileSync(fileURLToPath(new URL('../scripts/review_geometry.cjs', import.meta.url)), 'utf8'),
   readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
 ].join('\n')
 
