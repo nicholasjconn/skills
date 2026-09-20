@@ -536,7 +536,7 @@ const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
 const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
 // Keep helpers private to this single injected payload while allowing the
 // overlay source to use its geometry binding directly.
-const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n})();`
+const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_local.js'), 'utf8')}\n})();`
 
 function usage() {
   console.log(`Usage: node html_review.mjs <HTML-file-or-loopback-URL> [options]
