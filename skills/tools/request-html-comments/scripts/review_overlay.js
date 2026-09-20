@@ -1476,6 +1476,10 @@ function createHtmlReview(options) {
     send.title = options.submitLabel;
   }
   if (options.submitIcon) send.querySelector('[aria-hidden]').textContent = options.submitIcon;
+  if (options.submitIconOnly) {
+    send.querySelector('.sr-send-label').hidden = true;
+    send.style.width = '38px'; send.style.padding = '0';
+  }
   const cancel = root.querySelector('.sr-cancel');
   if (options.closeLabel) { cancel.setAttribute('aria-label', options.closeLabel); cancel.title = options.closeLabel; }
   for (const action of options.actions || []) {
