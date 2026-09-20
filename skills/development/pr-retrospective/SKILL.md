@@ -3,9 +3,9 @@ name: pr-retrospective
 description: >-
   Score one or more merged GitHub PRs after review and post a structured
   retrospective JSON comment on each. Use when the user asks to assess PR
-  value, correctness, risk control, code health/debt, verification, and
-  strategy. Do not use for normal code review, CI repair, or shipping an active
-  PR.
+  value, correctness, risk control, reversibility, code health/debt, verification,
+  and strategy. Do not use for normal code review, CI repair, or shipping an
+  active PR.
 ---
 
 # pr-retrospective
@@ -38,9 +38,9 @@ Set `run-id` to `YYYYMMDD-HHMMSS-<short-rand>` and write these files under
 
 ## Contract
 
-- Score keys are exactly `value`, `correctness`, `risk_control`, `code_health`,
-  `verification`, and `strategy`. Each is an integer from 1 to 10; higher is
-  better.
+- Score keys are exactly `value`, `correctness`, `risk_control`, `reversibility`,
+  `code_health`, `verification`, and `strategy`. Each is an integer from 1 to 10;
+  higher is better.
 - Match `Comment format` exactly: the marker and fenced JSON, with no extra
   fields or Markdown in string values. Keep `summary` to one concise sentence.
 - Use the title, body, and linked issues to establish the intended outcome.
@@ -57,11 +57,11 @@ Set `run-id` to `YYYYMMDD-HHMMSS-<short-rand>` and write these files under
 Each PR comment body must be exactly:
 
 ````markdown
-<!-- agent-panel-pr-retrospective:v4 -->
+<!-- agent-panel-pr-retrospective:v5 -->
 ```json
 {
   "type": "pr_retrospective_score",
-  "schema_version": 4,
+  "schema_version": 5,
   "scale": {
     "min": 1,
     "max": 10,
@@ -71,6 +71,7 @@ Each PR comment body must be exactly:
     "value": 3,
     "correctness": 4,
     "risk_control": 2,
+    "reversibility": 7,
     "code_health": 9,
     "verification": 6,
     "strategy": 2
@@ -92,6 +93,8 @@ Gather enough evidence to justify every score:
 - the diff; relevant existing and changed unit/integration tests; the affected
   user-facing integration path, when one exists; CI/check results; and review
   or issue comments, including bot-reported defects
+- rollback mechanisms and compatibility of persisted data, schemas, and public
+  interfaces; external effects that reverting code would not undo
 - current code only when needed to confirm whether a suspected defect remains
 - `ISSUES.md` for known deferred debt
 
@@ -117,6 +120,16 @@ result more closely matches the band's upper end.
   `5-6` is risk-neutral or leaves limited, justified exposure with adequate
   controls; `3-4` leaves meaningful exposure with weak controls; `1-2`
   introduces or conceals serious risk.
+- **reversibility** - ease of safely undoing the deployed change and its effects.
+  `9-10` a simple revert or disable restores prior behavior without data loss or
+  lasting external effects; `7-8` a straightforward rollback with limited,
+  well-understood cleanup or coordination; `5-6` feasible but needs multiple steps,
+  data repair, or coordinated dependency changes; `3-4` costly or uncertain,
+  requiring substantial migration, downtime, or consumer changes; `1-2` no
+  practical safe reversal, irreversible data loss, or lasting external effects.
+  Judge the rollback path supported by the evidence, not just whether Git can
+  revert the patch. Score independently of value and risk control: an important,
+  well-controlled change can still be difficult to undo.
 - **code_health** - maintainability, ownership, duplication, and complexity.
   `9-10` simplifies ownership, removes debt, and strengthens clear sources of
   truth; `7-8` clean and maintainable with minor complexity or debt; `5-6`
@@ -145,8 +158,8 @@ result more closely matches the band's upper end.
    artifact files; resolve targets according to `Scope`.
 2. Before reading a diff, inspect each candidate PR's comments for an
    `agent-panel-pr-retrospective:v1`, `agent-panel-pr-retrospective:v2`,
-   `agent-panel-pr-retrospective:v3`, or `agent-panel-pr-retrospective:v4`
-   marker.
+   `agent-panel-pr-retrospective:v3`, `agent-panel-pr-retrospective:v4`, or
+   `agent-panel-pr-retrospective:v5` marker.
    - If a marker exists, record the PR as skipped unless the user explicitly
      requested a duplicate. Never edit, replace, or delete an existing comment.
    - During backfill, increment the consecutive-marker counter for an eligible
@@ -171,5 +184,5 @@ result more closely matches the band's upper end.
 
 Report the target repo, processed and skipped PRs, skip reasons, artifact paths,
 posted comment URLs, and the backfill stop condition. Include a compact table
-with `PR`, `value`, `correctness`, `risk_control`, `code_health`, `verification`,
-and `strategy`.
+with `PR`, `value`, `correctness`, `risk_control`, `reversibility`, `code_health`,
+`verification`, and `strategy`.
