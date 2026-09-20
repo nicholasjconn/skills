@@ -1433,6 +1433,22 @@ function createHtmlReview(options) {
       syncOverlayHost();
       scheduleCommentRefresh();
     },
+    // The host must durably archive/clear its draft before clearing the UI.
+    clearComments() {
+      setMode('interact');
+      closeInfo();
+      closePopup();
+      if (draftSaveTimer) clearTimeout(draftSaveTimer);
+      draftSaveTimer = null;
+      pendingComments.clear();
+      pendingDeletedIds.clear();
+      for (const pin of pins.values()) pin.remove();
+      pins.clear();
+      for (const id of [...highlights.keys()]) removeHighlight(id);
+      renderedAnchors.clear();
+      comments.splice(0);
+      updateCount();
+    },
     addComment(item) {
       if (!item?.id || !item.comment?.trim()) throw new Error('A comment needs an ID and text');
       if (comments.some(existing => existing.id === item.id)) throw new Error('Comment ID already exists');

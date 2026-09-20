@@ -24,6 +24,7 @@ The returned API provides:
 - `flush()`: persist pending comments, including unfinished text.
 - `suspend()`: flush, hide the tool and pins, and exit selection mode without discarding the editor. Rejects if persistence fails.
 - `resume()`: show the existing tool and editor; does not create a second instance.
+- `clearComments()`: clear the in-memory comments, editor, and pins after the host has archived the review and cleared its stored draft. Flush pending persistence first; this method does not write storage.
 - `addComment(record)`: add a recovered comment with a new unique ID; call `flush()` before reporting recovery as saved.
 
 Suspend/resume is for a single mounted page. Listeners remain installed to support same-origin iframe navigation; do not repeatedly create factories in a single-page app. Local CLI defaults and explicit `--restore-comments` behavior are unchanged. Browser history, provenance, identity, and exported-file schemas belong to the host adapter.
