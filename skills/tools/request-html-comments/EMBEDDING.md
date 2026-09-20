@@ -13,7 +13,7 @@ Optional options:
 
 - `initialComments`: explicitly restored comment records, default empty.
 - `flushOnPageHide(patch)`: synchronous browser storage or a beacon/keepalive transport. Without it, `saveDraft` is used; the browser may not await promises during unload.
-- `submitLabel`, `closeLabel`: toolbar accessible names and labels.
+- `submitLabel`, `closeLabel`: toolbar accessible names and labels. `submitIcon` replaces the decorative submit glyph with plain text.
 - `requireSavedComment`: default true; false allows submitting partially typed comments.
 - `submitRequiresPersistence`: default true. A download-only host can set false so storage failure does not prevent exporting the in-memory comments. The failure remains visible.
 - `actions`: `{ label, run(api) }` toolbar actions. The engine flushes before invoking an action and displays errors.

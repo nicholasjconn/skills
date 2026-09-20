@@ -1475,6 +1475,7 @@ function createHtmlReview(options) {
     send.setAttribute('aria-label', options.submitLabel);
     send.title = options.submitLabel;
   }
+  if (options.submitIcon) send.querySelector('[aria-hidden]').textContent = options.submitIcon;
   const cancel = root.querySelector('.sr-cancel');
   if (options.closeLabel) { cancel.setAttribute('aria-label', options.closeLabel); cancel.title = options.closeLabel; }
   for (const action of options.actions || []) {
