@@ -844,7 +844,7 @@ function createHtmlReview(options) {
     else rememberDeletion(draft.id);
   };
   const saveDraft = () => {
-    
+
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     draftSaveTimer = null;
     if (!pendingComments.size && !pendingDeletedIds.size) return draftSavePromise;
