@@ -27,6 +27,8 @@ Use `--no-open` for automation-only validation and `--port PORT` when the URL mu
 
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback IPv4 address assigned to this machine. The server binds and advertises only that address, never `0.0.0.0`. The review server has no authentication: any LAN peer that reaches that interface can access the entire allowed file tree or, for loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to the local app. Use this mode only with the user's authorization and an appropriately trusted network.
 
+Pages that need a secure context on the LAN (e.g. `Secure` cookies, `crypto.randomUUID`) can be reviewed over HTTPS: pass `--tls-cert PATH --tls-key PATH` (PEM files whose certificate names the review host, e.g. `subjectAltName=IP:<host>`). The reviewer accepts the self-signed certificate once in their browser. Keep the key outside a reviewed file's directory, which the review serves in full.
+
 Each invocation starts with zero comments. Use `--restore-comments` only when the user explicitly asks to recover an interrupted review, never to preload submitted feedback, and always use a new output path:
 
 ```bash

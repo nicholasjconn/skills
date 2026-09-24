@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { connect } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -776,4 +777,104 @@ test('localhost served-page reviews retain the localhost browser hostname', asyn
 
   assert.equal(new URL(review.reviewUrl).hostname, 'localhost')
   assert.equal((await fetch(review.reviewUrl)).status, 200)
+})
+
+function selfSignedCertificate(t, directory) {
+  const key = join(directory, 'key.pem')
+  const cert = join(directory, 'cert.pem')
+  const result = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes',
+    '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1',
+    '-keyout', key, '-out', cert,
+  ])
+  if (result.error?.code === 'ENOENT') {
+    t.skip('openssl is not available to create a test certificate')
+    return null
+  }
+  assert.equal(result.status, 0, String(result.stderr))
+  return { cert: readFileSync(cert), key: readFileSync(key), certPath: cert, keyPath: key }
+}
+
+function httpsText(url, ca, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolveRequest, rejectRequest) => {
+    const request = httpsRequest(url, { method, headers, ca }, response => {
+      let text = ''
+      response.setEncoding('utf8')
+      response.on('data', chunk => { text += chunk })
+      response.on('end', () => resolveRequest({ status: response.statusCode, text }))
+    })
+    request.on('error', rejectRequest)
+    request.end(body)
+  })
+}
+
+test('TLS reviews serve HTTPS and accept only same-origin HTTPS requests', async t => {
+  const tls = selfSignedCertificate(t, temporaryDirectory(t))
+  if (!tls) return
+  const upstream = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end('<html><body>Secure app</body></html>')
+  })
+  const upstreamPort = await listen(upstream)
+  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
+  const review = await createReviewServer({
+    source: parseSource(`http://127.0.0.1:${upstreamPort}/`),
+    draftOutput: null,
+    initialComments: [],
+    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
+    log: () => {},
+    tls,
+  })
+  t.after(() => review.close())
+
+  assert.match(review.reviewUrl, /^https:\/\/127\.0\.0\.1:\d+\/$/)
+  const origin = new URL(review.reviewUrl).origin
+  const page = await httpsText(review.reviewUrl, tls.cert, { headers: { origin, 'sec-fetch-site': 'same-origin' } })
+  assert.equal(page.status, 200)
+  assert.match(page.text, /Secure app.*const endpoint=/s)
+
+  const draft = new URL(`${endpointFromHtml(page.text)}/draft`, review.reviewUrl)
+  const body = JSON.stringify({ comments: [] })
+  const sameOrigin = await httpsText(draft, tls.cert, { method: 'POST', headers: { origin }, body })
+  assert.equal(sameOrigin.status, 200)
+  const plainOrigin = origin.replace('https:', 'http:')
+  const crossProtocol = await httpsText(draft, tls.cert, { method: 'POST', headers: { origin: plainOrigin }, body })
+  assert.equal(crossProtocol.status, 403)
+})
+
+test('CLI requires the TLS certificate and key together', t => {
+  const directory = temporaryDirectory(t)
+  const page = join(directory, 'page.html')
+  writeFileSync(page, '<html></html>')
+  writeFileSync(join(directory, 'cert.pem'), '')
+  assert.throws(() => parseArgs([page, '--tls-cert', join(directory, 'cert.pem')]), /--tls-cert and --tls-key must be given together/)
+  assert.throws(() => parseArgs([page, '--tls-key', join(directory, 'cert.pem')]), /--tls-cert and --tls-key must be given together/)
+  assert.throws(
+    () => parseArgs([page, '--tls-cert', directory, '--tls-key', join(directory, 'cert.pem')]),
+    /--tls-cert must be an existing PEM file/,
+  )
+  assert.throws(
+    () => parseArgs([page, '--tls-cert', join(directory, 'cert.pem'), '--tls-key', join(directory, 'missing.pem')]),
+    /--tls-key must be an existing PEM file/,
+  )
+})
+
+test('async TLS reviews forward the certificate to the worker', async t => {
+  const directory = temporaryDirectory(t)
+  const tls = selfSignedCertificate(t, directory)
+  if (!tls) return
+  const html = join(directory, 'page.html')
+  const output = join(directory, 'feedback.json')
+  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+  writeFileSync(html, '<html><body>Async secure review</body></html>')
+  t.after(() => cleanupAsyncReview(output))
+  const argv = [script, html, '--async', '--output', output, '--no-open', '--tls-cert', tls.certPath, '--tls-key', tls.keyPath]
+  const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
+  assert.equal(launched.status, 0, launched.stderr)
+  const ready = /Review URL: (https:\/\/\S+)/.exec(launched.stdout)?.[1]
+  assert.ok(ready, 'async TLS review should print an https review URL')
+  const page = await httpsText(ready, tls.cert)
+  assert.equal(page.status, 200)
+  const cancel = new URL(`${endpointFromHtml(page.text)}/cancel`, ready)
+  assert.equal((await httpsText(cancel, tls.cert, { method: 'POST', body: '{}' })).status, 200)
 })
