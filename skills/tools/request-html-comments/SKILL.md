@@ -56,3 +56,7 @@ On the next user message:
 - If the review was cancelled, do not recover the draft unless asked.
 
 Address submitted comments after returning them.
+
+## Hosted reuse
+
+For applications embedding the annotation toolbar, see [EMBEDDING.md](EMBEDDING.md). The browser engine is shared; the local server and hosted application supply separate persistence/completion adapters. Keep consumer snapshots pinned to an upstream commit and update them without editing the copied engine independently.

@@ -24,6 +24,7 @@ const geometry = new Function(`${GEOMETRY_SCRIPT}\nreturn __stewardReviewGeometr
 const OVERLAY_SCRIPT = [
   GEOMETRY_SCRIPT,
   readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
+  readFileSync(fileURLToPath(new URL('../scripts/review_local.js', import.meta.url)), 'utf8'),
 ].join('\n')
 
 function temporaryDirectory(t) {
@@ -236,8 +237,11 @@ test('trusted-LAN server binds and advertises only the selected local interface'
   assert.equal(await rawHttpStatus(
     Number(new URL(review.reviewUrl).port), host, `127.0.0.1:${new URL(review.reviewUrl).port}`,
   ), 403)
-  const crossOrigin = await fetch(review.reviewUrl, { headers: { origin: 'http://example.test' } })
-  assert.equal(crossOrigin.status, 403)
+  // Explicit fetch metadata avoids depending on the Node fetch version's defaults.
+  assert.equal(await rawHttpStatus(
+    Number(new URL(review.reviewUrl).port), host, new URL(review.reviewUrl).host,
+    { path: new URL(review.reviewUrl).pathname, headers: { Origin: 'http://example.test', 'Sec-Fetch-Mode': 'cors' } },
+  ), 403)
 })
 
 
@@ -256,12 +260,12 @@ test('invalid startup input leaves an actionable worker log', t => {
 })
 
 test('async no-open forwards explicit launch controls to the worker', async t => {
-  const directory = temporaryDirectory(t)
+  const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
   const html = join(directory, 'page.html')
   const output = join(directory, 'feedback.json')
   const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
   writeFileSync(html, '<html><body>Async review</body></html>')
-  t.after(() => cleanupAsyncReview(output))
+  t.after(async () => { await cleanupAsyncReview(output); rmSync(directory, { recursive: true, force: true }) })
   const reservation = createServer()
   const port = await listen(reservation)
   await new Promise(resolveClose => reservation.close(resolveClose))
@@ -901,3 +905,26 @@ test('CLI rejects TLS keys in the served tree, including symlinked paths', t => 
   writeFileSync(safeKey, 'private test key')
   assert.equal(parseArgs(args(safeKey)).tls_key, safeKey)
 })
+test('local adapter persists patches and reports HTTP failures before completion', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const calls = [];
+  let options;
+  const context = {
+    window: {}, Blob,
+    createHtmlReview: value => { options = value; },
+    fetch: async (url, init) => { calls.push({ url, init }); return { ok: true }; },
+    navigator: { sendBeacon: () => false },
+    document: { documentElement: { innerHTML: '' } },
+  };
+  context.window.top = context.window;
+  const source = readFileSync(fileURLToPath(new URL('../scripts/review_local.js', import.meta.url)), 'utf8')
+    .replace('__ENDPOINT__', JSON.stringify('/review-test')).replace('__INITIAL_COMMENTS__', '[]');
+  runInNewContext(source, context);
+  await options.saveDraft({ comments: [{ id: 'a', comment: 'Feedback' }], deleted_ids: [] });
+  assert.equal(calls[0].url, '/review-test/draft');
+  assert.equal(JSON.parse(calls[0].init.body).comments[0].comment, 'Feedback');
+  await options.onFinish('submit');
+  assert.match(context.document.documentElement.innerHTML, /Review submitted/);
+  context.fetch = async () => ({ ok: false, text: async () => 'Disk full' });
+  await assert.rejects(options.saveDraft({ comments: [], deleted_ids: [] }), /Disk full/);
+});
