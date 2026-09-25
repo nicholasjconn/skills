@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
 import { connect as netConnect, isIP } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
@@ -59,8 +60,8 @@ function upstreamHostname(hostname) {
   return hostname === '[::1]' ? '::1' : hostname
 }
 
-function httpAuthority(hostname, port) {
-  return Number(port) === 80 ? hostname : `${hostname}:${port}`
+function httpAuthority(hostname, port, protocol) {
+  return Number(port) === (protocol === 'https' ? 443 : 80) ? hostname : `${hostname}:${port}`
 }
 
 export function validateReviewHost(host, interfaces = networkInterfaces()) {
@@ -188,13 +189,13 @@ function requestHostAllowed(request, allowedAuthority) {
   return String(request.headers.host || '').toLowerCase() === allowedAuthority.toLowerCase()
 }
 
-function sameOriginRequest(request) {
+function sameOriginRequest(request, protocol) {
   const site = String(request.headers['sec-fetch-site'] || '').toLowerCase()
   if (site && site !== 'same-origin' && site !== 'none') return false
   const origin = request.headers.origin
   if (!origin || Array.isArray(origin)) return !origin
   try {
-    return new URL(origin).origin === new URL(`http://${request.headers.host}`).origin
+    return new URL(origin).origin === new URL(`${protocol}://${request.headers.host}`).origin
   } catch {
     return false
   }
@@ -349,11 +350,15 @@ export async function createReviewServer({
   log,
   host = null,
   port = 0,
+  // { cert, key } (PEM contents): serve the review over HTTPS, so the reviewed
+  // page gets a secure context on a LAN address (Secure cookies, crypto APIs).
+  tls = null,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
   upstreamTimeoutMs = UPSTREAM_RESPONSE_TIMEOUT_MS,
 }) {
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const trustedLanHost = host === null ? null : validateReviewHost(host)
+  const protocol = tls ? 'https' : 'http'
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
   // Present the document at its original pathname so the browser resolves
@@ -407,7 +412,7 @@ export async function createReviewServer({
       sendText(response, 403, 'Review host not allowed')
       return
     }
-    if (!sameOriginRequest(request) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
+    if (!sameOriginRequest(request, protocol) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
       sendText(response, 403, 'Same-origin access only')
       return
     }
@@ -461,21 +466,22 @@ export async function createReviewServer({
     proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs)
   }
 
-  const server = createServer((request, response) => {
+  const onRequest = (request, response) => {
     handleRequest(request, response).catch(error => {
       const requestError = error instanceof Error ? error : new Error(String(error))
       log('error', 'Review request failed', { url: request.url, error: requestError.message })
       if (!response.headersSent && !response.writableEnded) sendText(response, 500, 'Review request failed')
       else if (!response.destroyed) response.destroy(requestError)
     })
-  })
+  }
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key }, onRequest) : createServer(onRequest)
 
   server.on('connection', socket => {
     serverConnections.add(socket)
     socket.once('close', () => serverConnections.delete(socket))
   })
   server.on('upgrade', (request, socket, head) => {
-    if (!requestHostAllowed(request, allowedAuthority) || !sameOriginRequest(request)) {
+    if (!requestHostAllowed(request, allowedAuthority) || !sameOriginRequest(request, protocol)) {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
       return
     }
@@ -497,8 +503,8 @@ export async function createReviewServer({
   })
   const address = server.address()
   const reviewHostname = trustedLanHost || (source.type === 'url' ? source.url.hostname : '127.0.0.1')
-  allowedAuthority = httpAuthority(reviewHostname, address.port)
-  const reviewUrl = `http://${allowedAuthority}${reviewPath}${reviewSearch}`
+  allowedAuthority = httpAuthority(reviewHostname, address.port, protocol)
+  const reviewUrl = `${protocol}://${allowedAuthority}${reviewPath}${reviewSearch}`
   log('info', 'Review server ready', { review_url: reviewUrl, bind_host: reviewHostname, port: address.port })
   safetyTimer = setTimeout(() => {
     if (settled) return
@@ -550,6 +556,8 @@ Options:
   --no-open                 Start the server without opening a browser
   --port PORT               Bind the review server to a specific port
   --host IPV4               Bind and advertise one active non-loopback local IPv4 address
+  --tls-cert PATH           Serve the review over HTTPS with this PEM certificate
+  --tls-key PATH            PEM private key for --tls-cert (both or neither)
   --help                    Show this help
 
 The source may be an existing .html/.htm file or an http:// URL on localhost,
@@ -579,7 +587,7 @@ function parseArgs(argv) {
       const value = argv[++index]
       if (!value) throw new Error('--host requires a value')
       args.host = validateReviewHost(value)
-    } else if (argument === '--output' || argument === '--restore-comments' || argument === '--ready-file') {
+    } else if (['--output', '--restore-comments', '--ready-file', '--tls-cert', '--tls-key'].includes(argument)) {
       const value = argv[++index]
       if (!value) throw new Error(`${argument} requires a value`)
       args[argument.slice(2).replaceAll('-', '_')] = resolve(value)
@@ -591,6 +599,16 @@ function parseArgs(argv) {
   if (args.asynchronous && !args.output) throw new Error('--async requires --output')
   if (args.output && existsSync(args.output)) throw new Error('--output must not already exist')
   if (args.restore_comments && !existsSync(args.restore_comments)) throw new Error('--restore-comments must be an existing review JSON file')
+  if (Boolean(args.tls_cert) !== Boolean(args.tls_key)) throw new Error('--tls-cert and --tls-key must be given together')
+  if (args.tls_cert && !(existsSync(args.tls_cert) && statSync(args.tls_cert).isFile())) throw new Error('--tls-cert must be an existing PEM file')
+  if (args.tls_key && !(existsSync(args.tls_key) && statSync(args.tls_key).isFile())) throw new Error('--tls-key must be an existing PEM file')
+  if (args.tls_key && args.source.type === 'file') {
+    const root = realpathSync(dirname(args.source.path))
+    const key = realpathSync(args.tls_key)
+    if (key === root || key.startsWith(`${root}${sep}`)) {
+      throw new Error('--tls-key must be outside the reviewed file directory tree')
+    }
+  }
   if (args.asynchronous && args.output && !args.worker) {
     const companions = [draftPath(args.output), logPath(args.output)].filter(existsSync)
     if (companions.length) throw new Error(`review companion paths must not already exist: ${companions.join(', ')}`)
@@ -700,6 +718,7 @@ async function runReview(args) {
       log,
       host: args.host,
       port: args.port,
+      tls: args.tls_cert ? { cert: readFileSync(args.tls_cert), key: readFileSync(args.tls_key) } : null,
     })
     emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
     if (args.no_open) {
@@ -745,6 +764,7 @@ async function launchAsync(args) {
   if (args.no_open) childArgs.push('--no-open')
   if (args.port) childArgs.push('--port', String(args.port))
   if (args.host) childArgs.push('--host', args.host)
+  if (args.tls_cert) childArgs.push('--tls-cert', args.tls_cert, '--tls-key', args.tls_key)
   const descriptor = openSync(logOutput, 'a')
   const child = spawn(process.execPath, childArgs, {
     detached: true,
