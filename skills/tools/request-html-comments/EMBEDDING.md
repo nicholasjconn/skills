@@ -7,7 +7,7 @@ The local CLI composes the same engine with `review_local.js`, which owns HTTP r
 Required options:
 
 - `saveDraft({ comments, deleted_ids })`: persist an idempotent patch. Throw or reject on failure. Comment records contain text/element targets, timestamps, IDs, and iframe/shadow paths; preserve them intact.
-- `onFinish(action, api)`: handle `submit` or `cancel`. The engine flushes pending changes first. The host decides whether to download, navigate, or hide the tool.
+- `onFinish(action, api)`: handle `submit` or `cancel`. The engine locks review interaction and flushes pending changes first. The host decides whether to download, navigate, or hide the tool. Successful completion runs once; failures unlock the UI for retry. Call `resume()` after completion to explicitly start another review cycle.
 
 Optional options:
 
@@ -23,7 +23,7 @@ The returned API provides:
 - `getComments()`: a detached snapshot, including nonempty text in the current editor.
 - `flush()`: persist pending comments, including unfinished text.
 - `suspend()`: flush, hide the tool and pins, and exit selection mode without discarding the editor. Rejects if persistence fails.
-- `resume()`: show the existing tool and editor; does not create a second instance.
+- `resume()`: show the existing tool and editor and allow another completion; does not create a second instance. Call after `onFinish` has returned, not while completion is in progress.
 - `clearComments()`: clear the in-memory comments, editor, and pins after the host has archived the review and cleared its stored draft. Flush pending persistence first; this method does not write storage.
 - `addComment(record)`: add a recovered comment with a new unique ID; call `flush()` before reporting recovery as saved.
 

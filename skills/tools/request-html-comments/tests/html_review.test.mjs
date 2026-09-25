@@ -236,8 +236,11 @@ test('trusted-LAN server binds and advertises only the selected local interface'
   assert.equal(await rawHttpStatus(
     Number(new URL(review.reviewUrl).port), host, `127.0.0.1:${new URL(review.reviewUrl).port}`,
   ), 403)
-  const crossOrigin = await fetch(review.reviewUrl, { headers: { origin: 'http://example.test' } })
-  assert.equal(crossOrigin.status, 403)
+  // Explicit fetch metadata avoids depending on the Node fetch version's defaults.
+  assert.equal(await rawHttpStatus(
+    Number(new URL(review.reviewUrl).port), host, new URL(review.reviewUrl).host,
+    { path: new URL(review.reviewUrl).pathname, headers: { Origin: 'http://example.test', 'Sec-Fetch-Mode': 'cors' } },
+  ), 403)
 })
 
 

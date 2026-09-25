@@ -90,6 +90,8 @@ function createHtmlReview(options) {
   // Bootstrap one isolated overlay with host-provided persistence callbacks.
   if (!options || typeof options.saveDraft !== "function" || typeof options.onFinish !== "function") throw new Error("HTML Review needs saveDraft and onFinish adapters");
   let active = true;
+  let finishing = false;
+  let completed = false;
   // This is the only review rule that intentionally targets page content.
   // Keep it in the document; all review chrome styles live in the shadow root.
   // Document styles cannot cross a shadow boundary, so the rule is copied into
@@ -1428,6 +1430,9 @@ function createHtmlReview(options) {
       overlayLayer.style.setProperty('display', 'none', 'important');
     },
     resume() {
+      if (finishing) throw new Error('Review completion is in progress');
+      completed = false;
+      overlayLayer.inert = false;
       active = true;
       overlayLayer.style.setProperty('display', 'block', 'important');
       syncOverlayHost();
@@ -1450,6 +1455,7 @@ function createHtmlReview(options) {
       updateCount();
     },
     addComment(item) {
+      if (finishing || completed) throw new Error('Resume the review before adding comments');
       if (!item?.id || !item.comment?.trim()) throw new Error('A comment needs an ID and text');
       if (comments.some(existing => existing.id === item.id)) throw new Error('Comment ID already exists');
       const copy = structuredClone(item);
@@ -1461,11 +1467,16 @@ function createHtmlReview(options) {
     },
   };
   const finish = async (action) => {
+    if (finishing || completed) return;
     if (options.requireSavedComment !== false && action === 'submit' && popup) {
       popup.querySelector('.sr-error').textContent = 'Save or close this comment before sending.';
       popup.querySelector('textarea').focus();
       return;
     }
+    finishing = true;
+    setMode('interact');
+    closeInfo();
+    overlayLayer.inert = true;
     try {
       try { await flush(); }
       catch (error) {
@@ -1473,9 +1484,15 @@ function createHtmlReview(options) {
         status.textContent = `Draft was not saved: ${error.message}`;
       }
       await options.onFinish(action, api);
+      completed = true;
     } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
+    finally {
+      finishing = false;
+      overlayLayer.inert = completed;
+    }
   };
   window.addEventListener('pagehide', () => {
+    if (completed) return;
     if (draftSaveTimer) clearTimeout(draftSaveTimer);
     rememberOpenDraft();
     if (!pendingComments.size && !pendingDeletedIds.size) return;
