@@ -602,6 +602,13 @@ function parseArgs(argv) {
   if (Boolean(args.tls_cert) !== Boolean(args.tls_key)) throw new Error('--tls-cert and --tls-key must be given together')
   if (args.tls_cert && !(existsSync(args.tls_cert) && statSync(args.tls_cert).isFile())) throw new Error('--tls-cert must be an existing PEM file')
   if (args.tls_key && !(existsSync(args.tls_key) && statSync(args.tls_key).isFile())) throw new Error('--tls-key must be an existing PEM file')
+  if (args.tls_key && args.source.type === 'file') {
+    const root = realpathSync(dirname(args.source.path))
+    const key = realpathSync(args.tls_key)
+    if (key === root || key.startsWith(`${root}${sep}`)) {
+      throw new Error('--tls-key must be outside the reviewed file directory tree')
+    }
+  }
   if (args.asynchronous && args.output && !args.worker) {
     const companions = [draftPath(args.output), logPath(args.output)].filter(existsSync)
     if (companions.length) throw new Error(`review companion paths must not already exist: ${companions.join(', ')}`)

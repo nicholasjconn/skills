@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { connect } from 'node:net'
@@ -861,7 +861,7 @@ test('CLI requires the TLS certificate and key together', t => {
 
 test('async TLS reviews forward the certificate to the worker', async t => {
   const directory = temporaryDirectory(t)
-  const tls = selfSignedCertificate(t, directory)
+  const tls = selfSignedCertificate(t, temporaryDirectory(t))
   if (!tls) return
   const html = join(directory, 'page.html')
   const output = join(directory, 'feedback.json')
@@ -877,4 +877,27 @@ test('async TLS reviews forward the certificate to the worker', async t => {
   assert.equal(page.status, 200)
   const cancel = new URL(`${endpointFromHtml(page.text)}/cancel`, ready)
   assert.equal((await httpsText(cancel, tls.cert, { method: 'POST', body: '{}' })).status, 200)
+})
+
+test('CLI rejects TLS keys in the served tree, including symlinked paths', t => {
+  const directory = temporaryDirectory(t)
+  const served = join(directory, 'served')
+  mkdirSync(served)
+  const page = join(served, 'page.html')
+  const key = join(served, 'key.pem')
+  const cert = join(directory, 'cert.pem')
+  writeFileSync(page, '<html></html>')
+  writeFileSync(key, 'private test key')
+  writeFileSync(cert, 'test certificate')
+  const args = keyPath => [page, '--tls-cert', cert, '--tls-key', keyPath]
+  assert.throws(() => parseArgs(args(key)), /outside the reviewed file directory tree/)
+  const keyLink = join(directory, 'key-link.pem')
+  symlinkSync(key, keyLink)
+  assert.throws(() => parseArgs(args(keyLink)), /outside the reviewed file directory tree/)
+  const servedLink = join(directory, 'served-link')
+  symlinkSync(served, servedLink)
+  assert.throws(() => parseArgs([join(servedLink, 'page.html'), '--tls-cert', cert, '--tls-key', key]), /outside the reviewed file directory tree/)
+  const safeKey = join(directory, 'safe-key.pem')
+  writeFileSync(safeKey, 'private test key')
+  assert.equal(parseArgs(args(safeKey)).tls_key, safeKey)
 })
