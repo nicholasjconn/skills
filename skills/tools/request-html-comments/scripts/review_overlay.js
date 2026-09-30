@@ -92,13 +92,13 @@ function createHtmlReview(options) {
   let active = true;
   let finishing = false;
   let completed = false;
-  // This is the only review rule that intentionally targets page content.
+  // Page targeting styles stay separate from the isolated review controls.
   // Keep it in the document; all review chrome styles live in the shadow root.
   // Document styles cannot cross a shadow boundary, so the rule is copied into
-  // an open shadow root on demand when one of its elements is hovered.
+  // an open shadow root on demand for elements being annotated.
   const pageStyle = document.createElement('style');
   pageStyle.id = 'steward-review-page-style';
-  pageStyle.textContent = '.steward-review-hover { outline: 3px solid #3b82f6 !important; outline-offset: 2px !important; cursor: crosshair !important; }';
+  pageStyle.textContent = '.steward-review-hover { outline: 3px solid #3b82f6 !important; outline-offset: 2px !important; cursor: crosshair !important; } .steward-review-text-selectable text { user-select: text !important; -webkit-user-select: text !important; }';
   document.head.appendChild(pageStyle);
   const overlayLayer = document.createElement('div');
   overlayLayer.className = 'steward-review-ui sr-layer';
@@ -634,6 +634,8 @@ function createHtmlReview(options) {
       }
     }
   };
+  const selectableSvgRoots = new Set();
+  let textSelectionClickDocument = null;
   const setMode = (nextMode) => {
     mode = nextMode;
     addButton.setAttribute('aria-pressed', String(mode === 'element'));
@@ -642,7 +644,11 @@ function createHtmlReview(options) {
     else if (mode === 'text') status.textContent = 'Select text to comment - Esc to exit';
     else status.textContent = '';
     if (mode !== 'element') clearHover();
-    if (mode !== 'text') clearSelections();
+    if (mode !== 'text') {
+      clearSelections();
+      for (const svg of selectableSvgRoots) svg.classList.remove('steward-review-text-selectable');
+      selectableSvgRoots.clear();
+    }
   };
 
   const closeInfo = () => {
@@ -1103,6 +1109,20 @@ function createHtmlReview(options) {
     rootNode.appendChild(style);
   };
   const onPointerDown = (event) => {
+    // A later gesture must retain normal page interaction even if the prior
+    // text-selection gesture did not produce a click.
+    textSelectionClickDocument = null;
+    const target = eventOrigin(event);
+    if (mode === 'text' && !isOverlay(target)) {
+      const svg = target.closest?.('svg');
+      if (svg) {
+        // Linked SVG text is not natively selectable in all browsers. Enable
+        // selection before mousedown, including inside open shadow roots.
+        ensureHoverStyle(svg);
+        svg.classList.add('steward-review-text-selectable');
+        selectableSvgRoots.add(svg);
+      }
+    }
     if (infoPanel && !infoPanel.contains(event.target) && !infoButton.contains(event.target)) closeInfo();
   };
   const onPointerMove = (event) => {
@@ -1121,7 +1141,8 @@ function createHtmlReview(options) {
   const onClick = (event) => {
     const target = eventOrigin(event);
     if (isOverlay(target)) return;
-    if (mode === 'text') {
+    if (mode === 'text' || (event.detail > 0 && textSelectionClickDocument === ownerDocumentOf(target))) {
+      textSelectionClickDocument = null;
       event.preventDefault();
       event.stopImmediatePropagation();
       return;
@@ -1176,6 +1197,9 @@ function createHtmlReview(options) {
       return;
     }
     const topPoint = toTopClientPoint(event.clientX, event.clientY, target, geometry) || anchor;
+    // The pointerup handler opens the editor and leaves text mode before the
+    // same gesture's click. Consume that click so links cannot navigate.
+    textSelectionClickDocument = ownerDocumentOf(target);
     setMode('interact');
     openPopup(null, topPoint.x, topPoint.y, {
       targetType: 'text',
