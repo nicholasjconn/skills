@@ -25,6 +25,39 @@ node "$SCRIPT" http://localhost:3000/page --async \
 
 Use `--no-open` for automation-only validation and `--port PORT` when the URL must retain a specific available port. Bind failures are fatal rather than silently selecting another port.
 
+### Private HTTPS with Tailscale
+
+For review from another tailnet device or a trusted HTTPS context, prefer
+Tailscale Serve when installed, connected, and HTTPS is enabled for the tailnet.
+On Linux, this mode requires normal kernel networking; userspace-only Tailscale
+networking does not provide the local listener needed for HTTPS verification.
+Add `--tailscale` to the normal launch on Linux or macOS:
+
+```bash
+node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
+  --output /absolute/path/to/result.json
+```
+
+The listener stays on loopback. The runtime allocates an unused HTTPS port,
+holds a foreground Serve session for this review, and verifies the returned
+HTTPS URL before reporting readiness. `--tailscale-port PORT` requests a
+specific unused external port; `--port` controls the separate local listener.
+Existing Serve routes remain in place. Do not use Funnel, reset Serve, replace
+an existing route, or combine this mode with `--host` or direct TLS flags.
+
+Give the user the returned URL. Their other device must be connected to the
+tailnet and permitted by its access rules. Tailnet peers with access can read
+the allowed file tree or use the proxied application's routes and WebSockets.
+The DNS hostname appears in public certificate logs; the content stays private.
+
+If Tailscale is unavailable, report that the normal loopback URL works only on
+this computer. Once `--tailscale` is selected, startup failures are fatal; do
+not silently switch to a local URL. Missing login, HTTPS enablement, or device
+enrollment is a setup prerequisite, not permission to perform that setup.
+
+Submit, cancel, timeout, or worker termination releases this review's Serve
+session. Existing logs, drafts, and submitted feedback remain available.
+
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback IPv4 address assigned to this machine. The server binds and advertises only that address, never `0.0.0.0`. The review server has no authentication: any LAN peer that reaches that interface can access the entire allowed file tree or, for loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to the local app. Use this mode only with the user's authorization and an appropriately trusted network.
 
 Pages that need a secure context on the LAN (e.g. `Secure` cookies, `crypto.randomUUID`) can be reviewed over HTTPS: pass `--tls-cert PATH --tls-key PATH` (PEM files whose certificate names the review host, e.g. `subjectAltName=IP:<host>`). Use a certificate trusted by the reviewing device for reliable secure-context behavior. Keep the key outside a reviewed file's directory, which the review serves in full; the CLI rejects keys inside that tree, including symlinked paths.
@@ -56,6 +89,13 @@ On the next user message:
 - If the review was cancelled, do not recover the draft unless asked.
 
 Address submitted comments after returning them.
+
+## Definition of done
+
+- The advertised review URL loads the intended document with its overlay.
+- In Tailscale mode, HTTPS verification succeeds and the listener is loopback.
+- Submitted feedback preserves comment targets and iframe paths in the output.
+- Review completion stops its own forwarding session and preserves other routes.
 
 ## Hosted reuse
 
