@@ -14,6 +14,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -186,7 +187,6 @@ function readRequestBody(request) {
 }
 
 function requestHostAllowed(request, allowedAuthority) {
-  if (request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'host').length !== 1) return false
   return String(request.headers.host || '').toLowerCase() === allowedAuthority.toLowerCase()
 }
 
@@ -194,7 +194,6 @@ function sameOriginRequest(request, expectedOrigin) {
   const site = String(request.headers['sec-fetch-site'] || '').toLowerCase()
   if (site && site !== 'same-origin' && site !== 'none') return false
   const origin = request.headers.origin
-  if (request.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'origin').length > 1) return false
   if (!origin || Array.isArray(origin)) return !origin
   try {
     const parsed = new URL(origin)
@@ -429,6 +428,10 @@ export async function createReviewServer({
       sendText(response, 403, 'Same-origin access only')
       return
     }
+    if (request.method === 'GET' && requested.pathname === `${endpoint}/ready`) {
+      sendText(response, 200, endpoint)
+      return
+    }
     const action = requested.pathname.slice(endpoint.length + 1)
     if (request.method === 'POST' && requested.pathname.startsWith(`${endpoint}/`) && ['draft', 'submit', 'cancel'].includes(action)) {
       let payload = {}
@@ -531,7 +534,6 @@ export async function createReviewServer({
     reviewUrl,
     localPort: address.port,
     endpoint,
-    cancel: () => finish('cancel'),
     completion,
     async close() {
       if (closing) return closing
@@ -552,8 +554,8 @@ export async function createReviewServer({
   }
 }
 
-// Async readiness files remain available for startup diagnostics alongside
-// result, draft, and log companions. Each launch uses a new random filename.
+// Async mode uses a short-lived ready file only as a launch handshake; durable
+// state lives in the result, draft, and log companions.
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
 const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
@@ -718,7 +720,7 @@ function recordStartupFailure(argv, error) {
     } else if (!worker) {
       return
     }
-    createLogger(logOutput)('error', 'Review could not start', { error: error.message, stack: error.stack })
+    createLogger(logOutput)('error', 'Review failed', { error: error.message, stack: error.stack })
   } catch {
     // The original validation error remains authoritative when logging itself fails.
   }
@@ -732,8 +734,6 @@ async function runReview(args) {
   const log = createLogger(logOutput)
   let server
   let serve
-  const controller = new AbortController()
-  const interrupted = () => { controller.abort(); server?.cancel() }
   try {
     const initialComments = loadRestoredComments(args.restore_comments, args.source)
     if (initialComments.length) log('info', 'Restored comments', { path: args.restore_comments, comments: initialComments.length })
@@ -749,12 +749,10 @@ async function runReview(args) {
       tls: args.tls_cert ? { cert: readFileSync(args.tls_cert), key: readFileSync(args.tls_key) } : null,
       publicOrigin: sharing?.origin || null,
     })
-    process.once('SIGINT', interrupted)
-    process.once('SIGTERM', interrupted)
     if (sharing) {
       serve = await startTailscaleServe({
-        port: sharing.port, localPort: server.localPort, reviewUrl: server.reviewUrl,
-        endpoint: server.endpoint, signal: controller.signal, log,
+        port: sharing.port, address: sharing.address, localPort: server.localPort, reviewUrl: server.reviewUrl,
+        endpoint: server.endpoint, log,
       })
     }
     emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
@@ -788,9 +786,8 @@ async function runReview(args) {
     process.stderr.write(`${error.message}\n`)
     return 1
   } finally {
-    process.off('SIGINT', interrupted)
-    process.off('SIGTERM', interrupted)
     try { if (serve) await serve.close() }
+    catch (error) { log('error', 'Review cleanup failed', { error: error.message }); throw error }
     finally { if (server) await server.close() }
   }
 }
@@ -823,6 +820,7 @@ async function launchAsync(args) {
   while (Date.now() < deadline) {
     if (existsSync(readyFile)) {
       const readyUrl = readFileSync(readyFile, 'utf8').trim()
+      rmSync(readyFile)
       emitTrustedLanWarning(log, args, readyUrl, { fileLog: false })
       log('info', args.no_open ? 'Review server started successfully' : 'Review opened successfully', { worker_pid: child.pid })
       if (args.no_open) console.log(`Review URL: ${readyUrl}`)
@@ -856,7 +854,7 @@ async function main() {
   try {
     const args = parseArgs(process.argv.slice(2))
     if (!args) return 0
-    return args.asynchronous && !args.worker ? launchAsync(args) : runReview(args)
+    return await (args.asynchronous && !args.worker ? launchAsync(args) : runReview(args))
   } catch (error) {
     recordStartupFailure(process.argv.slice(2), error)
     console.error(error.message)

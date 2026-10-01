@@ -27,9 +27,11 @@ Use `--no-open` for automation-only validation and `--port PORT` when the URL mu
 
 ### Private HTTPS with Tailscale
 
-Prefer Tailscale Serve when it is installed, connected, and HTTPS certificates
-are enabled for the tailnet. Check `tailscale status --json` and live CLI help;
-then add `--tailscale` to the normal launch on Linux or macOS:
+For review from another tailnet device or a trusted HTTPS context, prefer
+Tailscale Serve when installed, connected, and HTTPS is enabled for the tailnet.
+On Linux, this mode requires normal kernel networking; userspace-only Tailscale
+networking does not provide the local listener needed for HTTPS verification.
+Add `--tailscale` to the normal launch on Linux or macOS:
 
 ```bash
 node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
@@ -54,8 +56,7 @@ not silently switch to a local URL. Missing login, HTTPS enablement, or device
 enrollment is a setup prerequisite, not permission to perform that setup.
 
 Submit, cancel, timeout, or worker termination releases this review's Serve
-session. Logs, drafts, submissions, and startup readiness files are retained;
-do not delete artifacts without the user's approval.
+session. Existing logs, drafts, and submitted feedback remain available.
 
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback IPv4 address assigned to this machine. The server binds and advertises only that address, never `0.0.0.0`. The review server has no authentication: any LAN peer that reaches that interface can access the entire allowed file tree or, for loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to the local app. Use this mode only with the user's authorization and an appropriately trusted network.
 

@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process'
 import { request } from 'node:https'
+import { isIP } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -19,42 +20,42 @@ async function configuration(...args) {
 }
 
 function occupiedPorts(config, result = new Set()) {
-  for (const port of Object.keys(config.TCP || {})) result.add(Number(port))
-  for (const session of Object.values(config.Foreground || {})) occupiedPorts(session, result)
+  for (const port of Object.keys(config?.TCP || {})) result.add(Number(port))
+  for (const session of Object.values(config?.Foreground || {})) occupiedPorts(session, result)
   return result
 }
 
 export async function prepareTailscaleServe(requestedPort = null) {
+  if (!['linux', 'darwin'].includes(process.platform)) throw new Error('--tailscale supports Linux and macOS')
   const status = await configuration('status', '--json')
   if (status.BackendState !== 'Running') throw new Error('Tailscale must be connected before starting a private review')
   const name = String(status.Self?.DNSName || '').replace(/\.$/, '').toLowerCase()
-  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$/.test(name)) throw new Error('Tailscale did not report a valid device DNS name')
-  if (!status.CertDomains?.some(domain => domain.toLowerCase() === name)) {
-    throw new Error('Enable HTTPS certificates for this tailnet before using --tailscale')
+  if (!name || !status.CertDomains?.some(domain => domain.toLowerCase() === name)) {
+    throw new Error('Enable MagicDNS and HTTPS certificates for this tailnet before using --tailscale')
   }
+  const address = status.Self?.TailscaleIPs?.find(value => isIP(value))
+  if (!address) throw new Error('Tailscale did not report a device IP address')
   const ports = occupiedPorts(await configuration('serve', 'status', '--json'))
   const port = requestedPort ?? Array.from({ length: 32 }, (_, index) => 8443 + index).find(value => !ports.has(value))
   if (!port || ports.has(port)) throw new Error(`Tailscale HTTPS port ${port || 'allocation'} is occupied; choose another --tailscale-port`)
-  return { port, origin: `https://${name}${port === 443 ? '' : `:${port}`}` }
+  return { port, address, origin: `https://${name}${port === 443 ? '' : `:${port}`}` }
 }
 
-function readReview(url, endpoint) {
+function readReady(url, endpoint, address) {
+  const target = new URL(`${endpoint}/ready`, url)
   return new Promise((resolveRead, rejectRead) => {
-    const call = request(url, { timeout: 5000 }, response => {
-      let tail = ''
-      let verified = false
+    // Connect directly to the discovered IP, retaining certificate verification
+    // and the public SNI/Host even when this machine does not use MagicDNS.
+    const call = request(target, { hostname: address, servername: target.hostname, headers: { host: target.host }, timeout: 5000 }, response => {
+      let body = ''
       response.setEncoding('utf8')
       response.on('data', chunk => {
-        tail += chunk
-        verified ||= tail.includes(JSON.stringify(endpoint))
-        tail = tail.slice(-4096)
+        body += chunk
+        if (body.length > endpoint.length) call.destroy(new Error('Unexpected private readiness response'))
       })
       response.on('error', rejectRead)
-      response.on('end', () => {
-        if (response.statusCode !== 200 || !verified) {
-          rejectRead(new Error(`Private HTTPS readiness failed (HTTP ${response.statusCode}); response was not this review`))
-        } else resolveRead()
-      })
+      response.on('end', () => response.statusCode === 200 && body === endpoint
+        ? resolveRead() : rejectRead(new Error(`Private HTTPS readiness failed (HTTP ${response.statusCode})`)))
     })
     call.on('timeout', () => call.destroy(new Error('Private HTTPS readiness timed out')))
     call.on('error', rejectRead)
@@ -64,11 +65,9 @@ function readReview(url, endpoint) {
 
 // This IPC child owns foreground Serve. Worker death closes IPC, so even
 // SIGKILL releases its session rather than exposing a reused backend port.
-export async function startTailscaleServe({ port, localPort, reviewUrl, endpoint, signal, log }) {
-  if (occupiedPorts(await configuration('serve', 'status', '--json')).has(port)) {
-    throw new Error(`Tailscale HTTPS port ${port} became occupied before startup`)
-  }
+export async function startTailscaleServe({ port, address, localPort, reviewUrl, endpoint, log }) {
   const child = spawn(process.execPath, [SCRIPT, '--session', String(port), String(localPort)], {
+    detached: true,
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   })
   let failure = null
@@ -82,35 +81,27 @@ export async function startTailscaleServe({ port, localPort, reviewUrl, endpoint
     resolveFailure(error)
   }
   child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-16000) })
-  child.on('message', message => {
-    if (message.type === 'failed') markFailure(new Error(message.message))
+  const exited = new Promise(resolveExit => {
+    child.once('error', error => { markFailure(error); resolveExit() })
+    child.once('exit', (code, exitSignal) => {
+      markFailure(new Error(`Tailscale Serve stopped unexpectedly (${exitSignal || code}): ${diagnostics.trim()}`))
+      resolveExit()
+    })
   })
-  child.once('error', markFailure)
-  const exited = new Promise(resolveExit => child.once('exit', (code, exitSignal) => {
-    markFailure(new Error(`Tailscale Serve stopped unexpectedly (${exitSignal || code}): ${diagnostics.trim()}`))
-    resolveExit()
-  }))
   let closing
-  const close = () => {
-    if (closing) return closing
-    closing = (async () => {
-      stopping = true
-      if (child.connected) child.send({ type: 'stop' })
-      if (child.exitCode === null && child.signalCode === null) {
-        await Promise.race([exited, delay(9000).then(() => { throw new Error('Tailscale Serve session did not stop') })])
-      }
-      log('info', 'Private Tailscale Serve session stopped', { https_port: port })
-    })()
-    return closing
-  }
+  const close = () => closing ??= (async () => {
+    stopping = true
+    if (child.connected) child.disconnect()
+    await Promise.race([exited, delay(9000).then(() => { throw new Error('Tailscale Serve session did not stop') })])
+    log('info', 'Private Tailscale Serve session stopped', { https_port: port })
+  })()
   try {
     const deadline = Date.now() + 60_000
     let lastError
     while (Date.now() < deadline) {
-      if (signal?.aborted) throw new Error('Private review startup interrupted')
       if (failure) throw failure
       try {
-        await readReview(reviewUrl, endpoint)
+        await readReady(reviewUrl, endpoint, address)
         if (failure) throw failure
         log('info', 'Private HTTPS review verified', { review_url: reviewUrl, https_port: port })
         return { failed, close }
@@ -122,50 +113,49 @@ export async function startTailscaleServe({ port, localPort, reviewUrl, endpoint
     }
     throw new Error(`Could not verify private HTTPS review: ${lastError?.message || 'startup timed out'}`)
   } catch (error) {
-    await close()
+    try { await close() }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], `${error.message}; Serve cleanup failed: ${cleanupError.message}`) }
     throw error
   }
 }
 
 async function ownSession(port, localPort) {
-  let output = ''
   let stopping = false
-  let closed = false
   const child = spawn('tailscale', ['serve', '--bg=false', `--https=${port}`, `http://127.0.0.1:${localPort}`], {
     // A CLI may be a shell wrapper: own its process group as well.
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    stdio: ['ignore', 'ignore', 'inherit'],
   })
-  child.stdout.on('data', chunk => { output = (output + chunk).slice(-16000) })
-  child.stderr.on('data', chunk => { output = (output + chunk).slice(-16000) })
   const exited = new Promise(resolveExit => child.once('close', (code, exitSignal) => {
-    closed = true
-    if (!stopping && process.connected) process.send({ type: 'failed', message: `Tailscale Serve failed (${exitSignal || code}): ${output.trim()}` })
     resolveExit()
+    if (!stopping) {
+      process.stderr.write(`Tailscale Serve failed (${exitSignal || code})\n`)
+      void stop(1)
+    }
   }))
   child.once('error', error => {
-    if (process.connected) process.send({ type: 'failed', message: error.message })
+    process.stderr.write(`${error.message}\n`)
+    void stop(1)
   })
   const signalSession = signal => {
-    try {
-      if (process.platform === 'win32') child.kill(signal)
-      else process.kill(-child.pid, signal)
-    } catch (error) { if (error.code !== 'ESRCH') throw error }
+    if (!child.pid) return false
+    try { process.kill(-child.pid, signal); return true }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error }
   }
-  const stop = async () => {
+  const stop = async (code = 0) => {
     if (stopping) return
     stopping = true
-    if (!closed) {
-      signalSession('SIGINT')
-      await Promise.race([exited, delay(3000)])
-      if (!closed) {
-        signalSession('SIGKILL')
-        await exited
-      }
+    if (signalSession('SIGINT')) {
+      // Keep this timer referenced: redirected descendants may leave no other
+      // handles after the wrapper closes and the worker disconnects.
+      const grace = new Promise(resolveGrace => setTimeout(resolveGrace, 3000))
+      await Promise.race([exited, grace])
+      if (signalSession(0)) await grace
+      signalSession('SIGKILL')
+      await exited
     }
-    process.exit(0)
+    process.exit(code)
   }
-  process.on('message', message => { if (message.type === 'stop') void stop() })
   process.once('disconnect', () => { void stop() })
   process.once('SIGINT', () => { void stop() })
   process.once('SIGTERM', () => { void stop() })
