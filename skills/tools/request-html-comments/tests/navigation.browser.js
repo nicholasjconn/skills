@@ -37,6 +37,14 @@ async (page) => {
       await page.locator('#target').click({position:{x:40, y:18}});
     }
     await page.getByRole('textbox', {name:'Comment', exact:true}).fill(text);
+    if (selectedText) {
+      await check(['1'], true);
+      await page.evaluate(() => history.pushState(null, '', '/draft-away'));
+      await check(['1']);
+      if (await page.getByRole('textbox', {name:'Comment', exact:true}).inputValue() !== text) throw new Error('Navigation lost unfinished text');
+      await page.goBack();
+      await check(['1'], true);
+    }
     await page.getByRole('button', {name:'Save', exact:true}).click();
     await page.evaluate(() => window.api.flush());
     await page.evaluate(text => {
@@ -102,7 +110,7 @@ async (page) => {
     if (await page.locator('.sr-count').textContent() !== '4') throw new Error('Toolbar excluded other pages');
     await page.getByRole('button', {name:'Send review comments', exact:true}).click();
     await page.waitForFunction(() => window.submitted?.length === 4);
-    return 'PASS: metadata, static pages, query strings, text highlights, legacy comments, pushState/replaceState semantics, back/forward, hash routes, section anchors, and submission across views';
+    return 'PASS: metadata, static pages, query strings, saved/draft text highlights, legacy comments, pushState/replaceState semantics, back/forward, hash routes, section anchors, and submission across views';
   } finally {
     await page.unroute(`${origin}/**`);
     await page.goto('about:blank');

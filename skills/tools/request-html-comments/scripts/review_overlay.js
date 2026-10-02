@@ -1362,6 +1362,10 @@ function createHtmlReview(options) {
   refreshComments = () => {
     if (!active) return;
     const origin = containingBlockOrigin();
+    if (draft?.provisionalId) {
+      const item = draft.item || commentFromDraft(draft, '');
+      anchorForComment({...item, id: draft.provisionalId}, origin);
+    }
     for (const item of comments) {
       const pin = ensurePin(item);
       const anchor = anchorForComment(item, origin);
