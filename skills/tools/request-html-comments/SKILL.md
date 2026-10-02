@@ -8,6 +8,8 @@ license: MIT
 
 Collect comments on an existing `.html`/`.htm` file or an already-running `http://` loopback page. File reviews may load assets only from the file's directory tree. Served-page reviews proxy the chosen loopback origin, including APIs and WebSockets.
 
+Each comment records `page_url` (the path, query, and fragment of the top page it was made on) and `page_title`. Pins and text highlights appear only on that view, including after single-page-app navigation. Each fragment identifies a distinct view, including ordinary section anchors. Older comments without `page_url` remain visible across views.
+
 The overlay annotates the top document and nested same-origin frames, including frames in open shadow roots, while preserving `iframe_path` through multiple levels. Same-origin frame support covers ordinary and axis-aligned scale/translation layouts only; targets behind rotated, skewed, or 3D frame ancestry are unavailable for annotation. Cross-origin, opaque-origin, and closed-shadow-root frames are context only: never try to inspect them or inject review controls into them.
 
 ## Launch
@@ -24,6 +26,39 @@ node "$SCRIPT" http://localhost:3000/page --async \
 ```
 
 Use `--no-open` for automation-only validation and `--port PORT` when the URL must retain a specific available port. Bind failures are fatal rather than silently selecting another port.
+
+### Private HTTPS with Tailscale
+
+For review from another tailnet device or a trusted HTTPS context, prefer
+Tailscale Serve when installed, connected, and HTTPS is enabled for the tailnet.
+On Linux, this mode requires normal kernel networking; userspace-only Tailscale
+networking does not provide the local listener needed for HTTPS verification.
+Add `--tailscale` to the normal launch on Linux or macOS:
+
+```bash
+node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
+  --output /absolute/path/to/result.json
+```
+
+The listener stays on loopback. The runtime allocates an unused HTTPS port,
+holds a foreground Serve session for this review, and verifies the returned
+HTTPS URL before reporting readiness. `--tailscale-port PORT` requests a
+specific unused external port; `--port` controls the separate local listener.
+Existing Serve routes remain in place. Do not use Funnel, reset Serve, replace
+an existing route, or combine this mode with `--host` or direct TLS flags.
+
+Give the user the returned URL. Their other device must be connected to the
+tailnet and permitted by its access rules. Tailnet peers with access can read
+the allowed file tree or use the proxied application's routes and WebSockets.
+The DNS hostname appears in public certificate logs; the content stays private.
+
+If Tailscale is unavailable, report that the normal loopback URL works only on
+this computer. Once `--tailscale` is selected, startup failures are fatal; do
+not silently switch to a local URL. Missing login, HTTPS enablement, or device
+enrollment is a setup prerequisite, not permission to perform that setup.
+
+Submit, cancel, timeout, or worker termination releases this review's Serve
+session. Existing logs, drafts, and submitted feedback remain available.
 
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback IPv4 address assigned to this machine. The server binds and advertises only that address, never `0.0.0.0`. The review server has no authentication: any LAN peer that reaches that interface can access the entire allowed file tree or, for loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to the local app. Use this mode only with the user's authorization and an appropriately trusted network.
 
@@ -56,6 +91,13 @@ On the next user message:
 - If the review was cancelled, do not recover the draft unless asked.
 
 Address submitted comments after returning them.
+
+## Definition of done
+
+- The advertised review URL loads the intended document with its overlay.
+- In Tailscale mode, HTTPS verification succeeds and the listener is loopback.
+- Submitted feedback preserves comment targets and iframe paths in the output.
+- Review completion stops its own forwarding session and preserves other routes.
 
 ## Hosted reuse
 

@@ -7,7 +7,7 @@ The local CLI composes the same engine with `review_local.js`, which owns HTTP r
 Required options:
 
 - `saveDraft({ comments, deleted_ids })`: persist an idempotent patch. Throw or reject on failure. Comment records contain text/element targets, timestamps, IDs, and iframe/shadow paths; preserve them intact.
-- `onFinish(action, api)`: handle `submit` or `cancel`. The engine locks review interaction and flushes pending changes first. The host decides whether to download, navigate, or hide the tool. Successful completion runs once; failures unlock the UI for retry. Call `resume()` after completion to explicitly start another review cycle.
+- `onFinish(action, api)`: handle `submit` or `cancel`. The engine locks review interaction and flushes pending changes first. The host decides whether to download or navigate. Successful completion runs once and hides the toolbar, comment pins, highlights, and editor; failures unlock the UI for retry. Comments remain available through `getComments()`. Call `resume()` after completion to explicitly start another review cycle.
 
 Optional options:
 
@@ -27,4 +27,4 @@ The returned API provides:
 - `clearComments()`: clear the in-memory comments, editor, and pins after the host has archived the review and cleared its stored draft. Flush pending persistence first; this method does not write storage.
 - `addComment(record)`: add a recovered comment with a new unique ID; call `flush()` before reporting recovery as saved.
 
-Suspend/resume is for a single mounted page. Listeners remain installed to support same-origin iframe navigation; do not repeatedly create factories in a single-page app. Local CLI defaults and explicit `--restore-comments` behavior are unchanged. Browser history, provenance, identity, and exported-file schemas belong to the host adapter.
+Suspend/resume is for a single mounted page. Listeners remain installed to support same-origin iframe navigation; do not repeatedly create factories in a single-page app. The engine tracks the top page's path, query, and fragment, listens for history/fragment navigation, and wraps `history.pushState` and `history.replaceState` to refresh annotations after successful calls. Local CLI defaults and explicit `--restore-comments` behavior are unchanged. Navigation, provenance, identity, and exported-file schemas belong to the host adapter.
