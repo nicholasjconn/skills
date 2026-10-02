@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Linked SVG text selection regression</title>
+  <style>
+    body { font: 18px system-ui; padding: 30px; }
+    svg { width: 620px; height: 140px; display: block; }
+    iframe { width: 670px; height: 180px; border: 1px solid #ccc; }
+    text { font: 22px system-ui; }
+    a { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Text annotation regression</h1>
+  <svg viewBox="0 0 620 140">
+    <a href="#jump" onclick="document.body.dataset.clicked=1">
+      <rect x="10" y="10" width="580" height="120" fill="#e9f1ff"/>
+      <text id="linked-svg-copy" x="30" y="75">Completed HH VOB: OON</text>
+    </a>
+  </svg>
+  <div id="shadow-host"></div>
+  <!-- Keep the srcdoc fixture mounted after its ordinary click. The click
+       handler must still be blocked by a text-annotation gesture. -->
+  <iframe id="review-frame" srcdoc='
+    <style>svg{width:620px;height:140px}text{font:22px system-ui}</style>
+    <svg viewBox="0 0 620 140">
+      <a href="#jump" onclick="event.preventDefault();document.body.dataset.clicked=1">
+        <rect x="10" y="10" width="580" height="120" fill="#f1eafa"/>
+        <text id="frame-svg-copy" x="30" y="75">Frame HH VOB: OON</text>
+      </a>
+    </svg>'></iframe>
+  <div id="jump">Link destination</div>
+  <script>
+    document.querySelector('#shadow-host').attachShadow({mode: 'open'}).innerHTML = `
+      <style>svg{width:620px;height:140px}text{font:22px system-ui}</style>
+      <svg viewBox="0 0 620 140">
+        <a href="#jump" onclick="document.body.dataset.clicked=1">
+          <rect x="10" y="10" width="580" height="120" fill="#e8f7fb"/>
+          <text id="shadow-svg-copy" x="30" y="75">Shadow HH VOB: OON</text>
+        </a>
+      </svg>`;
+  </script>
+  <script src="../scripts/review_geometry.js"></script>
+  <script src="../scripts/review_overlay.js"></script>
+  <script>
+    window.reviewApi = createHtmlReview({saveDraft: async () => {}, onFinish: async () => {}});
+  </script>
+</body>
+</html>
