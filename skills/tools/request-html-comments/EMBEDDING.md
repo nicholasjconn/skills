@@ -7,7 +7,7 @@ The local CLI composes the same engine with `review_local.js`, which owns HTTP r
 Required options:
 
 - `saveDraft({ comments, deleted_ids })`: persist an idempotent patch. Throw or reject on failure. Comment records contain text/element targets, timestamps, IDs, and iframe/shadow paths; preserve them intact.
-- `onFinish(action, api)`: handle `submit` or `cancel`. The engine locks review interaction and flushes pending changes first. The host decides whether to download, navigate, or hide the tool. Successful completion runs once; failures unlock the UI for retry. Call `resume()` after completion to explicitly start another review cycle.
+- `onFinish(action, api)`: handle `submit` or `cancel`. The engine locks review interaction and flushes pending changes first. The host decides whether to download or navigate. Successful completion runs once and hides the toolbar, comment pins, highlights, and editor; failures unlock the UI for retry. Comments remain available through `getComments()`. Call `resume()` after completion to explicitly start another review cycle.
 
 Optional options:
 

@@ -1417,17 +1417,20 @@ function createHtmlReview(options) {
 
   // Hosts own persistence and completion; the engine never navigates the page.
   const flush = async () => { rememberOpenDraft(); await saveDraft(); };
+  const hideReview = () => {
+    setMode('interact');
+    closeInfo();
+    active = false;
+    if (popup) hideAsPopover(popup);
+    hideAsPopover(overlayLayer);
+    overlayLayer.style.setProperty('display', 'none', 'important');
+  };
   const api = {
     getComments: () => structuredClone(recoverableComments()),
     flush,
     async suspend() {
       await flush();
-      setMode('interact');
-      closeInfo();
-      active = false;
-      if (popup) hideAsPopover(popup);
-      hideAsPopover(overlayLayer);
-      overlayLayer.style.setProperty('display', 'none', 'important');
+      hideReview();
     },
     resume() {
       if (finishing) throw new Error('Review completion is in progress');
@@ -1485,6 +1488,7 @@ function createHtmlReview(options) {
       }
       await options.onFinish(action, api);
       completed = true;
+      hideReview();
     } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
     finally {
       finishing = false;
