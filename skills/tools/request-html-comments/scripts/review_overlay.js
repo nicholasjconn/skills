@@ -1131,7 +1131,7 @@ function createHtmlReview(options) {
         selectableSvgRoots.add(svg);
       }
     }
-    if (infoPanel && !infoPanel.contains(event.target) && !infoButton.contains(event.target)) closeInfo();
+    if (infoPanel && !infoPanel.contains(target) && !infoButton.contains(target)) closeInfo();
   };
   const onPointerMove = (event) => {
     const target = eventOrigin(event);
@@ -1235,7 +1235,8 @@ function createHtmlReview(options) {
   };
   const bindAnnotationListeners = (doc, signal) => {
     const clearDocumentHover = () => clearHoverInDocument(doc);
-    listenUntilAbort(doc, 'pointerdown', onPointerDown, false, signal);
+    // Prepare selection even when page controls stop pointerdown bubbling.
+    listenUntilAbort(doc, 'pointerdown', onPointerDown, true, signal);
     listenUntilAbort(doc, 'pointermove', onPointerMove, true, signal);
     listenUntilAbort(doc, 'click', onClick, true, signal);
     listenUntilAbort(doc, 'pointerup', onPointerUp, true, signal);
