@@ -8,6 +8,8 @@ license: MIT
 
 Collect comments on an existing `.html`/`.htm` file or an already-running `http://` loopback page. File reviews may load assets only from the file's directory tree. Served-page reviews proxy the chosen loopback origin, including APIs and WebSockets.
 
+Each comment records `page_url` (the path, query, and fragment of the top page it was made on) and `page_title`. Pins and text highlights appear only on that view, including after single-page-app navigation. Each fragment identifies a distinct view, including ordinary section anchors. Older comments without `page_url` remain visible across views.
+
 The overlay annotates the top document and nested same-origin frames, including frames in open shadow roots, while preserving `iframe_path` through multiple levels. Same-origin frame support covers ordinary and axis-aligned scale/translation layouts only; targets behind rotated, skewed, or 3D frame ancestry are unavailable for annotation. Cross-origin, opaque-origin, and closed-shadow-root frames are context only: never try to inspect them or inject review controls into them.
 
 ## Launch

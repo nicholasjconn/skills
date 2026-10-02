@@ -803,11 +803,17 @@ function createHtmlReview(options) {
     return toTopClientPoint(rect.right, rect.top, range.commonAncestorContainer, geometry);
   };
 
+  // A served-page review can span several pages, and single-page apps change
+  // the URL without reloading, so each comment records the page it was made on
+  // and its pin shows only there. Comments without a page predate this field.
+  const currentPageUrl = () => `${location.pathname}${location.search}${location.hash}`;
+  const onCurrentPage = (item) => !item.page_url || item.page_url === currentPageUrl();
   const persistableTarget = (draftOrItem) => (
     draftOrItem.iframe_path?.length ? { iframe_path: draftOrItem.iframe_path } : {}
   );
   const commentFromDraft = (draftItem, comment) => ({
     id: draftItem.id, target_type: draftItem.targetType,
+    page_url: draftItem.page_url, page_title: draftItem.page_title,
     element: draftItem.element, selection: draftItem.selection,
     ...persistableTarget(draftItem),
     anchor: draftItem.anchor, anchor_coordinate_space: draftItem.anchorCoordinateSpace,
@@ -896,6 +902,7 @@ function createHtmlReview(options) {
     return null;
   };
   const anchorForComment = (item, origin = containingBlockOrigin()) => {
+    if (!onCurrentPage(item)) return hideCommentAnchor(item);
     const frameDocument = documentForComment(item);
     if (item.iframe_path?.length && !frameDocument) return hideCommentAnchor(item);
     const fallbackAnchor = () => {
@@ -1041,6 +1048,7 @@ function createHtmlReview(options) {
     draft = item ? { item } : {
       ...target,
       id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+      page_url: currentPageUrl(), page_title: document.title,
       created_at: new Date().toISOString()
     };
     const placePopup = (nextX, nextY) => placeFixedElement(popup, nextX, nextY);
@@ -1354,6 +1362,10 @@ function createHtmlReview(options) {
   refreshComments = () => {
     if (!active) return;
     const origin = containingBlockOrigin();
+    if (draft?.provisionalId) {
+      const item = draft.item || commentFromDraft(draft, '');
+      anchorForComment({...item, id: draft.provisionalId}, origin);
+    }
     for (const item of comments) {
       const pin = ensurePin(item);
       const anchor = anchorForComment(item, origin);
@@ -1389,6 +1401,18 @@ function createHtmlReview(options) {
     closeInfo();
     scheduleCommentRefresh();
   });
+  // Route changes can leave the DOM untouched. Refresh explicitly rather than
+  // relying on mutations, scroll, or resize to update page-scoped annotations.
+  window.addEventListener('popstate', scheduleCommentRefresh);
+  window.addEventListener('hashchange', scheduleCommentRefresh);
+  for (const method of ['pushState', 'replaceState']) {
+    const original = window.history[method];
+    window.history[method] = function (...args) {
+      const result = original.apply(this, args);
+      scheduleCommentRefresh();
+      return result;
+    };
+  }
   if (document.fonts?.ready) document.fonts.ready.then(refreshComments);
 
   const dragHandle = root.querySelector('.sr-drag');
