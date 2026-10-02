@@ -19,12 +19,14 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
 import { connect as netConnect, isIP } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { basename, dirname, extname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { prepareTailscaleServe, startTailscaleServe } from './tailscale_serve.mjs'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
 const REVIEW_SAFETY_TIMEOUT_MS = 12 * 60 * 60 * 1000
@@ -59,8 +61,8 @@ function upstreamHostname(hostname) {
   return hostname === '[::1]' ? '::1' : hostname
 }
 
-function httpAuthority(hostname, port) {
-  return Number(port) === 80 ? hostname : `${hostname}:${port}`
+function httpAuthority(hostname, port, protocol) {
+  return Number(port) === (protocol === 'https' ? 443 : 80) ? hostname : `${hostname}:${port}`
 }
 
 export function validateReviewHost(host, interfaces = networkInterfaces()) {
@@ -188,13 +190,14 @@ function requestHostAllowed(request, allowedAuthority) {
   return String(request.headers.host || '').toLowerCase() === allowedAuthority.toLowerCase()
 }
 
-function sameOriginRequest(request) {
+function sameOriginRequest(request, expectedOrigin) {
   const site = String(request.headers['sec-fetch-site'] || '').toLowerCase()
   if (site && site !== 'same-origin' && site !== 'none') return false
   const origin = request.headers.origin
   if (!origin || Array.isArray(origin)) return !origin
   try {
-    return new URL(origin).origin === new URL(`http://${request.headers.host}`).origin
+    const parsed = new URL(origin)
+    return parsed.origin === expectedOrigin && origin === parsed.origin
   } catch {
     return false
   }
@@ -258,6 +261,9 @@ function serveStaticAsset(request, response, root, log) {
 
 function proxyHeaders(headers, source, forceIdentityEncoding = false) {
   const proxied = { ...headers, host: source.url.host }
+  for (const name of Object.keys(proxied)) {
+    if (name === 'forwarded' || name.startsWith('x-forwarded-') || name.startsWith('tailscale-')) delete proxied[name]
+  }
   if (proxied.origin) proxied.origin = source.url.origin
   if (forceIdentityEncoding) proxied['accept-encoding'] = 'identity'
   return proxied
@@ -349,11 +355,21 @@ export async function createReviewServer({
   log,
   host = null,
   port = 0,
+  // { cert, key } (PEM contents): serve the review over HTTPS, so the reviewed
+  // page gets a secure context on a LAN address (Secure cookies, crypto APIs).
+  tls = null,
+  publicOrigin = null,
   safetyTimeoutMs = REVIEW_SAFETY_TIMEOUT_MS,
   upstreamTimeoutMs = UPSTREAM_RESPONSE_TIMEOUT_MS,
 }) {
   if (!validCommentList(initialComments)) throw new Error('initial comments must contain valid comment records')
   const trustedLanHost = host === null ? null : validateReviewHost(host)
+  if (publicOrigin && (host || tls)) throw new Error('Private proxy origin requires an HTTP loopback listener')
+  if (publicOrigin) {
+    const parsed = new URL(publicOrigin)
+    if (parsed.protocol !== 'https:' || parsed.origin !== publicOrigin) throw new Error('Private proxy origin must be an HTTPS origin without a path')
+  }
+  const protocol = tls ? 'https' : 'http'
   const token = randomBytes(24).toString('base64url')
   const endpoint = `/${token}`
   // Present the document at its original pathname so the browser resolves
@@ -370,6 +386,7 @@ export async function createReviewServer({
   const serverConnections = new Set()
   const activeResources = new Set()
   let allowedAuthority = null
+  let expectedOrigin = publicOrigin
 
   const finish = (action, comments = []) => {
     if (settled) return
@@ -407,8 +424,12 @@ export async function createReviewServer({
       sendText(response, 403, 'Review host not allowed')
       return
     }
-    if (!sameOriginRequest(request) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
+    if (!sameOriginRequest(request, expectedOrigin) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
       sendText(response, 403, 'Same-origin access only')
+      return
+    }
+    if (request.method === 'GET' && requested.pathname === `${endpoint}/ready`) {
+      sendText(response, 200, endpoint)
       return
     }
     const action = requested.pathname.slice(endpoint.length + 1)
@@ -461,21 +482,22 @@ export async function createReviewServer({
     proxyRequest(request, response, requested, source, inject, log, activeResources, upstreamTimeoutMs)
   }
 
-  const server = createServer((request, response) => {
+  const onRequest = (request, response) => {
     handleRequest(request, response).catch(error => {
       const requestError = error instanceof Error ? error : new Error(String(error))
       log('error', 'Review request failed', { url: request.url, error: requestError.message })
       if (!response.headersSent && !response.writableEnded) sendText(response, 500, 'Review request failed')
       else if (!response.destroyed) response.destroy(requestError)
     })
-  })
+  }
+  const server = tls ? createHttpsServer({ cert: tls.cert, key: tls.key }, onRequest) : createServer(onRequest)
 
   server.on('connection', socket => {
     serverConnections.add(socket)
     socket.once('close', () => serverConnections.delete(socket))
   })
   server.on('upgrade', (request, socket, head) => {
-    if (!requestHostAllowed(request, allowedAuthority) || !sameOriginRequest(request)) {
+    if (!requestHostAllowed(request, allowedAuthority) || !sameOriginRequest(request, expectedOrigin)) {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n')
       return
     }
@@ -487,7 +509,7 @@ export async function createReviewServer({
     socket.end('HTTP/1.1 400 Bad Request\r\n\r\n')
   })
   await new Promise((resolveListen, rejectListen) => {
-    const hostname = trustedLanHost || (source.type === 'url' ? upstreamHostname(source.url.hostname) : '127.0.0.1')
+    const hostname = publicOrigin ? '127.0.0.1' : trustedLanHost || (source.type === 'url' ? upstreamHostname(source.url.hostname) : '127.0.0.1')
     const onError = error => rejectListen(new Error(`could not bind review server to ${hostname}:${port || 'an available port'}: ${error.message}`, { cause: error }))
     server.once('error', onError)
     server.listen(port, hostname, () => {
@@ -496,9 +518,10 @@ export async function createReviewServer({
     })
   })
   const address = server.address()
-  const reviewHostname = trustedLanHost || (source.type === 'url' ? source.url.hostname : '127.0.0.1')
-  allowedAuthority = httpAuthority(reviewHostname, address.port)
-  const reviewUrl = `http://${allowedAuthority}${reviewPath}${reviewSearch}`
+  const reviewHostname = publicOrigin ? '127.0.0.1' : trustedLanHost || (source.type === 'url' ? source.url.hostname : '127.0.0.1')
+  expectedOrigin ||= `${protocol}://${httpAuthority(reviewHostname, address.port, protocol)}`
+  allowedAuthority = new URL(expectedOrigin).host
+  const reviewUrl = `${expectedOrigin}${reviewPath}${reviewSearch}`
   log('info', 'Review server ready', { review_url: reviewUrl, bind_host: reviewHostname, port: address.port })
   safetyTimer = setTimeout(() => {
     if (settled) return
@@ -509,6 +532,8 @@ export async function createReviewServer({
 
   return {
     reviewUrl,
+    localPort: address.port,
+    endpoint,
     completion,
     async close() {
       if (closing) return closing
@@ -536,7 +561,7 @@ const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
 const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
 // Keep helpers private to this single injected payload while allowing the
 // overlay source to use its geometry binding directly.
-const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n})();`
+const OVERLAY_SCRIPT = `(() => {\n${GEOMETRY_SCRIPT}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_overlay.js'), 'utf8')}\n${readFileSync(resolve(SCRIPT_DIRECTORY, 'review_local.js'), 'utf8')}\n})();`
 
 function usage() {
   console.log(`Usage: node html_review.mjs <HTML-file-or-loopback-URL> [options]
@@ -550,6 +575,10 @@ Options:
   --no-open                 Start the server without opening a browser
   --port PORT               Bind the review server to a specific port
   --host IPV4               Bind and advertise one active non-loopback local IPv4 address
+  --tls-cert PATH           Serve the review over HTTPS with this PEM certificate
+  --tls-key PATH            PEM private key for --tls-cert (both or neither)
+  --tailscale               Share privately over HTTPS using Tailscale Serve
+  --tailscale-port PORT     Choose an unused public HTTPS port (otherwise allocated)
   --help                    Show this help
 
 The source may be an existing .html/.htm file or an http:// URL on localhost,
@@ -566,20 +595,21 @@ function parseArgs(argv) {
       return null
     }
     if (argument === '--async') args.asynchronous = true
+    else if (argument === '--tailscale') args.tailscale = true
     else if (argument === '--no-open') args.no_open = true
     else if (argument === '--worker') args.worker = true
-    else if (argument === '--port') {
+    else if (argument === '--port' || argument === '--tailscale-port') {
       const value = argv[++index]
-      if (!value) throw new Error('--port requires a value')
+      if (!value) throw new Error(`${argument} requires a value`)
       if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 65535) {
-        throw new Error('--port must be an integer from 1 to 65535')
+        throw new Error(`${argument} must be an integer from 1 to 65535`)
       }
-      args.port = Number(value)
+      args[argument === '--port' ? 'port' : 'tailscale_port'] = Number(value)
     } else if (argument === '--host') {
       const value = argv[++index]
       if (!value) throw new Error('--host requires a value')
       args.host = validateReviewHost(value)
-    } else if (argument === '--output' || argument === '--restore-comments' || argument === '--ready-file') {
+    } else if (['--output', '--restore-comments', '--ready-file', '--tls-cert', '--tls-key'].includes(argument)) {
       const value = argv[++index]
       if (!value) throw new Error(`${argument} requires a value`)
       args[argument.slice(2).replaceAll('-', '_')] = resolve(value)
@@ -591,6 +621,18 @@ function parseArgs(argv) {
   if (args.asynchronous && !args.output) throw new Error('--async requires --output')
   if (args.output && existsSync(args.output)) throw new Error('--output must not already exist')
   if (args.restore_comments && !existsSync(args.restore_comments)) throw new Error('--restore-comments must be an existing review JSON file')
+  if (Boolean(args.tls_cert) !== Boolean(args.tls_key)) throw new Error('--tls-cert and --tls-key must be given together')
+  if (args.tailscale && (args.host || args.tls_cert)) throw new Error('--tailscale cannot be combined with --host or direct TLS options')
+  if (args.tailscale_port && !args.tailscale) throw new Error('--tailscale-port requires --tailscale')
+  if (args.tls_cert && !(existsSync(args.tls_cert) && statSync(args.tls_cert).isFile())) throw new Error('--tls-cert must be an existing PEM file')
+  if (args.tls_key && !(existsSync(args.tls_key) && statSync(args.tls_key).isFile())) throw new Error('--tls-key must be an existing PEM file')
+  if (args.tls_key && args.source.type === 'file') {
+    const root = realpathSync(dirname(args.source.path))
+    const key = realpathSync(args.tls_key)
+    if (key === root || key.startsWith(`${root}${sep}`)) {
+      throw new Error('--tls-key must be outside the reviewed file directory tree')
+    }
+  }
   if (args.asynchronous && args.output && !args.worker) {
     const companions = [draftPath(args.output), logPath(args.output)].filter(existsSync)
     if (companions.length) throw new Error(`review companion paths must not already exist: ${companions.join(', ')}`)
@@ -657,6 +699,8 @@ function initializeLog(path, args) {
     no_open: args.no_open,
     port: args.port || null,
     host: args.host,
+    tailscale: Boolean(args.tailscale),
+    tailscale_port: args.tailscale_port || null,
     pid: process.pid,
   })
 }
@@ -676,7 +720,7 @@ function recordStartupFailure(argv, error) {
     } else if (!worker) {
       return
     }
-    createLogger(logOutput)('error', 'Review could not start', { error: error.message, stack: error.stack })
+    createLogger(logOutput)('error', 'Review failed', { error: error.message, stack: error.stack })
   } catch {
     // The original validation error remains authoritative when logging itself fails.
   }
@@ -689,9 +733,11 @@ async function runReview(args) {
   initializeLog(logOutput, args)
   const log = createLogger(logOutput)
   let server
+  let serve
   try {
     const initialComments = loadRestoredComments(args.restore_comments, args.source)
     if (initialComments.length) log('info', 'Restored comments', { path: args.restore_comments, comments: initialComments.length })
+    const sharing = args.tailscale ? await prepareTailscaleServe(args.tailscale_port) : null
     server = await createReviewServer({
       source: args.source,
       draftOutput,
@@ -700,7 +746,15 @@ async function runReview(args) {
       log,
       host: args.host,
       port: args.port,
+      tls: args.tls_cert ? { cert: readFileSync(args.tls_cert), key: readFileSync(args.tls_key) } : null,
+      publicOrigin: sharing?.origin || null,
     })
+    if (sharing) {
+      serve = await startTailscaleServe({
+        port: sharing.port, address: sharing.address, localPort: server.localPort, reviewUrl: server.reviewUrl,
+        endpoint: server.endpoint, log,
+      })
+    }
     emitTrustedLanWarning(log, args, server.reviewUrl, { stdout: !args.worker })
     if (args.no_open) {
       log('info', 'Skipped default browser launch', { review_url: server.reviewUrl })
@@ -708,7 +762,10 @@ async function runReview(args) {
     }
     else await openBrowser(server.reviewUrl, log)
     if (args.ready_file) writeFileSync(args.ready_file, `${server.reviewUrl}\n`)
-    const result = await server.completion
+    const result = await Promise.race([
+      server.completion,
+      ...(serve ? [serve.failed.then(error => { throw error })] : []),
+    ])
     if (result.action !== 'submit') {
       log('info', 'Review completed without submission', { action: result.action })
       process.stderr.write('Review cancelled.\n')
@@ -729,7 +786,9 @@ async function runReview(args) {
     process.stderr.write(`${error.message}\n`)
     return 1
   } finally {
-    if (server) await server.close()
+    try { if (serve) await serve.close() }
+    catch (error) { log('error', 'Review cleanup failed', { error: error.message }); throw error }
+    finally { if (server) await server.close() }
   }
 }
 
@@ -745,6 +804,9 @@ async function launchAsync(args) {
   if (args.no_open) childArgs.push('--no-open')
   if (args.port) childArgs.push('--port', String(args.port))
   if (args.host) childArgs.push('--host', args.host)
+  if (args.tls_cert) childArgs.push('--tls-cert', args.tls_cert, '--tls-key', args.tls_key)
+  if (args.tailscale) childArgs.push('--tailscale')
+  if (args.tailscale_port) childArgs.push('--tailscale-port', String(args.tailscale_port))
   const descriptor = openSync(logOutput, 'a')
   const child = spawn(process.execPath, childArgs, {
     detached: true,
@@ -754,7 +816,7 @@ async function launchAsync(args) {
   child.unref()
   log('info', 'Detached review worker', { worker_pid: child.pid })
 
-  const deadline = Date.now() + 10_000
+  const deadline = Date.now() + (args.tailscale ? 120_000 : 10_000)
   while (Date.now() < deadline) {
     if (existsSync(readyFile)) {
       const readyUrl = readFileSync(readyFile, 'utf8').trim()
@@ -768,8 +830,8 @@ async function launchAsync(args) {
       if (args.restore_comments) console.log(`Restored comments from: ${args.restore_comments}`)
       return 0
     }
-    if (child.exitCode !== null) {
-      log('error', 'Review worker exited before browser readiness', { exit_code: child.exitCode })
+    if (child.exitCode !== null || child.signalCode !== null) {
+      log('error', 'Review worker exited before browser readiness', { exit_code: child.exitCode, exit_signal: child.signalCode })
       console.error(`Could not start the asynchronous review. Inspect ${logOutput}`)
       return 1
     }
@@ -792,7 +854,7 @@ async function main() {
   try {
     const args = parseArgs(process.argv.slice(2))
     if (!args) return 0
-    return args.asynchronous && !args.worker ? launchAsync(args) : runReview(args)
+    return await (args.asynchronous && !args.worker ? launchAsync(args) : runReview(args))
   } catch (error) {
     recordStartupFailure(process.argv.slice(2), error)
     console.error(error.message)
