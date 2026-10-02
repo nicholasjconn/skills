@@ -806,7 +806,7 @@ function createHtmlReview(options) {
   // A served-page review can span several pages, and single-page apps change
   // the URL without reloading, so each comment records the page it was made on
   // and its pin shows only there. Comments without a page predate this field.
-  const currentPageUrl = () => `${location.pathname}${location.search}`;
+  const currentPageUrl = () => `${location.pathname}${location.search}${location.hash}`;
   const onCurrentPage = (item) => !item.page_url || item.page_url === currentPageUrl();
   const persistableTarget = (draftOrItem) => (
     draftOrItem.iframe_path?.length ? { iframe_path: draftOrItem.iframe_path } : {}
@@ -1397,8 +1397,18 @@ function createHtmlReview(options) {
     closeInfo();
     scheduleCommentRefresh();
   });
-  // History navigation in a single-page app changes the page without a reload.
+  // Route changes can leave the DOM untouched. Refresh explicitly rather than
+  // relying on mutations, scroll, or resize to update page-scoped annotations.
   window.addEventListener('popstate', scheduleCommentRefresh);
+  window.addEventListener('hashchange', scheduleCommentRefresh);
+  for (const method of ['pushState', 'replaceState']) {
+    const original = window.history[method];
+    window.history[method] = function (...args) {
+      const result = original.apply(this, args);
+      scheduleCommentRefresh();
+      return result;
+    };
+  }
   if (document.fonts?.ready) document.fonts.ready.then(refreshComments);
 
   const dragHandle = root.querySelector('.sr-drag');
