@@ -1,0 +1,32 @@
+name: request-html-comments tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  html-review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Run existing Node tests
+        run: node --test skills/tools/request-html-comments/tests/*.test.mjs
+      - name: Install browser test tooling
+        run: |
+          npm install -g @playwright/cli@0.1.18
+          playwright-cli --version
+          playwright-cli install-browser chrome --with-deps
+      - name: Run existing browser tests
+        run: |
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory skills/tools/request-html-comments &
+          server_pid=$!
+          trap 'playwright-cli -s=html-review-ci close; kill "$server_pid"' EXIT
+          playwright-cli -s=html-review-ci open http://127.0.0.1:8765/tests/text-selection.html
+          for scenario in text-selection completion navigation; do
+            playwright-cli -s=html-review-ci run-code --filename="skills/tools/request-html-comments/tests/$scenario.browser.js"
+          done
