@@ -1,0 +1,45 @@
+name: ship-pr script tests
+on: [push, pull_request]
+jobs:
+  scripts:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache: false
+      - name: Provision test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl util-linux
+          tools_dir="$(mktemp -d /var/tmp/ship-pr-tools.XXXXXX)"
+          cd "$tools_dir"
+          curl --fail --location --output bash.tar.gz https://ftp.gnu.org/gnu/bash/bash-5.2.37.tar.gz
+          printf '%s  %s\n' 9599b22ecd1d5787ad7d3b7bf0c59f312b3396d1e281175dd1f8a4014da621ff bash.tar.gz | sha256sum --check --strict
+          tar -xzf bash.tar.gz
+          cd bash-5.2.37
+          CFLAGS='-O2 -std=gnu17 -Wno-error=implicit-function-declaration' ./configure --prefix=/usr
+          make -j2
+          sudo make install
+          curl --fail --location --output "$tools_dir/jq" https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64
+          printf '%s  %s\n' 020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d "$tools_dir/jq" | sha256sum --check --strict
+          sudo install -m 0755 "$tools_dir/jq" /usr/bin/jq
+          /usr/bin/bash --version
+          /usr/bin/jq --version
+      - name: Run standalone skill tests without external network
+        working-directory: skills/development/ship-pr/tests
+        run: |
+          command -v bash
+          command -v jq
+          for ancestor in /var/tmp /var /; do
+            test ! -e "$ancestor/go.mod" && test ! -L "$ancestor/go.mod"
+            test ! -e "$ancestor/.agent-layer" && test ! -L "$ancestor/.agent-layer"
+          done
+          export TMPDIR="$(mktemp -d /var/tmp/ship-pr-tests.XXXXXX)"
+          echo "TMPDIR=$TMPDIR"
+          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off unshare --net "$(command -v go)" test -count=1 ./...
