@@ -9,10 +9,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-python@v7
         with:
-          go-version: '1.26.6'
-          cache: false
+          python-version: '3.12'
       - name: Provision test tools
         run: |
           sudo apt-get update
@@ -36,10 +35,6 @@ jobs:
         run: |
           command -v bash
           command -v jq
-          for ancestor in /var/tmp /var /; do
-            test ! -e "$ancestor/go.mod" && test ! -L "$ancestor/go.mod"
-            test ! -e "$ancestor/.agent-layer" && test ! -L "$ancestor/.agent-layer"
-          done
           export TMPDIR="$(mktemp -d /var/tmp/ship-pr-tests.XXXXXX)"
           echo "TMPDIR=$TMPDIR"
-          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off unshare --net "$(command -v go)" test -count=1 ./...
+          sudo env "PATH=$PATH" "TMPDIR=$TMPDIR" unshare --net "$(command -v python)" -B -m unittest discover -v
