@@ -83,9 +83,9 @@ for reliable secure-context behavior. Keep the key outside a reviewed file's
 directory, which the review serves in full; the CLI rejects keys inside that
 tree, including symlinked paths.
 
-Each invocation starts with zero comments. Use `--restore-comments` only when
-the user explicitly asks to recover an interrupted review, never to preload
-submitted feedback, and always use a new output path:
+Without `--restore-comments`, each invocation starts with zero comments. Use
+this flag only when the user explicitly asks to recover an interrupted review,
+never to preload submitted feedback, and always use a new output path:
 
 ```bash
 node "$SCRIPT" /absolute/path/to/page.html --async \
