@@ -18,6 +18,12 @@ Optional options:
 - `submitRequiresPersistence`: default true. A download-only host can set false so storage failure does not prevent exporting the in-memory comments. The failure remains visible.
 - `actions`: `{ label, run(api) }` toolbar actions. The engine flushes before invoking an action and displays errors.
 
+Comment records include `page_url` (the top page's path, query, and fragment)
+and `page_title`. Pins and text highlights appear only at the matching URL,
+including after single-page-app navigation. Ordinary section anchors therefore
+identify distinct annotation views. Older comments without `page_url` remain
+visible across views. Preserve these fields when storing or exporting comments.
+
 The returned API provides:
 
 - `getComments()`: a detached snapshot, including nonempty text in the current editor.
