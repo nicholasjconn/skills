@@ -70,3 +70,6 @@ The returned API provides:
 Suspend/resume is for a single mounted page. Reuse that instance for navigation
 within a single-page app; do not repeatedly create factories. The host owns
 navigation after completion and the exported-file format.
+
+The engine wraps `history.pushState`/`replaceState` and observes `popstate` and
+`hashchange`; routers must call the current methods for marker updates.

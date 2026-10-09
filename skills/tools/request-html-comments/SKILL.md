@@ -20,6 +20,12 @@ file review annotates only the selected HTML file; linked HTML files need
 separate reviews. Section links can hide existing comment markers without
 deleting saved comments.
 
+Comments support nested same-origin frames, including open shadow roots.
+Cross-origin, opaque-origin, and closed-shadow-root frames cannot be annotated.
+Frames with rotated, skewed, or 3D-transformed ancestry are unsupported. Warn
+the user when these limits affect their page; do not inspect or inject review
+controls into inaccessible frames.
+
 ## Launch
 
 Inspect live help, then choose a new output path in a temporary directory:
@@ -54,7 +60,8 @@ node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
 the separate local listener. Do not use Funnel, reset Serve, replace an existing
 route, or combine this mode with `--host` or direct TLS flags.
 
-Give the user the returned URL. Their other device must be connected to the
+The CLI verifies HTTPS before reporting the review ready. Give the user the
+returned URL. Their other device must be connected to the
 tailnet and permitted by its access rules. Tailnet peers with access can read
 the allowed file tree or use the proxied application's routes and WebSockets.
 The DNS hostname appears in public certificate logs; the content stays private.
@@ -64,8 +71,9 @@ this computer. Once `--tailscale` is selected, startup failures are fatal; do
 not silently switch to a local URL. Missing login, HTTPS enablement, or device
 enrollment is a setup prerequisite, not permission to perform that setup.
 
-Submit, cancel, or worker termination releases this review's Serve session.
-Existing logs, drafts, and submitted feedback remain available.
+Submit, cancel, the 12-hour safety timeout, or worker termination releases this
+review's Serve session. The timeout stops the review without submitting
+feedback. Existing logs, drafts, and submitted feedback remain available.
 
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback
 IPv4 address assigned to this machine. The server binds and advertises only that
@@ -76,8 +84,8 @@ the local app. Use this mode only with the user's authorization and an
 appropriately trusted network.
 
 Pages that need a secure context on the LAN (e.g. `Secure` cookies,
-`crypto.randomUUID`) can be reviewed over HTTPS: pass `--tls-cert PATH --tls-key
-PATH` (PEM files whose certificate names the review host, e.g.
+`crypto.randomUUID`) can be reviewed over HTTPS: pass `--tls-cert PATH` and
+`--tls-key PATH` (PEM files whose certificate names the review host, e.g.
 `subjectAltName=IP:<host>`). Use a certificate trusted by the reviewing device
 for reliable secure-context behavior. Keep the key outside a reviewed file's
 directory, which the review serves in full; the CLI rejects keys inside that
