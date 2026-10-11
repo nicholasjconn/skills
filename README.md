@@ -22,3 +22,11 @@ gh skill install nicholasjconn/skills tools/request-html-comments
 ## Tools
 
 - [`request-html-comments`](skills/tools/request-html-comments/): Collects element- and text-linked feedback on local HTML through an interactive browser overlay.
+
+## Instructions
+
+[`instructions/rules.md`](instructions/rules.md) and
+[`instructions/memory.md`](instructions/memory.md) are reusable Markdown
+instruction files covered by the root MIT license. Agent Layer imports them
+with `al instructions add` and explicit numeric order. They are separate from
+the skill directory catalog.
