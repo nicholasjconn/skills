@@ -72,6 +72,7 @@ async (page) => {
     window.finished = 0;
     window.api = createHtmlReview({
       submitRequiresPersistence: false,
+      requireSavedComment: false,
       saveDraft: () => { if (window.failSave) throw new Error('Disk full'); },
       onFinish: () => { window.finished++; },
     });
@@ -84,12 +85,14 @@ async (page) => {
   await page.waitForFunction(() => document.querySelector('.sr-layer').shadowRoot.querySelector('.steward-review-highlight'));
   if (!(await page.locator('.steward-review-pin').isVisible())) throw new Error('Fixture has no visible comment pin');
   if (!(await page.locator('.steward-review-highlight').first().isVisible())) throw new Error('Fixture has no visible text highlight');
+  await page.getByRole('button', {name: 'Open comment 1', exact: true}).click();
+  if (!(await page.getByRole('textbox', {name: 'Comment', exact: true}).isVisible())) throw new Error('Fixture has no open editor');
   await page.evaluate(() => window.api.addComment({id: 'pending', comment: 'Unsaved export'}));
   await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
   await page.waitForFunction(() => window.finished === 1);
   if (!(await page.locator('.sr-status').isVisible()) ||
       !(await page.locator('.sr-status').textContent()).includes('Disk full')) throw new Error('Completion hid the failed-save warning');
-  for (const selector of ['.sr-send', '.sr-cancel', '.steward-review-pin', '.steward-review-highlight']) {
+  for (const selector of ['.sr-send', '.sr-cancel', '.steward-review-pin', '.steward-review-highlight', '.steward-review-popup']) {
     if (await page.locator(selector).first().isVisible()) throw new Error('Completion left active review controls');
   }
   await page.evaluate(() => document.querySelector('.sr-layer').shadowRoot.querySelector('.sr-send').click());

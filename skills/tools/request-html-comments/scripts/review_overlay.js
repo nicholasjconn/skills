@@ -41,7 +41,7 @@ function createHtmlReview(options) {
 #steward-review-root .sr-status:empty { display: none; }
 :host(.sr-completed) #steward-review-root { visibility: hidden; }
 :host(.sr-completed) .sr-status { visibility: visible; }
-:host(.sr-completed) .steward-review-pin, :host(.sr-completed) .steward-review-highlight { display: none !important; }
+:host(.sr-completed) .steward-review-pin, :host(.sr-completed) .steward-review-highlight, :host(.sr-completed) .steward-review-popup { display: none !important; }
 .steward-review-pin { position: absolute; z-index: 2147483645; display: grid; width: 31px; height: 31px; cursor: pointer; place-items: center; padding: 0; color: #172554; background: #facc15; border: 2px solid #172554; border-radius: 9px; box-shadow: 0 6px 18px rgba(23,37,84,.28); transform: translate(-50%,-50%); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; font: 800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 .steward-review-pin[hidden] { display: none !important; }
 .steward-review-pin.sr-enter { animation: steward-review-pin-in .22s cubic-bezier(.2,.8,.2,1.2); }
