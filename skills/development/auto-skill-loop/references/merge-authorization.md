@@ -1,5 +1,8 @@
 # Merge Authorization
 
+Check that the user's supplied standing authorization and limits allow this
+exact PR/head. Process readiness alone does not grant permission.
+
 Verify that `/ship-pr` completed for the exact PR and head: all PR feedback is
 fully addressed, and current evidence shows the PR meets its merge-readiness
 requirements. Do not inspect the selected work or final diff; this is a process
@@ -22,5 +25,5 @@ repository policy. A missing or incomplete ledger is not authorized.
 If `/ship-pr`'s `references/repo-specific-pr-policy.md` exists, read it and
 verify that all of its requirements are also met.
 
-State concisely whether the exact PR and head are authorized for merge. If not
-authorized, give the reason.
+State concisely whether the exact PR and head are authorized for merge. If not,
+give the reason and identify any missing review replies or ledger entries.
