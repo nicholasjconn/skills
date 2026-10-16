@@ -42,7 +42,9 @@ Check:
 - contradictions, renamed concepts, and drift across in-scope documents
 - templates or examples that disagree with their canonical source
 
-Mark statically indeterminate claims unverified. Ignore style, fix supported
+List statically indeterminate claims separately, with their location, missing
+evidence, and smallest verification step; do not count them as defects.
+Ignore style, fix supported
 inaccuracies, and leave code gaps or unresolved intent unchanged. Do not log the
 audit to memory.
 
@@ -52,6 +54,7 @@ Write a concise summary with:
 2. `## Fixes Applied`
 3. `## Code Gaps`
 4. `## Decisions Needed`
+5. `## Unverified Claims`
 
 Findings include severity, location, evidence, impact, outcome (`fixed`,
 `code-gap`, or `needs-user-decision`), and type (`command`, `path`, `config`,
