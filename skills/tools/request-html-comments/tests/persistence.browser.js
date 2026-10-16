@@ -99,6 +99,28 @@ async (page) => {
   if (await page.locator('.sr-status').textContent()) throw new Error('Retry retained the completion warning');
   await page.evaluate(() => window.api.resume());
   if (!(await page.getByRole('button', {name: 'Send review comments', exact: true}).isVisible())) throw new Error('Resume left the toolbar hidden');
+  // Removing the hosting modal must not detach a failed-save warning.
+  await page.goto('about:blank');
+  await page.setContent('<dialog>Reviewing</dialog>');
+  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
+  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+  await page.evaluate(() => {
+    const modal = document.querySelector('dialog');
+    modal.showModal();
+    window.modalFinished = false;
+    window.api = createHtmlReview({
+      submitRequiresPersistence: false,
+      saveDraft: () => { throw new Error('Modal storage full'); },
+      onFinish: () => { modal.remove(); window.modalFinished = true; },
+    });
+    window.api.addComment({id: 'modal', comment: 'Keep modal feedback'});
+  });
+  await page.waitForFunction(() => document.querySelector('dialog .sr-layer'));
+  await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
+  await page.waitForFunction(() => window.modalFinished);
+  if (!(await page.locator('.sr-status').isVisible()) ||
+      !(await page.locator('.sr-status').textContent()).includes('Modal storage full')) throw new Error('Removing the modal detached the warning');
+
   // A host can replace the page during completion without observers restoring UI.
   await page.goto('about:blank');
   await page.setContent('<h1>Local completion</h1>');

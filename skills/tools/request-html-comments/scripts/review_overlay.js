@@ -1480,15 +1480,17 @@ function createHtmlReview(options) {
   const hideReview = (saveWarning = '') => {
     setMode('interact');
     closeInfo();
-    active = false;
     if (popup) hideAsPopover(popup);
     if (saveWarning) {
       overlayLayer.classList.add('sr-completed');
       status.textContent = saveWarning;
+      active = true;
+      syncOverlayHost();
     } else {
       hideAsPopover(overlayLayer);
       overlayLayer.style.setProperty('display', 'none', 'important');
     }
+    active = false;
   };
   const api = {
     getComments: () => structuredClone(recoverableComments()),
