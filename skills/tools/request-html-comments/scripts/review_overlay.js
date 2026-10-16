@@ -39,6 +39,9 @@ function createHtmlReview(options) {
 #steward-review-root .sr-separator { width: 1px; height: 22px; background: rgba(255,255,255,.16); }
 #steward-review-root .sr-status { position: absolute; top: calc(100% + 9px); left: 50%; width: max-content; max-width: min(360px, calc(100vw - 24px)); padding: 7px 11px; color: #f8fafc; background: rgba(15,23,42,.94); border: 1px solid rgba(255,255,255,.12); border-radius: 9px; box-shadow: 0 8px 24px rgba(15,23,42,.2); transform: translateX(-50%); animation: steward-review-status .14s ease-out; font-size: 12px; pointer-events: none; }
 #steward-review-root .sr-status:empty { display: none; }
+:host(.sr-completed) #steward-review-root { visibility: hidden; }
+:host(.sr-completed) .sr-status { visibility: visible; }
+:host(.sr-completed) .steward-review-pin, :host(.sr-completed) .steward-review-highlight, :host(.sr-completed) .steward-review-popup { display: none !important; }
 .steward-review-pin { position: absolute; z-index: 2147483645; display: grid; width: 31px; height: 31px; cursor: pointer; place-items: center; padding: 0; color: #172554; background: #facc15; border: 2px solid #172554; border-radius: 9px; box-shadow: 0 6px 18px rgba(23,37,84,.28); transform: translate(-50%,-50%); transition: background .14s ease, box-shadow .14s ease, transform .14s ease; font: 800 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
 .steward-review-pin[hidden] { display: none !important; }
 .steward-review-pin.sr-enter { animation: steward-review-pin-in .22s cubic-bezier(.2,.8,.2,1.2); }
@@ -1465,14 +1468,29 @@ function createHtmlReview(options) {
   });
 
   // Hosts own persistence and completion; the engine never navigates the page.
-  const flush = async () => { rememberOpenDraft(); await saveDraft(); };
-  const hideReview = () => {
+  const flush = async () => {
+    rememberOpenDraft();
+    try { await saveDraft(); }
+    catch (error) {
+      status.textContent = `Draft was not saved: ${error.message}`;
+      throw error;
+    }
+    if (/^(Could not save review draft:|Draft was not saved:)/.test(status.textContent)) status.textContent = '';
+  };
+  const hideReview = (saveWarning = '') => {
     setMode('interact');
     closeInfo();
-    active = false;
     if (popup) hideAsPopover(popup);
-    hideAsPopover(overlayLayer);
-    overlayLayer.style.setProperty('display', 'none', 'important');
+    if (saveWarning) {
+      overlayLayer.classList.add('sr-completed');
+      status.textContent = saveWarning;
+      active = true;
+      syncOverlayHost();
+    } else {
+      hideAsPopover(overlayLayer);
+      overlayLayer.style.setProperty('display', 'none', 'important');
+    }
+    active = false;
   };
   const api = {
     getComments: () => structuredClone(recoverableComments()),
@@ -1484,6 +1502,7 @@ function createHtmlReview(options) {
     resume() {
       if (finishing) throw new Error('Review completion is in progress');
       completed = false;
+      overlayLayer.classList.remove('sr-completed');
       overlayLayer.inert = false;
       active = true;
       overlayLayer.style.setProperty('display', 'block', 'important');
@@ -1529,19 +1548,27 @@ function createHtmlReview(options) {
     setMode('interact');
     closeInfo();
     overlayLayer.inert = true;
+    let saveWarning = '';
     try {
       try { await flush(); }
-      catch (error) {
-        if (action !== 'submit' || options.submitRequiresPersistence !== false) throw error;
-        status.textContent = `Draft was not saved: ${error.message}`;
+      catch {
+        if (action !== 'submit' || options.submitRequiresPersistence !== false) return;
+        saveWarning = status.textContent;
       }
+      const completionBody = document.body;
+      active = false;
       await options.onFinish(action, api);
+      if (document.body !== completionBody || (!pendingComments.size && !pendingDeletedIds.size)) saveWarning = '';
       completed = true;
-      hideReview();
-    } catch (error) { status.textContent = `Could not finish review: ${error.message}`; }
+      hideReview(saveWarning);
+    } catch (error) {
+      active = true;
+      syncOverlayHost();
+      status.textContent = `Could not finish review: ${error.message}`;
+    }
     finally {
       finishing = false;
-      overlayLayer.inert = completed;
+      overlayLayer.inert = completed && !saveWarning;
     }
   };
   window.addEventListener('pagehide', () => {
@@ -1572,7 +1599,9 @@ function createHtmlReview(options) {
     const button = document.createElement('button');
     button.textContent = action.label;
     button.addEventListener('click', async () => {
-      try { await flush(); await action.run(api); }
+      try { await flush(); }
+      catch { return; }
+      try { await action.run(api); }
       catch (error) { status.textContent = error.message; }
     });
     root.insertBefore(button, send);

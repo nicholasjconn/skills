@@ -101,6 +101,8 @@ test('private loopback proxy preserves API requests and WebSocket upgrades witho
 })
 
 function fakeTailscale(directory, configuration, wrapped = false) {
+  // The executable uses CommonJS regardless of the importing repo's module type.
+  writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'commonjs' }))
   const executable = join(directory, 'tailscale')
   writeFileSync(join(directory, 'configuration.json'), JSON.stringify(configuration))
   writeFileSync(executable, `#!${process.execPath}\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst dir = path.dirname(__filename);\nconst args = process.argv.slice(2);\nconst config = JSON.parse(fs.readFileSync(path.join(dir,'configuration.json')));\nif (args[0] === 'status') console.log(JSON.stringify(config.status));\nelse if(args[1] === 'status') console.log(JSON.stringify(config.serve));\nelse {\n if(config.failServe) { console.error('deliberate Serve failure'); process.exit(37) }\n fs.writeFileSync(path.join(dir,'started'), String(process.pid));\n if(config.resistInterrupt) process.on('SIGINT', () => {});\n setInterval(() => {}, 1000);\n}\n`, { mode: 0o755 })
