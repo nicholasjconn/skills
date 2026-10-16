@@ -30,3 +30,4 @@ jobs:
           for scenario in text-selection completion navigation; do
             playwright-cli -s=html-review-ci run-code --filename="skills/tools/request-html-comments/tests/$scenario.browser.js"
           done
+          playwright-cli -s=html-review-ci run-code --filename=skills/tools/request-html-comments/tests/persistence.browser.js
