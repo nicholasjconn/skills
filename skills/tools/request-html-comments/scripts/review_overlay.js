@@ -1555,8 +1555,10 @@ function createHtmlReview(options) {
         if (action !== 'submit' || options.submitRequiresPersistence !== false) return;
         saveWarning = status.textContent;
       }
+      const completionBody = document.body;
       active = false;
       await options.onFinish(action, api);
+      if (document.body !== completionBody || (!pendingComments.size && !pendingDeletedIds.size)) saveWarning = '';
       completed = true;
       hideReview(saveWarning);
     } catch (error) {

@@ -74,7 +74,10 @@ async (page) => {
       submitRequiresPersistence: false,
       requireSavedComment: false,
       saveDraft: () => { if (window.failSave) throw new Error('Disk full'); },
-      onFinish: () => { window.finished++; },
+      onFinish: async (action, api) => {
+        window.finished++;
+        if (window.retryDuringFinish) { window.failSave = false; await api.flush(); }
+      },
     });
   });
   await page.getByRole('button', {name: 'Comment on selected text', exact: true}).click();
@@ -102,6 +105,14 @@ async (page) => {
   if (await page.locator('.sr-status').textContent()) throw new Error('Retry retained the completion warning');
   await page.evaluate(() => window.api.resume());
   if (!(await page.getByRole('button', {name: 'Send review comments', exact: true}).isVisible())) throw new Error('Resume left the toolbar hidden');
+  await page.evaluate(() => {
+    window.failSave = window.retryDuringFinish = true;
+    window.api.addComment({id: 'finish-retry', comment: 'Saved by completion callback'});
+  });
+  await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
+  await page.waitForFunction(() => window.finished === 2);
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  if (await page.locator('.sr-status').textContent()) throw new Error('Completion restored a save warning after a successful retry');
   // Removing the hosting modal must not detach a failed-save warning.
   await page.goto('about:blank');
   await page.setContent('<dialog>Reviewing</dialog>');
@@ -124,25 +135,30 @@ async (page) => {
   if (!(await page.locator('.sr-status').isVisible()) ||
       !(await page.locator('.sr-status').textContent()).includes('Modal storage full')) throw new Error('Removing the modal detached the warning');
 
-  // A host can replace the page during completion without observers restoring UI.
-  await page.goto('about:blank');
-  await page.setContent('<h1>Local completion</h1>');
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
-  await page.evaluate(() => {
-    window.reattached = false;
-    window.api = createHtmlReview({
-      saveDraft: () => {},
-      onFinish: async () => {
-        document.documentElement.innerHTML = '<head><title>Finished</title></head><body><h1>Review submitted</h1></body>';
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        window.reattached = !!document.querySelector('.sr-layer');
-      },
-    });
-  });
-  await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
-  await page.waitForFunction(() => document.title === 'Finished');
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  if (await page.evaluate(() => window.reattached || !!document.querySelector('.sr-layer'))) throw new Error('Completion observers restored the overlay');
-  return 'PASS: save gates, retry status, callback errors, completion warnings, and page replacement';
+  // Page replacement leaves completion warnings to the host.
+  for (const failSave of [false, true]) {
+    await page.goto('about:blank');
+    await page.setContent('<h1>Local completion</h1>');
+    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
+    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+    await page.evaluate(failSave => {
+      window.reattached = false;
+      window.api = createHtmlReview({
+        submitRequiresPersistence: !failSave,
+        saveDraft: () => { if (failSave) throw new Error('Replacement storage full'); },
+        onFinish: async () => {
+          document.documentElement.innerHTML = '<head><title>Finished</title></head><body><h1>Review submitted</h1>' + (failSave ? '<p id="host-warning">Draft was not saved</p>' : '') + '</body>';
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          window.reattached = !!document.querySelector('.sr-layer');
+        },
+      });
+      window.api.addComment({id: 'replace', comment: 'Exported feedback'});
+    }, failSave);
+    await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
+    await page.waitForFunction(() => document.title === 'Finished');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    if (await page.evaluate(() => window.reattached || !!document.querySelector('.sr-layer'))) throw new Error('Completion observers restored the overlay');
+    if (failSave && !(await page.locator('#host-warning').isVisible())) throw new Error('Host completion warning is missing');
+  }
+  return 'PASS: save gates, retries, callback errors, completion warnings, modal removal, and page replacement';
 }
