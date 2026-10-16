@@ -20,7 +20,7 @@ whether to continue.
 Required:
 
 - a `mode` matching `references/modes/<mode>.md`
-- `merge_authorization`: standing authorization to merge under the gate below
+- `merge_authorization`: the user’s standing merge permission and any limits
 - `operator`, `planner`, one or more `plan_reviewers`, `implementer`, `code_reviewer`,
   `pr_worker`, and `rote_worker` dispatch targets
 
@@ -37,7 +37,8 @@ unnamed input from unstructured text or from another input.
 ## Rules
 
 - Use `/dispatch-agent` for every dispatch.
-- Append to every dispatch and continuation prompt: `Use unique scratch paths; preserve existing scratch.`
+- Append to every dispatch and continuation prompt:
+  `Use unique scratch paths; preserve existing scratch. Relay this to nested workers.`
 - Act as the orchestrator. Delegate all work.
 - Build each dispatch prompt from its specified template plus the scratch rule above.
 - When compacting, retain the original user inputs and this skill verbatim in
@@ -67,7 +68,8 @@ waiting for human input.
 <complete contents of references/modes/<mode>.md>
 <planner_context, if provided>
 
-Check local work and current open PRs; exclude work already underway.
+Check local branches/worktrees and current open PRs. Choose work outside their
+unfinished scope and use a clean branch/worktree.
 
 implementer: <implementer>
 plan_reviewers: <plan_reviewers>
@@ -108,8 +110,9 @@ request: <rote_worker merge-authorization request>
 
 4. If authorized, continue the worker from step 2 with the exact PR/head
 authorization. A changed head requires a fresh request and step 3 again.
-If denied solely for missing review replies or an incomplete ledger, let the
-same worker correct them once per PR, then repeat step 3. For any other refusal
+If denied solely for missing review replies or an incomplete ledger, continue
+that worker with the exact omissions for one correction per PR, then repeat
+step 3. For any other refusal
 or a second denial, have the worker preserve the PR and return to the primary
 branch without merging.
 

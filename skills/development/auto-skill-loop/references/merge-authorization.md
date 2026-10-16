@@ -1,7 +1,8 @@
 # Merge Authorization
 
-Check that the user's supplied standing authorization and limits allow this
-exact PR/head. Process readiness alone does not grant permission.
+Check that the supplied standing authorization allows this exact PR/head,
+including any limits in that grant. Process readiness alone does not grant
+permission.
 
 Verify that `/ship-pr` completed for the exact PR and head: all PR feedback is
 fully addressed, and current evidence shows the PR meets its merge-readiness
@@ -26,4 +27,5 @@ If `/ship-pr`'s `references/repo-specific-pr-policy.md` exists, read it and
 verify that all of its requirements are also met.
 
 State concisely whether the exact PR and head are authorized for merge. If not,
-give the reason and identify any missing review replies or ledger entries.
+give all reasons and identify any missing review replies or ledger entries.
+Say whether those omissions are the only reason for refusal.
