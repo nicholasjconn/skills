@@ -103,6 +103,7 @@ or a blocker. A progress report does not complete this handoff.
 ```text
 <operator_context, if provided>
 authorization: <merge_authorization>
+repository_policy: <contents of ship-pr's references/repo-specific-pr-policy.md, if present>
 request: <rote_worker merge-authorization request>
 ```
 
