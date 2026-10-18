@@ -59,7 +59,9 @@ Unless the user narrows the scope, include the entire current working tree.
    payloads file-backed to avoid process argument-size limits.
    On an interrupted final log write, the watcher preserves the original log
    at a unique sibling path reported on stderr and resumes from complete
-   records. Malformed earlier or newline-terminated records require inspection.
+   records only if at least one remains. A partial first record, malformed
+   earlier records, or newline-terminated records stop the watcher with an
+   error and leave the log unchanged for inspection.
 
 3. Fetch the current head, checks, and mergeability with `gh`. Read comments
    with this stateless command; never infer current state from the watcher log:
