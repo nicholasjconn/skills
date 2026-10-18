@@ -119,9 +119,9 @@ trap cleanup EXIT
 
 # A killed append can leave a partial final JSON line. Validate the preceding
 # history before recovering, and retain the original bytes as evidence.
-if ! jq empty "$log_file" 2>"$workdir/log-error"; then
+if ! jq -R 'fromjson | empty' "$log_file" 2>"$workdir/log-error"; then
   sed '$d' "$log_file" >"$workdir/log-prefix.jsonl"
-  if [[ -z "$(tail -c 1 "$log_file")" ]] || ! jq empty "$workdir/log-prefix.jsonl" 2>/dev/null; then
+  if [[ -z "$(tail -c 1 "$log_file")" ]] || ! jq -R 'fromjson | empty' "$workdir/log-prefix.jsonl" 2>/dev/null; then
     printf 'watch-pr-events: invalid log %s; refusing recovery of completed or interior records\n' "$log_file" >&2
     cat "$workdir/log-error" >&2
     exit 1

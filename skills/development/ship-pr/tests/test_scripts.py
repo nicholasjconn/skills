@@ -319,7 +319,9 @@ class ScriptTests(unittest.TestCase):
 
     def test_watcher_refuses_corrupt_completed_or_interior_log_records(self):
         first = {"createdAt": "2026-01-01T00:00:00Z", "headRefOid": "abc"}
-        for content in (b'{"state":\n', b'{"state":\n{"repo":'):
+        multiline = b'{"repo":"acme/widgets",\n"pr":7,"state":{}}\n'
+        for content in (b'{"state":\n', b'{"state":\n{"repo":',
+                        multiline, multiline + b'{"repo":'):
             with self.subTest(content=content):
                 log = self.root / "corrupt.jsonl"
                 log.write_bytes(content)
@@ -327,7 +329,7 @@ class ScriptTests(unittest.TestCase):
                     "watch-pr-events.sh", self.watcher(first, first),
                     *self.watch_args(log, "--exit-on-change", "--review-deadline-seconds", "600"),
                 )
-                self.assertNotEqual(result.returncode, 0)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn("invalid log", result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(log.read_bytes(), content)
