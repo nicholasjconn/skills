@@ -14,9 +14,10 @@ check for reviewer feedback, not a readiness verdict.
 
 The watcher runs until stopped, or exits after its first event when
 --exit-on-change is set. Use one watcher per log file.
-An invalid, unterminated final log line is recovered on startup; the original
-log is preserved as <path>.interrupted.<unique suffix>, reported on stderr.
-Malformed earlier records or newline-terminated records stop the watcher.
+An invalid, unterminated final log line is recovered only if complete records
+remain; the original log is preserved as <path>.interrupted.<unique suffix>,
+reported on stderr. A partial first record, malformed earlier records, or
+newline-terminated records stop the watcher with an error and leave the log unchanged.
 EOF
 }
 
@@ -124,6 +125,10 @@ if ! jq -nR 'inputs | fromjson | empty' "$log_file" 2>"$workdir/log-error"; then
   if [[ -z "$(tail -c 1 "$log_file")" ]] || ! jq -nR 'inputs | fromjson | empty' "$workdir/log-prefix.jsonl" 2>/dev/null; then
     printf 'watch-pr-events: invalid log %s; refusing recovery of completed or interior records\n' "$log_file" >&2
     cat "$workdir/log-error" >&2
+    exit 1
+  fi
+  if [[ ! -s "$workdir/log-prefix.jsonl" ]]; then
+    printf 'watch-pr-events: invalid log %s; no complete history record to recover from; original log unchanged\n' "$log_file" >&2
     exit 1
   fi
   saved_log="$(mktemp "${log_file}.interrupted.XXXXXX")"
