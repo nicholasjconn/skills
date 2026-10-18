@@ -320,8 +320,10 @@ class ScriptTests(unittest.TestCase):
     def test_watcher_refuses_corrupt_completed_or_interior_log_records(self):
         first = {"createdAt": "2026-01-01T00:00:00Z", "headRefOid": "abc"}
         multiline = b'{"repo":"acme/widgets",\n"pr":7,"state":{}}\n'
+        interior = multiline + b'{"repo":"acme/widgets","pr":7,"state":{}}\n'
         for content in (b'{"state":\n', b'{"state":\n{"repo":',
-                        multiline, multiline + b'{"repo":'):
+                        multiline, multiline + b'{"repo":',
+                        interior, interior + b'{"repo":'):
             with self.subTest(content=content):
                 log = self.root / "corrupt.jsonl"
                 log.write_bytes(content)
