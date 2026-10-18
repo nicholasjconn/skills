@@ -14,6 +14,9 @@ check for reviewer feedback, not a readiness verdict.
 
 The watcher runs until stopped, or exits after its first event when
 --exit-on-change is set. Use one watcher per log file.
+An invalid, unterminated final log line is recovered on startup; the original
+log is preserved as <path>.interrupted.<unique suffix>, reported on stderr.
+Malformed earlier records or newline-terminated records stop the watcher.
 EOF
 }
 
@@ -113,6 +116,30 @@ cleanup() {
 }
 trap stop_watcher INT TERM
 trap cleanup EXIT
+
+# A killed append can leave a partial final JSON line. Validate the preceding
+# history before recovering, and retain the original bytes as evidence.
+if ! jq -nR 'inputs | fromjson | empty' "$log_file" 2>"$workdir/log-error"; then
+  sed '$d' "$log_file" >"$workdir/log-prefix.jsonl"
+  if [[ -z "$(tail -c 1 "$log_file")" ]] || ! jq -nR 'inputs | fromjson | empty' "$workdir/log-prefix.jsonl" 2>/dev/null; then
+    printf 'watch-pr-events: invalid log %s; refusing recovery of completed or interior records\n' "$log_file" >&2
+    cat "$workdir/log-error" >&2
+    exit 1
+  fi
+  saved_log="$(mktemp "${log_file}.interrupted.XXXXXX")"
+  cp -p "$log_file" "$saved_log"
+  # Replace within the same directory so another interruption cannot truncate
+  # the valid prefix. Copy the permissions before writing the recovered log.
+  recovered_log="$(mktemp "${log_file}.recovered.XXXXXX")"
+  cp -p "$log_file" "$recovered_log"
+  cat "$workdir/log-prefix.jsonl" >"$recovered_log"
+  mv -f "$recovered_log" "$log_file"
+  printf 'watch-pr-events: recovered unterminated final log line; original log preserved at %s\n' "$saved_log" >&2
+fi
+# A complete JSON value can also lose only its terminating newline.
+if [[ -s "$log_file" && -n "$(tail -c 1 "$log_file")" ]]; then
+  printf '\n' >>"$log_file"
+fi
 
 fetch_state() {
   local dest="$1"

@@ -277,3 +277,61 @@ class ScriptTests(unittest.TestCase):
         event = self.watch_once(self.watcher(second, first), log, "--review-deadline-seconds", "600")
         self.assertEqual(event["reason"], "state-change")
         self.assertEqual(log.read_text().count("\n"), 3)
+
+    def test_watcher_recovers_interrupted_append_and_preserves_history(self):
+        first = {"createdAt": "2026-01-01T00:00:00Z", "headRefOid": "abc"}
+        second = dict(first, headRefOid="def")
+        third = dict(first, headRefOid="ghi")
+        for missing in (1, 100):
+            with self.subTest(missing=missing):
+                log = self.root / f"events-{missing}.jsonl"
+                self.watch_once(self.watcher(first, first), log, "--review-deadline-seconds", "600")
+                history = log.read_bytes()
+                self.watch_once(self.watcher(second, second), log, "--review-deadline-seconds", "600")
+                # Interrupt an actual CLI event, including the case where only
+                # the newline was lost, then restart against fresh GitHub state.
+                interrupted = log.read_bytes()[:-missing]
+                log.write_bytes(interrupted)
+                result = self.run_script(
+                    "watch-pr-events.sh", self.watcher(second, third),
+                    *self.watch_args(log, "--exit-on-change", "--review-deadline-seconds", "600"),
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                event = json.loads(result.stdout)
+                self.assertEqual(event["reason"], "state-change")
+                self.assertEqual(event["state"]["pull_request"]["headRefOid"], "ghi" if missing == 1 else "def")
+                archives = list(self.root.glob(log.name + ".interrupted.*"))
+                if missing == 1:
+                    self.assertEqual(archives, [])
+                    self.assertTrue(log.read_bytes().startswith(interrupted + b"\n"))
+                else:
+                    self.assertEqual(len(archives), 1)
+                    self.assertEqual(archives[0].read_bytes(), interrupted)
+                    self.assertIn(str(archives[0]), result.stderr)
+                    self.assertTrue(log.read_bytes().startswith(history))
+                    # The old deadline remains deduplicated after recovery.
+                    event = self.watch_once(self.watcher(second, third), log,
+                                            "--review-deadline-seconds", "600")
+                    self.assertEqual(event["state"]["pull_request"]["headRefOid"], "ghi")
+                events = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual([event["reason"] for event in events],
+                                 ["review-deadline", "state-change", "state-change"])
+
+    def test_watcher_refuses_corrupt_completed_or_interior_log_records(self):
+        first = {"createdAt": "2026-01-01T00:00:00Z", "headRefOid": "abc"}
+        multiline = b'{"repo":"acme/widgets",\n"pr":7,"state":{}}\n'
+        interior = multiline + b'{"repo":"acme/widgets","pr":7,"state":{}}\n'
+        for content in (b'{"state":\n', b'{"state":\n{"repo":',
+                        multiline, multiline + b'{"repo":',
+                        interior, interior + b'{"repo":'):
+            with self.subTest(content=content):
+                log = self.root / "corrupt.jsonl"
+                log.write_bytes(content)
+                result = self.run_script(
+                    "watch-pr-events.sh", self.watcher(first, first),
+                    *self.watch_args(log, "--exit-on-change", "--review-deadline-seconds", "600"),
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("invalid log", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(log.read_bytes(), content)
