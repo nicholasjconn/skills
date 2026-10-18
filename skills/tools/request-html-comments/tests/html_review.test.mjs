@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { connect } from 'node:net'
 import { networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
@@ -286,6 +286,9 @@ test('async no-open forwards explicit launch controls to the worker', async t =>
   }
   const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
   assert.ok(ready, 'worker log should report the review URL')
+  const readiness = readdirSync(directory).filter(name => /^\.html-review-.*\.ready$/.test(name))
+  assert.equal(readiness.length, 1, 'async readiness evidence must remain available')
+  assert.equal(readFileSync(join(directory, readiness[0]), 'utf8'), `${ready}\n`)
   assert.ok(launched.stdout.includes(`Review URL: ${ready}`), 'async no-open should print its review URL')
   const response = await fetch(ready)
   assert.equal(response.status, 200)
@@ -518,7 +521,7 @@ test('comment deletion is idempotent and the worker ignores browser lifecycle', 
     initialComments: [],
     overlayScript: OVERLAY_SCRIPT,
     log: () => {},
-    safetyTimeoutMs: 30,
+    safetyTimeoutMs: 5000,
   })
   t.after(() => review.close())
   const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
@@ -670,7 +673,7 @@ test('served-page review proxies HTML and assets while removing blocking CSP', a
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-Dest': 'document',
     },
-  }), 403)
+  }), 404)
   const rejectedHandshake = await websocketHandshake(Number(reviewUrl.port), '/socket', 'https://example.com')
   assert.match(rejectedHandshake, /^HTTP\/1\.1 403 Forbidden/)
   assert.equal(await rawHttpStatus(Number(reviewUrl.port), '127.0.0.1', `localhost:${reviewUrl.port}`), 403)
@@ -928,3 +931,295 @@ test('local adapter persists patches and reports HTTP failures before completion
   context.fetch = async () => ({ ok: false, text: async () => 'Disk full' });
   await assert.rejects(options.saveDraft({ comments: [], deleted_ids: [] }), /Disk full/);
 });
+
+test('served reviews accept external document returns across app paths and queries while controls and fetches stay same-origin', async t => {
+  const reached = []
+  const upstream = createServer((request, response) => {
+    reached.push(`${request.method} ${request.url}`)
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end('<html><body><h1>Returned app page</h1></body></html>')
+  })
+  const upstreamPort = await listen(upstream)
+  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
+  const review = await createReviewServer({
+    source: parseSource(`http://127.0.0.1:${upstreamPort}/sign-in`),
+    draftOutput: null, initialComments: [], overlayScript: OVERLAY_SCRIPT, log: () => {},
+  })
+  t.after(() => review.close())
+  const url = new URL(review.reviewUrl)
+  const navigation = { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }
+  for (const [method, path] of [
+    ['GET', '/account?__clerk_handshake=synthetic-handshake'],
+    ['HEAD', '/account?__clerk_handshake=synthetic-handshake'],
+    ['GET', '/sign-in/sso-callback?code=synthetic-code'],
+    ['GET', '/sign-up/sso-callback?code=synthetic-code'],
+    ['GET', '/sign-in?return_to=%2Faccount'],
+    ['GET', '/other-provider/return?state=synthetic-state'],
+  ]) {
+    const before = reached.length
+    assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, { method, path, headers: navigation }), 200, `${method} ${path}`)
+    assert.deepEqual(reached.slice(before), [`${method} ${path}`])
+  }
+  const blocked = [
+    { path: '/account?__clerk_handshake=synthetic-handshake', headers: { 'Sec-Fetch-Site': 'cross-site' } },
+    { path: '/account', headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' } },
+    { path: '/account', headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate' } },
+    { path: '/account', headers: { ...navigation, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' } },
+    { path: '/api/account', headers: { ...navigation, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' } },
+    { path: '/account', headers: { ...navigation, 'Sec-Fetch-Dest': 'iframe' } },
+    { path: '/account', headers: { ...navigation, 'Sec-Fetch-Dest': 'frame' } },
+    { path: '/account', method: 'PUT', headers: navigation },
+    { path: review.endpoint, headers: navigation },
+    { path: '/api/account', method: 'POST', headers: navigation },
+    { path: '/account', method: 'POST', headers: navigation },
+    ...['ready', 'draft', 'submit', 'cancel'].flatMap(action => [
+      { path: `${review.endpoint}/${action}`, headers: navigation },
+      { path: `${review.endpoint}/${action}`, method: 'POST', headers: navigation },
+    ]),
+  ]
+  const beforeBlocked = reached.length
+  for (const request of blocked) {
+    assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, request), 403, `${request.method || 'GET'} ${request.path}`)
+  }
+  assert.equal(reached.length, beforeBlocked, 'blocked requests must not reach the app')
+  const origin = url.origin
+  const ready = await fetch(new URL(`${review.endpoint}/ready`, url), { headers: { origin, 'sec-fetch-site': 'same-origin' } })
+  assert.equal(ready.status, 200)
+  assert.equal(await ready.text(), review.endpoint)
+  await fetch(new URL(`${review.endpoint}/cancel`, url), {
+    method: 'POST', headers: { origin, 'sec-fetch-site': 'same-origin' }, body: '{}',
+  })
+  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
+})
+
+test('file reviews retain exact-entry cross-site navigation isolation', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'review.html')
+  writeFileSync(html, '<h1>Reviewed file</h1>')
+  writeFileSync(join(directory, 'other.html'), '<h1>Other file</h1>')
+  const review = await createReviewServer({
+    source: parseSource(html), draftOutput: null, initialComments: [], overlayScript: OVERLAY_SCRIPT, log: () => {},
+  })
+  t.after(() => review.close())
+  const url = new URL(review.reviewUrl)
+  const headers = { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }
+  const status = path => rawHttpStatus(Number(url.port), url.hostname, url.host, { path, headers })
+  assert.equal(await status(url.pathname), 200)
+  assert.equal(await status(`${url.pathname}?changed=1`), 403)
+  assert.equal(await status('/other.html'), 403)
+  assert.equal(await status(`${review.endpoint}/ready`), 403)
+  for (const metadata of [
+    {}, { 'Sec-Fetch-Mode': 'navigate' }, { 'Sec-Fetch-Dest': 'document' },
+    { 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' },
+    { 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' },
+  ]) {
+    assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, {
+      path: url.pathname, headers: { 'Sec-Fetch-Site': 'cross-site', ...metadata },
+    }), 403)
+  }
+})
+
+test('IPv6 loopback reviews advertise a bracketed authority and proxy the page', async t => {
+  const upstream = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html' })
+    response.end('<html><body>IPv6 review</body></html>')
+  })
+  try {
+    await new Promise((resolve, reject) => {
+      upstream.once('error', reject)
+      upstream.listen(0, '::1', resolve)
+    })
+  } catch (error) {
+    if (['EADDRNOTAVAIL', 'EAFNOSUPPORT'].includes(error.code)) return t.skip('IPv6 loopback unavailable')
+    throw error
+  }
+  t.after(() => new Promise(resolve => upstream.close(resolve)))
+  const review = await createReviewServer({
+    source: parseSource(`http://[::1]:${upstream.address().port}/app?q=1`),
+    draftOutput: null, initialComments: [], overlayScript: OVERLAY_SCRIPT, log: () => {},
+  })
+  t.after(() => review.close())
+  assert.match(review.reviewUrl, /^http:\/\/\[::1\]:\d+\/app\?q=1$/)
+  assert.match(await (await fetch(review.reviewUrl)).text(), /IPv6 review/)
+  assert.equal(await rawHttpStatus(review.localPort, '::1', `[::1]:${review.localPort}`, {
+    method: 'POST', path: `${review.endpoint}/cancel`,
+    headers: { Origin: new URL(review.reviewUrl).origin }, body: '{}',
+  }), 200)
+  assert.equal((await review.completion).action, 'cancel')
+})
+
+test('geometry retains CommonJS exports for Node helper consumers', () => {
+  const nodeModule = { exports: {} }
+  new Function('module', GEOMETRY_SCRIPT)(nodeModule)
+  assert.deepEqual(nodeModule.exports.intersectRects(
+    { left: 0, top: 0, right: 10, bottom: 10 },
+    { left: 5, top: 5, right: 20, bottom: 20 },
+  ), { left: 5, top: 5, right: 10, bottom: 10, width: 5, height: 5 })
+})
+
+test('completion rejects POSTs that finish uploading after submit, cancel or timeout', async t => {
+  for (const completedBy of ['submit', 'cancel', 'timeout']) {
+    await t.test(completedBy, async t => {
+      const directory = temporaryDirectory(t)
+      const html = join(directory, 'page.html')
+      const draft = join(directory, 'feedback.draft.json')
+      const comments = [{ id: 'saved', comment: 'Original feedback' }]
+      writeFileSync(html, '<h1>Review</h1>')
+      writeFileSync(draft, JSON.stringify({ comments }))
+      const originalDraft = readFileSync(draft, 'utf8')
+      const review = await createReviewServer({
+        source: parseSource(html), draftOutput: draft, initialComments: comments,
+        overlayScript: OVERLAY_SCRIPT, safetyTimeoutMs: 5000, log: () => {},
+      })
+      t.after(() => review.close())
+      const body = JSON.stringify({ comments: [{ id: 'late', comment: 'Rejected feedback' }] })
+      const pending = []
+      for (const action of ['draft', 'submit', 'cancel']) {
+        const request = httpRequest(new URL(`${review.endpoint}/${action}`, review.reviewUrl), {
+          method: 'POST', headers: { Expect: '100-continue', 'Content-Length': Buffer.byteLength(body) },
+        })
+        t.after(() => request.destroy())
+        const result = new Promise((resolve, reject) => {
+          request.once('error', reject)
+          request.once('response', response => {
+            let text = ''
+            response.setEncoding('utf8')
+            response.on('data', chunk => { text += chunk })
+            response.once('end', () => resolve({ status: response.statusCode, text }))
+          })
+        })
+        // Receiving 100 Continue proves the server has accepted the headers;
+        // leave the body unfinished until another request ends the review.
+        await new Promise((resolve, reject) => {
+          request.once('continue', resolve)
+          request.once('error', reject)
+          request.flushHeaders()
+        })
+        pending.push({ request, result })
+      }
+      if (completedBy !== 'timeout') {
+        const response = await fetch(new URL(`${review.endpoint}/${completedBy}`, review.reviewUrl), { method: 'POST', body: '{}' })
+        assert.equal(response.status, 200)
+      }
+      const outcome = await review.completion
+      assert.deepEqual(outcome, { action: completedBy, comments: completedBy === 'submit' ? comments : [] })
+      for (const { request, result } of pending) {
+        request.end(body)
+        const response = await result
+        assert.equal(response.status, 409)
+        assert.match(response.text, /review has ended/)
+      }
+      for (const action of ['draft', 'submit', 'cancel']) {
+        const response = await fetch(new URL(`${review.endpoint}/${action}`, review.reviewUrl), { method: 'POST', body })
+        assert.equal(response.status, 409)
+      }
+      assert.equal(readFileSync(draft, 'utf8'), originalDraft)
+      assert.deepEqual(await review.completion, outcome)
+    })
+  }
+})
+
+test('foreground review CLI saves submission but fails incomplete cleanup, preserving cancellation and primary failure', { timeout: 30_000 }, async () => {
+  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+  for (const [action, expected, forwardingFails, listenerFails] of [
+    ['submit', 0, false, false], ['submit', 1, true, false],
+    ['submit', 1, false, true], ['submit', 1, true, true],
+    ['cancel', 2, true, true], ['failure', 1, true, true],
+  ]) {
+    const cleanupFails = forwardingFails || listenerFails
+    const directory = mkdtempSync(join(tmpdir(), 'review-cleanup-outcome-'))
+    const html = join(directory, 'page.html')
+    const output = join(directory, 'feedback.json')
+    const hook = join(directory, 'fixture-hook.mjs')
+    writeFileSync(html, '<html><body><h1>Fixture</h1></body></html>')
+    // Replace only the external forwarding boundary, leaving the CLI, real
+    // HTTP listener, persistence and cleanup sequencing under test.
+    const forwarding = `export async function prepareTailscaleServe() { return { port: 9443, origin: 'https://review.fixture:9443' } }
+export async function startTailscaleServe() { return {
+  failed: ${action === 'failure' ? "new Promise(resolve => setTimeout(() => resolve(new Error('original forwarding failure')), 30))" : 'new Promise(() => {})'},
+  close() { ${forwardingFails ? "throw new Error('forwarding cleanup unconfirmed')" : 'return undefined'} }
+} }`
+    // Report a listener error only after its real close callback runs. Neither
+    // boundary suppresses real server/forwarding cleanup inside the CLI.
+    const listener = `import { createServer as originalCreateServer } from 'node:http';
+export { request } from 'node:http';
+export function createServer(...args) {
+  const server = originalCreateServer(...args);
+  const close = server.close.bind(server);
+  server.close = callback => close(error => callback(error || new Error('listener cleanup unconfirmed')));
+  return server;
+}`
+    writeFileSync(hook, `import { registerHooks } from 'node:module'; registerHooks({ resolve(specifier, context, next) {
+      if (specifier.endsWith('/tailscale_serve.mjs')) return { url: ${JSON.stringify('data:text/javascript,' + encodeURIComponent(forwarding))}, shortCircuit: true };
+      if (${listenerFails} && specifier === 'node:http' && context.parentURL?.endsWith('/html_review.mjs')) return { url: ${JSON.stringify('data:text/javascript,' + encodeURIComponent(listener))}, shortCircuit: true };
+      return next(specifier, context);
+    } });`)
+    const child = spawn(process.execPath, ['--import', hook, script, html, '--tailscale', '--no-open', '--output', output], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    const closed = new Promise(resolve => child.once('close', code => resolve(code)))
+    const bound = setTimeout(() => child.kill('SIGKILL'), 10_000)
+    let port
+    try {
+      const deadline = Date.now() + 5000
+      while (!port && Date.now() < deadline) {
+        try {
+          const log = readFileSync(join(directory, 'feedback.log'), 'utf8')
+          const ready = log.split('\n').find(line => line.includes('Review server ready'))
+          if (ready) port = JSON.parse(ready.slice(ready.indexOf('{'))).port
+        } catch (error) { if (error.code !== 'ENOENT') throw error }
+        if (!port) await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.ok(port, 'the foreground CLI must start its real listener')
+      if (action !== 'failure') {
+        const call = (path, method = 'GET', payload = {}) => new Promise((resolve, reject) => {
+          const headers = { host: 'review.fixture:9443', origin: 'https://review.fixture:9443', connection: 'close' }
+          const invocation = httpRequest({ hostname: '127.0.0.1', port, path, method, headers }, response => {
+            let body = ''
+            response.setEncoding('utf8')
+            response.on('data', chunk => { body += chunk })
+            response.on('end', () => resolve({ status: response.statusCode, body }))
+          })
+          invocation.setTimeout(2000, () => invocation.destroy(new Error('fixture request timed out')))
+          invocation.once('error', reject)
+          invocation.end(method === 'POST' ? JSON.stringify(payload) : undefined)
+        })
+        const page = await call('/page.html')
+        assert.equal(page.status, 200)
+        const endpoint = /const endpoint\s*=\s*"([^"]+)"/.exec(page.body)?.[1]
+        assert.ok(endpoint)
+        assert.equal((await call(`${endpoint}/draft`, 'POST', {
+          comments: [{ id: 'kept', comment: 'Feedback survives cleanup' }],
+        })).status, 200)
+        const response = await call(`${endpoint}/${action}`, 'POST')
+        assert.equal(response.status, 200)
+      }
+      assert.equal(await closed, expected, stderr)
+      const log = readFileSync(join(directory, 'feedback.log'), 'utf8')
+      if (cleanupFails) {
+        assert.match(log, /ERROR Review cleanup failed/)
+        assert.match(log, /"event":"review_cleanup_failed"/)
+        assert.match(log, new RegExp(`"review_exit_code":${action === 'submit' ? 0 : expected}`))
+        assert.match(log, new RegExp(`"exit_code":${expected}`))
+        if (forwardingFails) assert.match(stderr, /forwarding cleanup unconfirmed/)
+        if (listenerFails) assert.match(stderr, /listener cleanup unconfirmed/)
+        if (action === 'submit') {
+          assert.match(stderr, /Feedback was saved, but cleanup is incomplete/)
+          assert.match(log, /"feedback_saved":true/)
+        }
+      } else assert.doesNotMatch(log, /review_cleanup_failed/)
+      if (!listenerFails) assert.match(log, /Review server stopped/)
+      if (action === 'submit') {
+        assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')).comments, [{ id: 'kept', comment: 'Feedback survives cleanup' }])
+        assert.match(stdout, /Feedback survives cleanup/)
+      }
+      if (action === 'failure') assert.match(stderr, /original forwarding failure/)
+      await assert.rejects(fetch(`http://127.0.0.1:${port}/page.html`, { signal: AbortSignal.timeout(1000) }))
+    } finally {
+      clearTimeout(bound)
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      await closed
+    }
+  }
+})

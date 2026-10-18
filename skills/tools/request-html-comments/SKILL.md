@@ -18,7 +18,10 @@ APIs and WebSockets.
 Loopback-served reviews can span multiple pages within the application. A local
 file review annotates only the selected HTML file; linked HTML files need
 separate reviews. Section links can hide existing comment markers without
-deleting saved comments.
+deleting saved comments. External OAuth/session-refresh returns may land on
+other served-app paths or queries only as explicit top-level browser document
+navigations; review controls, fetches, frames, writes, and WebSockets retain
+their origin restrictions.
 
 Comments support nested same-origin frames, including open shadow roots.
 Cross-origin, opaque-origin, and closed-shadow-root frames cannot be annotated.
@@ -74,6 +77,9 @@ enrollment is a setup prerequisite, not permission to perform that setup.
 Submit, cancel, the 12-hour safety timeout, or worker termination releases this
 review's Serve session. The timeout stops the review without submitting
 feedback. Existing logs, drafts, and submitted feedback remain available.
+Cleanup failures are reported separately: saved feedback survives, submission exits
+with failure if cleanup is incomplete, and cancellation/error outcomes remain
+authoritative.
 
 For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback
 IPv4 address assigned to this machine. The server binds and advertises only that
@@ -106,6 +112,7 @@ For `result.json`, record:
 - `result.json`: submitted feedback, created only after **Send**
 - `result.draft.json`: autosaved recovery state
 - `result.log`: worker diagnostics
+- `.html-review-<random>.ready`: retained async startup URL handshake
 
 Then end the turn while the user reviews. Do not poll or keep the worker
 attached; the user must send another chat message.

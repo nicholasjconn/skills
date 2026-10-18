@@ -319,10 +319,32 @@ function createHtmlReview(options) {
     }
   };
   shieldReviewUi(root);
+  // SVG line/path bounds omit the stroke. A painted horizontal or vertical
+  // segment can therefore have a zero-area DOM rect despite being clickable.
+  // Give its degenerate axis a stroke-sized annotation box, shared by hit
+  // eligibility, saved anchors, and pin repositioning (including iframe clips).
+  const annotationRect = (node) => {
+    const rect = node.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return rect;
+    if (node.namespaceURI !== 'http://www.w3.org/2000/svg'
+        || typeof node.getScreenCTM !== 'function'
+        || (rect.width === 0 && rect.height === 0)) return rect;
+    const style = ownerWindowOf(node).getComputedStyle(node);
+    const stroke = Number.parseFloat(style.strokeWidth);
+    if (style.stroke === 'none' || !(stroke > 0)) return rect;
+    const matrix = node.getScreenCTM();
+    if (!matrix) return rect;
+    const fixedStroke = style.vectorEffect === 'non-scaling-stroke';
+    const width = rect.width || Math.max(1, stroke * (fixedStroke ? 1 : Math.hypot(matrix.a, matrix.c)));
+    const height = rect.height || Math.max(1, stroke * (fixedStroke ? 1 : Math.hypot(matrix.b, matrix.d)));
+    const left = rect.left - (width - rect.width) / 2;
+    const top = rect.top - (height - rect.height) / 2;
+    return { x: left, y: top, left, top, width, height, right: left + width, bottom: top + height };
+  };
   const visible = (node) => {
     if (!isElement(node) || isOverlay(node)) return false;
     const style = ownerWindowOf(node).getComputedStyle(node);
-    const rect = node.getBoundingClientRect();
+    const rect = annotationRect(node);
     return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
   };
   // `showModal()` sets neither role nor aria-modal, so native dialogs need
@@ -605,7 +627,7 @@ function createHtmlReview(options) {
     return '/' + parts.join('/');
   };
   const elementReference = (node) => {
-    const rect = node.getBoundingClientRect();
+    const rect = annotationRect(node);
     return {
       ...selectorReference(node),
       id: node.id || null,
@@ -956,7 +978,7 @@ function createHtmlReview(options) {
       if (!target) return fallbackAnchor();
       const geometry = frameGeometryFor(target);
       if (!geometry || (geometry.frame && !geometry.clip)) return hideCommentAnchor(item);
-      const rect = target.getBoundingClientRect();
+      const rect = annotationRect(target);
       const visibleRect = mapRectToTop(rect, geometry);
       if (!visibleRect) return geometry.frame ? hideCommentAnchor(item) : renderedAnchors.get(item.id) || fallbackAnchor();
       const clientX = rect.left + rect.width * item.anchor_ratio.x;
@@ -1170,7 +1192,7 @@ function createHtmlReview(options) {
       return;
     }
     const element = elementReference(target);
-    const rect = target.getBoundingClientRect();
+    const rect = annotationRect(target);
     const anchorRatio = {
       x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
       y: clamp((event.clientY - rect.top) / rect.height, 0, 1)
@@ -1489,8 +1511,8 @@ function createHtmlReview(options) {
     } else {
       hideAsPopover(overlayLayer);
       overlayLayer.style.setProperty('display', 'none', 'important');
+      active = false;
     }
-    active = false;
   };
   const api = {
     getComments: () => structuredClone(recoverableComments()),

@@ -14,7 +14,6 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -62,7 +61,8 @@ function upstreamHostname(hostname) {
 }
 
 function httpAuthority(hostname, port, protocol) {
-  return Number(port) === (protocol === 'https' ? 443 : 80) ? hostname : `${hostname}:${port}`
+  const authorityHostname = isIP(hostname) === 6 ? `[${hostname}]` : hostname
+  return Number(port) === (protocol === 'https' ? 443 : 80) ? authorityHostname : `${authorityHostname}:${port}`
 }
 
 export function validateReviewHost(host, interfaces = networkInterfaces()) {
@@ -207,13 +207,18 @@ function topLevelDocumentNavigationRequest(request) {
   if (!['GET', 'HEAD'].includes(request.method)) return false
   const mode = String(request.headers['sec-fetch-mode'] || '').toLowerCase()
   const destination = String(request.headers['sec-fetch-dest'] || '').toLowerCase()
-  return (!mode || mode === 'navigate') && (!destination || destination === 'document')
+  return mode === 'navigate' && destination === 'document'
 }
 
-function crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch) {
-  return topLevelDocumentNavigationRequest(request)
-    && requested.pathname === reviewPath
-    && requested.search === reviewSearch
+function crossSiteReviewNavigationAllowed(request, requested, source, reviewPath, reviewSearch, endpoint) {
+  // Controls never accept external navigation, including GET /ready.
+  if (requested.pathname === endpoint || requested.pathname.startsWith(`${endpoint}/`)) return false
+  if (!topLevelDocumentNavigationRequest(request)) return false
+  // Served apps can return from OAuth/session refresh on another path or query.
+  // File reviews retain the exact-entry exception; fetches, frames and writes
+  // still require the existing same-origin checks.
+  return source.type === 'url'
+    || (requested.pathname === reviewPath && requested.search === reviewSearch)
 }
 
 function sendText(response, status, message) {
@@ -424,7 +429,7 @@ export async function createReviewServer({
       sendText(response, 403, 'Review host not allowed')
       return
     }
-    if (!sameOriginRequest(request, expectedOrigin) && !crossSiteReviewNavigationAllowed(request, requested, reviewPath, reviewSearch)) {
+    if (!sameOriginRequest(request, expectedOrigin) && !crossSiteReviewNavigationAllowed(request, requested, source, reviewPath, reviewSearch, endpoint)) {
       sendText(response, 403, 'Same-origin access only')
       return
     }
@@ -437,6 +442,11 @@ export async function createReviewServer({
       let payload = {}
       try {
         const content = await readRequestBody(request)
+        // Completion may occur while this request is still uploading.
+        if (settled) {
+          sendText(response, 409, 'This review has ended. Ask for a new review to send more comments.')
+          return
+        }
         payload = content ? JSON.parse(content) : {}
         if (action === 'draft') {
           saveDraft(payload)
@@ -539,14 +549,14 @@ export async function createReviewServer({
       if (closing) return closing
       closing = (async () => {
         if (safetyTimer) clearTimeout(safetyTimer)
-        const closed = new Promise(resolveClose => server.close(() => resolveClose()))
+        const closed = new Promise((resolveClose, rejectClose) => server.close(error => error ? rejectClose(error) : resolveClose()))
         for (const resource of activeResources) resource.destroy()
         const forceCloseTimer = setTimeout(() => {
           for (const socket of serverConnections) socket.destroy()
         }, FORCE_CLOSE_GRACE_MS)
         forceCloseTimer.unref()
-        await closed
-        clearTimeout(forceCloseTimer)
+        try { await closed }
+        finally { clearTimeout(forceCloseTimer) }
         log('info', 'Review server stopped')
       })()
       return closing
@@ -554,8 +564,8 @@ export async function createReviewServer({
   }
 }
 
-// Async mode uses a short-lived ready file only as a launch handshake; durable
-// state lives in the result, draft, and log companions.
+// Async readiness files remain available for startup diagnostics alongside
+// result, draft, and log companions. Each launch uses a new random filename.
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const SCRIPT_DIRECTORY = dirname(SCRIPT_PATH)
 const GEOMETRY_SCRIPT = readFileSync(resolve(SCRIPT_DIRECTORY, 'review_geometry.js'), 'utf8')
@@ -734,6 +744,7 @@ async function runReview(args) {
   const log = createLogger(logOutput)
   let server
   let serve
+  let outcome = 1
   try {
     const initialComments = loadRestoredComments(args.restore_comments, args.source)
     if (initialComments.length) log('info', 'Restored comments', { path: args.restore_comments, comments: initialComments.length })
@@ -769,27 +780,54 @@ async function runReview(args) {
     if (result.action !== 'submit') {
       log('info', 'Review completed without submission', { action: result.action })
       process.stderr.write('Review cancelled.\n')
-      return 2
+      outcome = 2
+    } else {
+      const payload = {
+        version: 2,
+        source: sourceIdentity(args.source),
+        submitted_at: new Date().toISOString(),
+        comments: result.comments,
+      }
+      if (output) writeJsonAtomic(output, payload)
+      log('info', 'Wrote submitted feedback', { output, comments: result.comments.length })
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+      outcome = 0
     }
-    const payload = {
-      version: 2,
-      source: sourceIdentity(args.source),
-      submitted_at: new Date().toISOString(),
-      comments: result.comments,
-    }
-    if (output) writeJsonAtomic(output, payload)
-    log('info', 'Wrote submitted feedback', { output, comments: result.comments.length })
-    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
-    return 0
   } catch (error) {
     log('error', 'Review failed', { error: error.message, stack: error.stack })
     process.stderr.write(`${error.message}\n`)
-    return 1
+    outcome = 1
   } finally {
-    try { if (serve) await serve.close() }
-    catch (error) { log('error', 'Review cleanup failed', { error: error.message }); throw error }
-    finally { if (server) await server.close() }
+    // Stop accepting requests while releasing forwarding, including when
+    // either cleanup fails. Do not leave the listener open waiting for Serve.
+    const stopped = await Promise.allSettled([
+      Promise.resolve().then(() => serve?.close()),
+      Promise.resolve().then(() => server?.close()),
+    ])
+    const failures = stopped.filter(result => result.status === 'rejected').map(result => result.reason)
+    if (failures.length) {
+      const primaryOutcome = outcome
+      if (outcome === 0) outcome = 1
+      process.stderr.write(primaryOutcome === 0
+        ? 'Feedback was saved, but cleanup is incomplete. Confirm the listener and forwarding session stopped.\n'
+        : 'Review cleanup is incomplete. Confirm the listener and forwarding session stopped; the primary outcome is retained.\n')
+      const details = {
+        level: 'error',
+        event: 'review_cleanup_failed',
+        review_exit_code: primaryOutcome,
+        exit_code: outcome,
+        feedback_saved: primaryOutcome === 0,
+        error: failures.map(failure => failure?.message || 'Unknown cleanup failure').join('; '),
+      }
+      try {
+        log('error', 'Review cleanup failed; confirm the listener and forwarding session stopped', details)
+      } catch (error) {
+        // Even a failed file logger must not replace cancellation/error outcomes.
+        process.stderr.write(`${JSON.stringify({ level: 'error', ...details, logging_error_name: error?.name || 'UnknownError' })}\n`)
+      }
+    }
   }
+  return outcome
 }
 
 async function launchAsync(args) {
@@ -820,7 +858,6 @@ async function launchAsync(args) {
   while (Date.now() < deadline) {
     if (existsSync(readyFile)) {
       const readyUrl = readFileSync(readyFile, 'utf8').trim()
-      rmSync(readyFile)
       emitTrustedLanWarning(log, args, readyUrl, { fileLog: false })
       log('info', args.no_open ? 'Review server started successfully' : 'Review opened successfully', { worker_pid: child.pid })
       if (args.no_open) console.log(`Review URL: ${readyUrl}`)
