@@ -86,37 +86,38 @@ Generated code captures actions but not assertions. Add expectations in your tes
 - `toBeChecked()` / `toBeChecked({ checked: false })` — checkbox state matches
 - `toMatchAriaSnapshot(snapshot)` — page (or locator) matches a partial accessibility snapshot
 
-Use `playwright-cli generate-locator <target>` to produce the locator expression for the assertion, and the snapshot/eval commands to capture the expected value.
+Use `playwright-cli generate-locator <target>` to produce the locator expression for the assertion. Derive expected values from intended behavior; use snapshot/eval commands to inspect actual values.
 
 When asserting text content, make sure that generated locator does not contain text from the element itself. `getByTestId()` or `getByLabel()` usually work well with asserting text. When locator is text-based, prefer `toBeVisible()` instead.
 
-Snapshot to be matched does not have to contain all the information - only capture what's necessary for the assertion. You can use regular expressions for unstable values.
+The expected snapshot does not have to contain all the information - include only what's necessary for the assertion. You can use regular expressions for unstable values.
 
 ```bash
+# Example refs: e5 Submit button, e6 heading, e7 Email textbox, e8 checkbox, e9 navigation
 # Get a stable locator for an element ref to use in the assertion
 playwright-cli --raw generate-locator e5
 # getByRole('button', { name: 'Submit' })
 
-# Capture expected text content for toHaveText
-playwright-cli --raw eval "el => el.textContent" e5
+# Inspect actual text content for toHaveText
+playwright-cli --raw eval "el => el.textContent" e6
 
-# Capture expected input value for toHaveValue/toBeEmpty
-playwright-cli --raw eval "el => el.value" e5
+# Inspect actual input value for toHaveValue/toBeEmpty
+playwright-cli --raw eval "el => el.value" e7
 
-# Capture expected checkbox state for toBeChecked
-playwright-cli --raw eval "el => el.checked" e5
+# Inspect actual checkbox state for toBeChecked
+playwright-cli --raw eval "el => el.checked" e8
 
-# Capture expected aria snapshot for toMatchAriaSnapshot
+# Inspect actual aria snapshot for toMatchAriaSnapshot
 # (whole page, or use a ref to scope to a region)
 playwright-cli --raw snapshot
-playwright-cli --raw snapshot e5
+playwright-cli --raw snapshot e9
 ```
 
 ```typescript
 // Generated action
 await page.getByRole('button', { name: 'Submit' }).click();
 
-// Manual assertions using the outputs above:
+// Assertions from intended behavior:
 await expect(page.getByRole('alert', { name: 'Success' })).toBeVisible();
 await expect(page.getByTestId('main-header')).toHaveText('Welcome, user');
 await expect(page.getByRole('textbox', { name: 'Email' })).toHaveValue('user@example.com');
