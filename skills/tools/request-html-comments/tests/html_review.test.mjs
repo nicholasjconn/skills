@@ -871,14 +871,19 @@ test('CLI requires the TLS certificate and key together', t => {
 })
 
 test('async TLS reviews forward the certificate to the worker', async t => {
-  const directory = temporaryDirectory(t)
+  const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
+  const output = join(directory, 'feedback.json')
+  t.after(async () => {
+    // The worker can still be logging after its cancel response. Stop it
+    // before removing its files rather than racing its final cleanup writes.
+    await cleanupAsyncReview(output)
+    rmSync(directory, { recursive: true, force: true })
+  })
   const tls = selfSignedCertificate(t, temporaryDirectory(t))
   if (!tls) return
   const html = join(directory, 'page.html')
-  const output = join(directory, 'feedback.json')
   const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
   writeFileSync(html, '<html><body>Async secure review</body></html>')
-  t.after(() => cleanupAsyncReview(output))
   const argv = [script, html, '--async', '--output', output, '--no-open', '--tls-cert', tls.certPath, '--tls-key', tls.keyPath]
   const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
   assert.equal(launched.status, 0, launched.stderr)
