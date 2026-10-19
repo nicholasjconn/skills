@@ -26,7 +26,7 @@ Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the
   `tvly --status` to verify readiness.
 - Treat installed CLI help as the source of truth for commands, arguments,
   flags, output modes, and defaults.
-- If `tvly` is missing, unauthenticated, or exits non-zero, stop and tell the user to install or authenticate the Tavily CLI.
+- On failure, stop and report the error. Recommend installation or login only when `tvly` is missing or unauthenticated.
 - Do not install Tavily from this skill. Do not run `curl | bash`, package managers, or login commands unless the user explicitly asks for setup help.
 - Do not use Tavily MCP or Fetch MCP as a fallback.
 - Do not use `tvly crawl` in the default Agent Layer workflow.
