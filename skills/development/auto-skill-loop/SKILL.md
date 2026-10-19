@@ -20,7 +20,7 @@ whether to continue.
 Required:
 
 - a `mode` matching `references/modes/<mode>.md`
-- `merge_authorization`: the user’s standing merge permission and any limits
+- `merge_authorization`: standing authorization to merge under the gate below
 - `operator`, `planner`, one or more `plan_reviewers`, `implementer`, `code_reviewer`,
   `pr_worker`, and `rote_worker` dispatch targets
 
@@ -37,17 +37,12 @@ unnamed input from unstructured text or from another input.
 ## Rules
 
 - Use `/dispatch-agent` for every dispatch.
-- Append to every dispatch and continuation prompt:
-  `Use unique scratch paths; preserve existing scratch. Relay this to nested workers.`
 - Act as the orchestrator. Delegate all work.
-- Build each dispatch prompt only from its specified text and inputs, plus the
-  scratch rule above.
+- Build each dispatch prompt only from its specified prompt template.
 - When compacting, retain the original user inputs and this skill verbatim in
   addition to what you would normally retain.
 
 ## Acting on the User's Behalf
-
-Route blockers through this operator flow.
 
 This loop must run without human intervention. Each iteration is intended to result
 in a merged PR. For each loop that requires human input, dispatch `operator` in
@@ -69,9 +64,6 @@ waiting for human input.
 <complete contents of references/modes/<mode>.md>
 <planner_context, if provided>
 
-Check local branches, worktrees, and open PRs. Choose work outside their
-unfinished scope and use a clean branch/worktree.
-
 implementer: <implementer>
 plan_reviewers: <plan_reviewers>
 code_reviewer: <code_reviewer>
@@ -83,7 +75,6 @@ This context will preserve the intended scope during later review.
 
 If `planner` is unable to find work to complete, repeat the dispatch one more
 time. If two invocations in a row cannot find work, exit and inform the user.
-A failed lookup or dispatch is a blocker, not a no-work result.
 
 2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
 
@@ -97,25 +88,19 @@ workflow:
 <implementation_input>
 ```
 
-Continue the same worker until it returns a complete merge-authorization request
-or a blocker. A progress report does not complete this handoff.
+Continue when it returns a merge-authorization request.
 
 3. Dispatch `operator` in a new session. Use the complete contents of
 `references/merge-authorization.md` as its prompt, then append:
 
 ```text
 <operator_context, if provided>
-authorization: <merge_authorization>
-repository_policy: <contents of ship-pr's references/repo-specific-pr-policy.md, or "none" if absent>
 request: <rote_worker merge-authorization request>
 ```
 
-4. If authorized, continue the worker from step 2 with the exact PR/head
-authorization. A changed head requires a fresh request and step 3 again.
-If refused solely for missing review replies or an incomplete request ledger,
-continue that worker with the exact omissions for one correction per PR, then
-repeat step 3. For any other refusal or a second denial, have the worker preserve
-the PR and return to the primary branch without merging.
+4. If authorized, continue the dispatch session from step 2 with the exact
+authorization. If not, continue the dispatch to preserve the PR and return to
+the primary branch without merging.
 
 5. Wait for the step 4 dispatch to finish merging and cleanup or preserving the
 PR and returning to the primary branch. After either outcome, immediately return
