@@ -192,12 +192,11 @@ When Nick asks to annotate or comment on a pending post, invoke the
 package, not on an attachment by itself. The page must show the exact pending
 text with its weighted count and readiness, every exported attachment as it
 would appear with the post, and a live HTML rendering for each HTML-backed
-image. Put the live rendering's elements and text directly in the review
-page's annotatable DOM; an iframe, object, canvas, source-code listing, or PNG
-alone does not satisfy this requirement. Preserve the attachment's exact
-markup and styling in that rendering. Before opening the review, verify that
-representative descendant elements and text are independently targetable
-through the overlay, not only the rendering's container.
+image. Preserve its exact markup and styling in inline DOM or a same-origin
+iframe with annotatable descendants. An object, canvas, source listing, PNG,
+or container-only preview is insufficient. Before opening the review, verify
+that representative descendant elements and text are independently targetable
+through the overlay.
 
 After applying actionable submitted comments, rebuild and revalidate the
 complete package, including text, weighted count, readiness, and rendered
