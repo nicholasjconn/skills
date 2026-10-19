@@ -39,12 +39,8 @@ Use `./steward x write` to create reviewable pending X drafts.
   retrieved reply target, and completed fact-check notes, including facts,
   examples, code, anecdotes, metrics, dates, personal stories, implementation
   details, or certainty.
-- Preserve Nick's stance, certainty, first-person framing, reasoning sequence,
-  and voice-bearing phrases. Do not turn exploration into a plan or commitment,
-  invert his causal story into a conclusion-first summary, or replace personal
-  reasoning with metric shorthand. Under length pressure, compress supporting
-  detail first; when an attachment carries the table or methodology, keep that
-  detail there rather than sacrificing the post's voice.
+- Preserve Nick's voice-bearing phrases unless clarity, length, factuality, or
+  professional-boundary risk requires a change.
 - Treat Nick's latest revision instructions as authoritative over stale
   reviewer preferences when the draft still preserves source facts, fact-check
   limits, and X validity.
@@ -80,11 +76,6 @@ how to handle it, and preserve it as supplied. Write it to a unique file under
 through `--input-file`; never interpolate raw source into a shell command. Pass
 Nick's shaping instructions through `--instructions`.
 
-When Nick supplies images intended for the post, copy the exact files into the
-run's `assets/` directory and retain their ordered relative paths. Do not alter,
-regenerate, substitute, or reorder them unless he asks. Show the images in each
-handoff; uploading still requires separate approval for the public write.
-
 ```bash
 ./steward x write create-run --content-type post --input-file <source-file>
 ./steward x write create-run --content-type post --long-form --input-file <source-file>
@@ -96,11 +87,6 @@ handoff; uploading still requires separate approval for the public write.
 Apply the target-alignment checkpoint. When stopping, show the run ID, context
 path, numbered targets, and fact-check status. If Nick edits the targets, update
 `post_targets` while preserving unique, stable target numbers.
-
-For personal or conversational source material, make the target preserve the
-source's stance and thought progression, not merely its topic and selected
-phrases. Record complete voice-bearing clauses or sentences in `source_phrases`
-when shorter fragments would let the draft change their meaning or cadence.
 
 Do not draft a target with unresolved `reference_dependencies`. For each, either
 resolve the exact referenced post into
@@ -147,18 +133,10 @@ through `--instructions`:
 ./steward x write upsert-draft <run_id> <target-number>
 ```
 
-After every upsert, restore the selected images in order in
-`pending_posts[].attachments` in `run_context.json`; upsert replaces that
-record.
-
-Carry the source's voice constraints into `--instructions` and check the draft
-against them before accepting readiness.
-
 Before moving to the next target or seeking approval, show Nick the exact
-pending text, weighted count, readiness status, ordered images, and context
-path. For long-form posts, also show the opening 280 weighted characters
-separately so he can judge the preview and tagging surface without mistaking it
-for the whole draft.
+pending text, weighted count, readiness status, and context path. For long-form
+posts, also show the opening 280 weighted characters separately so he can judge
+the preview and tagging surface without mistaking it for the whole draft.
 
 For instruction images, use the matching canonical renderer —
 `assets/instruction-image-template.html` for a single excerpt,
@@ -187,25 +165,6 @@ file is opened directly to capture the image, so only a sibling reference is
 reliable. The copy is a frozen snapshot alongside the exported image; do not
 edit it to restyle a published package.
 
-When Nick asks to annotate or comment on a pending post, invoke the
-`request-html-comments` skill on one local review page for the complete post
-package, not on an attachment by itself. The page must show the exact pending
-text with its weighted count and readiness, every exported attachment as it
-would appear with the post, and a live HTML rendering for each HTML-backed
-image. Put the live rendering's elements and text directly in the review
-page's annotatable DOM; an iframe, object, canvas, source-code listing, or PNG
-alone does not satisfy this requirement. Preserve the attachment's exact
-markup and styling in that rendering. Before opening the review, verify that
-representative descendant elements and text are independently targetable
-through the overlay, not only the rendering's container.
-
-After applying actionable submitted comments, rebuild and revalidate the
-complete package, including text, weighted count, readiness, and rendered
-images. Start a fresh `request-html-comments` invocation with a new output path
-so Nick can inspect each revised package, unless he explicitly ends the review
-loop or asks not to reopen it. Keep the review page temporary; comments are not
-exact-language approval or authorization for a public action.
-
 ### 5. Record language approval
 
 After Nick approves exact final language, save that text only in
@@ -214,11 +173,6 @@ approval time, and exact-approval session and transcript path in
 `x-posts/approved-posts.json`. Reuse the same post ID for approved revisions
 until publication. If exact language is not approved, leave the item pending and
 do not claim an approved-language comparison.
-
-Copy the approved images into the package's `assets/` directory, preserving the
-exact selected files and order. Record `attachments` in the approved package
-ledger as an ordered array of rendered files under `assets/`; array order is
-publication order. Do not list HTML/CSS or other image source files there.
 
 Then compare only the first proposed text, the final approved text, and Nick's
 language feedback — excluding planner targets, target edits, strategy, content
@@ -268,15 +222,10 @@ publication.
   state; approved text matches its durable package and ledger record.
 - Companion status matches its approval and file state, and any instruction
   image satisfies the renderer contract.
-- When HTML comments were requested, one review page contains the complete
-  post package, including exported attachments and annotatable live renderings
-  of HTML-backed images; representative descendants are independently
-  selectable, and each addressed comment round opens a fresh review unless
-  Nick ended the loop.
 
 ## Final handoff
 
 Return the run ID, context path, exact pending draft, weighted count, readiness
-status, ordered images, numbered targets, fact-check status, approval status,
-approved-language comparison when available, raw-input companion status for
-original posts, and remaining targets or blockers.
+status, numbered targets, fact-check status, approval status, approved-language
+comparison when available, raw-input companion status for original posts, and
+remaining targets or blockers.

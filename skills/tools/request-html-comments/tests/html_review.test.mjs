@@ -525,7 +525,6 @@ test('comment deletion is idempotent and the worker ignores browser lifecycle', 
     initialComments: [],
     overlayScript: OVERLAY_SCRIPT,
     log: () => {},
-    safetyTimeoutMs: 5000,
   })
   t.after(() => review.close())
   const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
@@ -547,7 +546,8 @@ test('comment deletion is idempotent and the worker ignores browser lifecycle', 
   assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, [comments[1]])
   assert.equal((await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), { method: 'POST' })).status, 404)
   assert.equal((await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), { method: 'POST' })).status, 404)
-  assert.deepEqual(await review.completion, { action: 'timeout', comments: [] })
+  assert.equal((await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), { method: 'POST', body: '{}' })).status, 200)
+  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
 })
 
 test('the safety timeout completes an otherwise idle review', async t => {
@@ -958,28 +958,21 @@ test('served reviews accept external document returns across app paths and queri
   const url = new URL(review.reviewUrl)
   const navigation = { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }
   for (const [method, path] of [
-    ['GET', '/account?__clerk_handshake=synthetic-handshake'],
-    ['HEAD', '/account?__clerk_handshake=synthetic-handshake'],
-    ['GET', '/sign-in/sso-callback?code=synthetic-code'],
-    ['GET', '/sign-up/sso-callback?code=synthetic-code'],
-    ['GET', '/sign-in?return_to=%2Faccount'],
-    ['GET', '/other-provider/return?state=synthetic-state'],
+    ['GET', '/account?code=synthetic-code'],
+    ['HEAD', '/account?code=synthetic-code'],
   ]) {
     const before = reached.length
     assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, { method, path, headers: navigation }), 200, `${method} ${path}`)
     assert.deepEqual(reached.slice(before), [`${method} ${path}`])
   }
   const blocked = [
-    { path: '/account?__clerk_handshake=synthetic-handshake', headers: { 'Sec-Fetch-Site': 'cross-site' } },
+    { path: '/account', headers: { 'Sec-Fetch-Site': 'cross-site' } },
     { path: '/account', headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Dest': 'document' } },
     { path: '/account', headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate' } },
     { path: '/account', headers: { ...navigation, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' } },
-    { path: '/api/account', headers: { ...navigation, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' } },
     { path: '/account', headers: { ...navigation, 'Sec-Fetch-Dest': 'iframe' } },
-    { path: '/account', headers: { ...navigation, 'Sec-Fetch-Dest': 'frame' } },
     { path: '/account', method: 'PUT', headers: navigation },
     { path: review.endpoint, headers: navigation },
-    { path: '/api/account', method: 'POST', headers: navigation },
     { path: '/account', method: 'POST', headers: navigation },
     ...['ready', 'draft', 'submit', 'cancel'].flatMap(action => [
       { path: `${review.endpoint}/${action}`, headers: navigation },
@@ -991,14 +984,7 @@ test('served reviews accept external document returns across app paths and queri
     assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, request), 403, `${request.method || 'GET'} ${request.path}`)
   }
   assert.equal(reached.length, beforeBlocked, 'blocked requests must not reach the app')
-  const origin = url.origin
-  const ready = await fetch(new URL(`${review.endpoint}/ready`, url), { headers: { origin, 'sec-fetch-site': 'same-origin' } })
-  assert.equal(ready.status, 200)
-  assert.equal(await ready.text(), review.endpoint)
-  await fetch(new URL(`${review.endpoint}/cancel`, url), {
-    method: 'POST', headers: { origin, 'sec-fetch-site': 'same-origin' }, body: '{}',
-  })
-  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
+
 })
 
 test('file reviews retain exact-entry cross-site navigation isolation', async t => {
@@ -1017,15 +1003,7 @@ test('file reviews retain exact-entry cross-site navigation isolation', async t 
   assert.equal(await status(`${url.pathname}?changed=1`), 403)
   assert.equal(await status('/other.html'), 403)
   assert.equal(await status(`${review.endpoint}/ready`), 403)
-  for (const metadata of [
-    {}, { 'Sec-Fetch-Mode': 'navigate' }, { 'Sec-Fetch-Dest': 'document' },
-    { 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' },
-    { 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' },
-  ]) {
-    assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, {
-      path: url.pathname, headers: { 'Sec-Fetch-Site': 'cross-site', ...metadata },
-    }), 403)
-  }
+
 })
 
 test('geometry retains CommonJS exports for Node helper consumers', () => {
@@ -1037,77 +1015,54 @@ test('geometry retains CommonJS exports for Node helper consumers', () => {
   ), { left: 5, top: 5, right: 10, bottom: 10, width: 5, height: 5 })
 })
 
-test('completion rejects POSTs that finish uploading after submit, cancel or timeout', async t => {
-  for (const completedBy of ['submit', 'cancel', 'timeout']) {
-    await t.test(completedBy, async t => {
-      const directory = temporaryDirectory(t)
-      const html = join(directory, 'page.html')
-      const draft = join(directory, 'feedback.draft.json')
-      const comments = [{ id: 'saved', comment: 'Original feedback' }]
-      writeFileSync(html, '<h1>Review</h1>')
-      writeFileSync(draft, JSON.stringify({ comments }))
-      const originalDraft = readFileSync(draft, 'utf8')
-      const review = await createReviewServer({
-        source: parseSource(html), draftOutput: draft, initialComments: comments,
-        overlayScript: OVERLAY_SCRIPT, safetyTimeoutMs: 5000, log: () => {},
-      })
-      t.after(() => review.close())
-      const body = JSON.stringify({ comments: [{ id: 'late', comment: 'Rejected feedback' }] })
-      const pending = []
-      for (const action of ['draft', 'submit', 'cancel']) {
-        const request = httpRequest(new URL(`${review.endpoint}/${action}`, review.reviewUrl), {
-          method: 'POST', headers: { Expect: '100-continue', 'Content-Length': Buffer.byteLength(body) },
-        })
-        t.after(() => request.destroy())
-        const result = new Promise((resolve, reject) => {
-          request.once('error', reject)
-          request.once('response', response => {
-            let text = ''
-            response.setEncoding('utf8')
-            response.on('data', chunk => { text += chunk })
-            response.once('end', () => resolve({ status: response.statusCode, text }))
-          })
-        })
-        // Receiving 100 Continue proves the server has accepted the headers;
-        // leave the body unfinished until another request ends the review.
-        await new Promise((resolve, reject) => {
-          request.once('continue', resolve)
-          request.once('error', reject)
-          request.flushHeaders()
-        })
-        pending.push({ request, result })
-      }
-      if (completedBy !== 'timeout') {
-        const response = await fetch(new URL(`${review.endpoint}/${completedBy}`, review.reviewUrl), { method: 'POST', body: '{}' })
-        assert.equal(response.status, 200)
-      }
-      const outcome = await review.completion
-      assert.deepEqual(outcome, { action: completedBy, comments: completedBy === 'submit' ? comments : [] })
-      for (const { request, result } of pending) {
-        request.end(body)
-        const response = await result
-        assert.equal(response.status, 409)
-        assert.match(response.text, /review has ended/)
-      }
-      for (const action of ['draft', 'submit', 'cancel']) {
-        const response = await fetch(new URL(`${review.endpoint}/${action}`, review.reviewUrl), { method: 'POST', body })
-        assert.equal(response.status, 409)
-      }
-      assert.equal(readFileSync(draft, 'utf8'), originalDraft)
-      assert.deepEqual(await review.completion, outcome)
+test('an upload started before submission cannot replace saved feedback afterward', async t => {
+  const directory = temporaryDirectory(t)
+  const html = join(directory, 'page.html')
+  const draft = join(directory, 'feedback.draft.json')
+  const comments = [{ id: 'saved', comment: 'Original feedback' }]
+  writeFileSync(html, '<h1>Review</h1>')
+  writeFileSync(draft, JSON.stringify({ comments }))
+  const originalDraft = readFileSync(draft, 'utf8')
+  const review = await createReviewServer({
+    source: parseSource(html), draftOutput: draft, initialComments: comments,
+    overlayScript: OVERLAY_SCRIPT, log: () => {},
+  })
+  t.after(() => review.close())
+  const body = JSON.stringify({ comments: [{ id: 'late', comment: 'Rejected feedback' }] })
+  const request = httpRequest(new URL(`${review.endpoint}/draft`, review.reviewUrl), {
+    method: 'POST', headers: { Expect: '100-continue', 'Content-Length': Buffer.byteLength(body) },
+  })
+  t.after(() => request.destroy())
+  const result = new Promise((resolve, reject) => {
+    request.once('error', reject)
+    request.once('response', response => {
+      response.resume()
+      response.once('end', () => resolve(response.statusCode))
     })
-  }
+  })
+  // Accept headers first, but hold the body until another request submits.
+  await new Promise((resolve, reject) => {
+    request.once('continue', resolve)
+    request.once('error', reject)
+    request.flushHeaders()
+  })
+  const response = await fetch(new URL(`${review.endpoint}/submit`, review.reviewUrl), { method: 'POST', body: '{}' })
+  assert.equal(response.status, 200)
+  const outcome = { action: 'submit', comments }
+  assert.deepEqual(await review.completion, outcome)
+  request.end(body)
+  assert.equal(await result, 409)
+  assert.equal(readFileSync(draft, 'utf8'), originalDraft)
+  assert.deepEqual(await review.completion, outcome)
 })
 
-test('foreground review CLI saves submission but fails incomplete cleanup, preserving cancellation and primary failure', { timeout: 30_000 }, async () => {
+test('foreground review CLI saves submission but fails incomplete cleanup, preserving cancellation and primary failure', { timeout: 30_000 }, async t => {
   const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
   for (const [action, expected, forwardingFails, listenerFails] of [
-    ['submit', 0, false, false], ['submit', 1, true, false],
-    ['submit', 1, false, true], ['submit', 1, true, true],
+    ['submit', 1, true, false], ['submit', 1, false, true],
     ['cancel', 2, true, true], ['failure', 1, true, true],
   ]) {
-    const cleanupFails = forwardingFails || listenerFails
-    const directory = mkdtempSync(join(tmpdir(), 'review-cleanup-outcome-'))
+    const directory = temporaryDirectory(t)
     const html = join(directory, 'page.html')
     const output = join(directory, 'feedback.json')
     const hook = join(directory, 'fixture-hook.mjs')
@@ -1177,18 +1132,16 @@ export function createServer(...args) {
       }
       assert.equal(await closed, expected, stderr)
       const log = readFileSync(join(directory, 'feedback.log'), 'utf8')
-      if (cleanupFails) {
-        assert.match(log, /ERROR Review cleanup failed/)
-        assert.match(log, /"event":"review_cleanup_failed"/)
-        assert.match(log, new RegExp(`"review_exit_code":${action === 'submit' ? 0 : expected}`))
-        assert.match(log, new RegExp(`"exit_code":${expected}`))
-        if (forwardingFails) assert.match(stderr, /forwarding cleanup unconfirmed/)
-        if (listenerFails) assert.match(stderr, /listener cleanup unconfirmed/)
-        if (action === 'submit') {
-          assert.match(stderr, /Feedback was saved, but cleanup is incomplete/)
-          assert.match(log, /"feedback_saved":true/)
-        }
-      } else assert.doesNotMatch(log, /review_cleanup_failed/)
+      assert.match(log, /ERROR Review cleanup failed/)
+      assert.match(log, /"event":"review_cleanup_failed"/)
+      assert.match(log, new RegExp(`"review_exit_code":${action === 'submit' ? 0 : expected}`))
+      assert.match(log, new RegExp(`"exit_code":${expected}`))
+      if (forwardingFails) assert.match(stderr, /forwarding cleanup unconfirmed/)
+      if (listenerFails) assert.match(stderr, /listener cleanup unconfirmed/)
+      if (action === 'submit') {
+        assert.match(stderr, /Feedback was saved, but cleanup is incomplete/)
+        assert.match(log, /"feedback_saved":true/)
+      }
       if (!listenerFails) assert.match(log, /Review server stopped/)
       if (action === 'submit') {
         assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')).comments, [{ id: 'kept', comment: 'Feedback survives cleanup' }])

@@ -10,18 +10,15 @@ license: MIT
 
 # Request HTML Comments
 
-Collect comments on an existing `.html`/`.htm` file or an already-running
-`http://` loopback page. File reviews may load assets only from the file's
-directory tree. Served-page reviews proxy the chosen loopback origin, including
-APIs and WebSockets.
+Review an existing `.html`/`.htm` file or running `http://` loopback app.
+File reviews annotate one HTML file and load assets only within its directory
+tree; linked HTML files need separate reviews. App reviews proxy the chosen
+origin, including APIs and WebSockets, and can span its pages. Section links
+can hide comment markers without deleting saved comments.
 
-Loopback-served reviews can span multiple pages within the application. A local
-file review annotates only the selected HTML file; linked HTML files need
-separate reviews. Section links can hide existing comment markers without
-deleting saved comments. External OAuth/session-refresh returns may land on
-other served-app paths or queries only as explicit top-level browser document
-navigations; review controls, fetches, frames, writes, and WebSockets retain
-their origin restrictions.
+External OAuth/session-refresh returns may reach other app paths or queries
+only through explicit top-level document navigation. Controls, fetches, frames,
+writes, and WebSockets retain their origin restrictions.
 
 Comments support nested same-origin frames, including open shadow roots.
 Cross-origin, opaque-origin, and closed-shadow-root frames cannot be annotated.
@@ -46,60 +43,14 @@ Use `--no-open` for automation-only validation and `--port PORT` when the URL
 must retain a specific available port. Bind failures are fatal rather than
 silently selecting another port.
 
-### Private HTTPS with Tailscale
+For another device or a trusted HTTPS context, read
+[networking](references/networking.md) before choosing Tailscale, LAN binding,
+or direct TLS. The server has no authentication; LAN exposure requires the
+user's authorization and a trusted network.
 
-For review from another tailnet device or a trusted HTTPS context, prefer
-Tailscale Serve when installed, connected, and HTTPS is enabled for the tailnet.
-On Linux, this mode requires normal kernel networking; userspace-only Tailscale
-networking does not provide the local listener needed for HTTPS verification.
-Add `--tailscale` to the normal launch on Linux or macOS:
-
-```bash
-node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
-  --output /absolute/path/to/result.json
-```
-
-`--tailscale-port PORT` requests a specific unused HTTPS port; `--port` controls
-the separate local listener. Do not use Funnel, reset Serve, replace an existing
-route, or combine this mode with `--host` or direct TLS flags.
-
-The CLI verifies HTTPS before reporting the review ready. Give the user the
-returned URL. Their other device must be connected to the
-tailnet and permitted by its access rules. Tailnet peers with access can read
-the allowed file tree or use the proxied application's routes and WebSockets.
-The DNS hostname appears in public certificate logs; the content stays private.
-
-If Tailscale is unavailable, report that the normal loopback URL works only on
-this computer. Once `--tailscale` is selected, startup failures are fatal; do
-not silently switch to a local URL. Missing login, HTTPS enablement, or device
-enrollment is a setup prerequisite, not permission to perform that setup.
-
-Submit, cancel, the 12-hour safety timeout, or worker termination releases this
-review's Serve session. The timeout stops the review without submitting
-feedback. Existing logs, drafts, and submitted feedback remain available.
-Cleanup failures are reported separately: saved feedback survives, submission exits
-with failure if cleanup is incomplete, and cancellation/error outcomes remain
-authoritative.
-
-For a trusted-LAN review, `--host IPV4` accepts only an active, non-loopback
-IPv4 address assigned to this machine. The server binds and advertises only that
-address, never `0.0.0.0`. The review server has no authentication: any LAN peer
-that reaches that interface can access the entire allowed file tree or, for
-loopback URL sources, proxy arbitrary routes, methods, bodies, and WebSockets to
-the local app. Use this mode only with the user's authorization and an
-appropriately trusted network.
-
-Pages that need a secure context on the LAN (e.g. `Secure` cookies,
-`crypto.randomUUID`) can be reviewed over HTTPS: pass `--tls-cert PATH` and
-`--tls-key PATH` (PEM files whose certificate names the review host, e.g.
-`subjectAltName=IP:<host>`). Use a certificate trusted by the reviewing device
-for reliable secure-context behavior. Keep the key outside a reviewed file's
-directory, which the review serves in full; the CLI rejects keys inside that
-tree, including symlinked paths.
-
-Without `--restore-comments`, each invocation starts with zero comments. Use
-this flag only when the user explicitly asks to recover an interrupted review,
-never to preload submitted feedback, and always use a new output path:
+Each launch starts empty. Use `--restore-comments` only for explicitly requested
+interrupted-review recovery, never to preload submitted feedback. Choose a new
+output path:
 
 ```bash
 node "$SCRIPT" /absolute/path/to/page.html --async \
@@ -114,18 +65,23 @@ For `result.json`, record:
 - `result.log`: worker diagnostics
 - `.html-review-<random>.ready`: retained async startup URL handshake
 
+Submit, cancel, the 12-hour safety timeout, or worker termination stops the
+review and releases its forwarding session. Timeout does not submit feedback.
+Logs, drafts, and submitted feedback remain available. Cleanup failures are
+reported separately: saved feedback survives, successful submission exits with
+failure, and cancellation/error outcomes are retained.
+
 Then end the turn while the user reviews. Do not poll or keep the worker
 attached; the user must send another chat message.
 
 ## Validation and recovery
 
-Before a complex transformed, adopted, iframe-based, or dynamically rendered
-surface is handed to the user, perform representative browser validation through
-the injected overlay. Confirm nested descendants can be targeted and that a
-temporary comment records the intended selector and iframe path. Run that check
-with `--no-open`, cancel it, close the automation browser, and open exactly one
-fresh user-facing review with a new output path. Simpler static pages do not
-require an elaborate smoke run.
+For complex transformed, adopted, iframe-based, or dynamic surfaces, validate
+representative targets through the overlay before handoff. With `--no-open`,
+check that a temporary comment records the intended nested target and iframe
+path. Cancel that review, close the automation browser, then open one fresh
+user-facing review with a new output path. Simple static pages need no elaborate
+smoke run.
 
 On the next user message:
 
@@ -140,7 +96,6 @@ Address submitted comments after returning them.
 ## Definition of done
 
 - The advertised review URL loads the intended document with its overlay.
-- In Tailscale mode, HTTPS verification succeeds and the listener is loopback.
 - Submitted feedback preserves comment targets and iframe paths in the output.
 - Review completion stops its own forwarding session and preserves other routes.
 
