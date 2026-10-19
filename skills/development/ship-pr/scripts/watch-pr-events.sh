@@ -28,25 +28,37 @@ interval_seconds="60"
 review_deadline_seconds=""
 exit_on_change="false"
 
+require_value() {
+  if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* || "${2:-}" == -h ]]; then
+    printf 'watch-pr-events: %s requires a value\n' "$1" >&2
+    exit 2
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo)
+      require_value "$@"
       repo="${2:-}"
       shift 2
       ;;
     --pr)
+      require_value "$@"
       pr_number="${2:-}"
       shift 2
       ;;
     --log-file)
+      require_value "$@"
       log_file="${2:-}"
       shift 2
       ;;
     --interval-seconds)
+      require_value "$@"
       interval_seconds="${2:-}"
       shift 2
       ;;
     --review-deadline-seconds)
+      require_value "$@"
       review_deadline_seconds="${2:-}"
       if [[ ! "$review_deadline_seconds" =~ ^[1-9][0-9]*$ ]]; then
         printf 'watch-pr-events: --review-deadline-seconds must be a positive integer\n' >&2

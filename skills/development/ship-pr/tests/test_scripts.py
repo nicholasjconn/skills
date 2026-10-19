@@ -187,6 +187,18 @@ class ScriptTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_watcher_missing_option_values_fail_before_creating_artifacts(self):
+        for option in ("--repo", "--pr", "--log-file", "--interval-seconds", "--review-deadline-seconds"):
+            for suffix in ([], [""], ["--exit-on-change"], ["--help"], ["-h"]):
+                with self.subTest(option=option, suffix=suffix):
+                    log = self.root / "uncreated.jsonl"
+                    args = ["--repo", "o/n", "--pr", "1", "--log-file", str(log), option, *suffix]
+                    result = self.run_script("watch-pr-events.sh", self.environment(), *args)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn(f"{option} requires a value", result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertFalse(log.exists())
+
     def snapshots(self, padding=""):
         common = {"mergeable": "MERGEABLE", "comments": [{"body": padding}] if padding else [],
                   "reviews": [], "statusCheckRollup": []}
