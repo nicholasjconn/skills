@@ -46,3 +46,9 @@ Pages that need a secure context on the LAN (e.g. `Secure` cookies,
 for reliable secure-context behavior. Keep the key outside a reviewed file's
 directory, which the review serves in full; the CLI rejects keys inside that
 tree, including symlinked paths.
+
+## External sign-in returns
+
+External OAuth/session-refresh returns may reach other app paths or queries
+only through explicit top-level document navigation. Controls, fetches, frames,
+writes, and WebSockets retain their origin restrictions.

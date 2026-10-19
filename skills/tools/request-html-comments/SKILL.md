@@ -16,10 +16,6 @@ tree; linked HTML files need separate reviews. App reviews proxy the chosen
 origin, including APIs and WebSockets, and can span its pages. Section links
 can hide comment markers without deleting saved comments.
 
-External OAuth/session-refresh returns may reach other app paths or queries
-only through explicit top-level document navigation. Controls, fetches, frames,
-writes, and WebSockets retain their origin restrictions.
-
 Comments support nested same-origin frames, including open shadow roots.
 Cross-origin, opaque-origin, and closed-shadow-root frames cannot be annotated.
 Frames with rotated, skewed, or 3D-transformed ancestry are unsupported. Warn
@@ -43,20 +39,13 @@ Use `--no-open` for automation-only validation and `--port PORT` when the URL
 must retain a specific available port. Bind failures are fatal rather than
 silently selecting another port.
 
-For another device or a trusted HTTPS context, read
-[networking](references/networking.md) before choosing Tailscale, LAN binding,
-or direct TLS. The server has no authentication; LAN exposure requires the
-user's authorization and a trusted network.
+For another device, a trusted HTTPS context, or external sign-in returns, read
+[networking](references/networking.md). The server has no authentication; LAN
+exposure requires the user's authorization and a trusted network.
 
 Each launch starts empty. Use `--restore-comments` only for explicitly requested
-interrupted-review recovery, never to preload submitted feedback. Choose a new
-output path:
-
-```bash
-node "$SCRIPT" /absolute/path/to/page.html --async \
-  --output /absolute/path/to/new-result.json \
-  --restore-comments /absolute/path/to/prior-result.draft.json
-```
+[interrupted-review recovery](references/validation-and-recovery.md#recovery),
+never to preload submitted feedback.
 
 For `result.json`, record:
 
@@ -71,17 +60,15 @@ Logs, drafts, and submitted feedback remain available. Cleanup failures are
 reported separately. Saved feedback survives; submission exits nonzero if
 cleanup is incomplete. Cancellation/error outcomes are retained.
 
+Launch directly unless the user requests validation or an observed or known
+targeting problem needs investigation. Iframes or dynamic content alone do not
+require a separate validation review. When needed, read
+[validation](references/validation-and-recovery.md#validation).
+
 Then end the turn while the user reviews. Do not poll or keep the worker
 attached; the user must send another chat message.
 
-## Validation and recovery
-
-For complex transformed, adopted, iframe-based, or dynamic surfaces, validate
-representative targets through the overlay before handoff. With `--no-open`,
-check that a temporary comment records the intended nested target and iframe
-path. Cancel that review, close the automation browser, then open one fresh
-user-facing review with a new output path. Simple static pages need no elaborate
-smoke run.
+## Feedback
 
 On the next user message:
 
