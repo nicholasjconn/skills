@@ -23,7 +23,7 @@ Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the
 - Do not use Tavily MCP or Fetch MCP as a fallback.
 - Do not use `tvly crawl` in the default Agent Layer workflow.
 - When saving output or scratch data, write under `.agent-layer/tmp/`.
-- Before using non-obvious flags, run `tvly <command> --help` or `tvly research <subcommand> --help`; do not rely on memorized CLI syntax.
+- Run command-specific help if flags matter: `tvly <command> --help` or `tvly research <subcommand> --help`.
 
 ## Required artifacts
 
