@@ -147,25 +147,12 @@ through `--instructions`:
 ./steward x write upsert-draft <run_id> <target-number>
 ```
 
-After **every** upsert, restore the target's ordered `attachments` paths in
-`run_context.json` under `pending_posts[].attachments`. Upsert replaces the
-pending-post object rather than preserving extra metadata. Pending-post
-validation allows extra metadata such as `attachments`, but does not restore it
-for you. Restore it for revisions as well as the first draft, using the exact
-selected files and their order from step 1.
+After every upsert, restore the selected images in order in
+`pending_posts[].attachments` in `run_context.json`; upsert replaces that
+record.
 
-On the first upsert, use `--instructions` to name the source's stance,
-certainty, first-person framing, and narrative order whenever those carry its
-voice. Explicitly prohibit any unsupported shift from thinking, considering,
-or observing into deciding, planning, or committing. When an attachment holds
-the factual table or caveats, tell the writer to leave that support in the
-attachment before compressing voice-bearing prose.
-
-Before accepting reviewer readiness, compare the exact pending text with the
-raw source for stance, certainty, causal order, and recognizable cadence. A
-`ready` result does not override this check. Revise a draft that reads like a
-table caption, executive summary, or generic conclusion when the source was
-Nick thinking through a personal decision.
+Carry the source's voice constraints into `--instructions` and check the draft
+against them before accepting readiness.
 
 Before moving to the next target or seeking approval, show Nick the exact
 pending text, weighted count, readiness status, ordered images, and context
