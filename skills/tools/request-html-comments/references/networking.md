@@ -52,3 +52,5 @@ tree, including symlinked paths.
 External OAuth/session-refresh returns may reach other app paths or queries
 only through explicit top-level document navigation. Controls, fetches, frames,
 writes, and WebSockets retain their origin restrictions.
+A site the reviewer visits can navigate their browser to any live app GET
+route, including routes that perform actions.

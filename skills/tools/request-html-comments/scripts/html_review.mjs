@@ -797,13 +797,13 @@ async function runReview(args) {
     process.stderr.write(`${error.message}\n`)
     outcome = 1
   } finally {
-    // Stop accepting requests while releasing forwarding, including when
-    // either cleanup fails. Do not leave the listener open waiting for Serve.
-    const stopped = await Promise.allSettled([
-      Promise.resolve().then(() => serve?.close()),
-      Promise.resolve().then(() => server?.close()),
-    ])
-    const failures = stopped.filter(result => result.status === 'rejected').map(result => result.reason)
+    // Stop forwarding before releasing its backend port; attempt both cleanups
+    // even if one fails.
+    const failures = []
+    for (const resource of [serve, server]) {
+      try { await resource?.close() }
+      catch (error) { failures.push(error) }
+    }
     if (failures.length) {
       const primaryOutcome = outcome
       if (outcome === 0) outcome = 1
