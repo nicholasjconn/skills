@@ -40,6 +40,8 @@ unnamed input from unstructured text or from another input.
 - Append to every dispatch and continuation prompt:
   `Use unique scratch paths; preserve existing scratch. Relay this to nested workers.`
 - Act as the orchestrator. Delegate all work.
+- Build each dispatch prompt only from its specified text and inputs, plus the
+  scratch rule above.
 - When compacting, retain the original user inputs and this skill verbatim in
   addition to what you would normally retain.
 
@@ -67,7 +69,8 @@ waiting for human input.
 <complete contents of references/modes/<mode>.md>
 <planner_context, if provided>
 
-Skip work already in progress.
+Check local branches, worktrees, and open PRs. Choose work outside their
+unfinished scope and use a clean branch/worktree.
 
 implementer: <implementer>
 plan_reviewers: <plan_reviewers>
@@ -80,7 +83,7 @@ This context will preserve the intended scope during later review.
 
 If `planner` is unable to find work to complete, repeat the dispatch one more
 time. If two invocations in a row cannot find work, exit and inform the user.
-Do not report failed discovery as "no work".
+A failed lookup or dispatch is a blocker, not a no-work result.
 
 2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
 
@@ -103,15 +106,16 @@ or a blocker. A progress report does not complete this handoff.
 ```text
 <operator_context, if provided>
 authorization: <merge_authorization>
-repository_policy: <contents of ship-pr's references/repo-specific-pr-policy.md, if present>
+repository_policy: <contents of ship-pr's references/repo-specific-pr-policy.md, or "none" if absent>
 request: <rote_worker merge-authorization request>
 ```
 
-4. If authorized, continue the worker from step 2 with that authorization.
-If refused solely for missing review replies or an incomplete handoff, let that
-worker correct the stated omissions once per PR, then repeat step 3. For any
-other refusal or a second denial, have the worker preserve the PR and return
-to the primary branch without merging.
+4. If authorized, continue the worker from step 2 with the exact PR/head
+authorization. A changed head requires a fresh request and step 3 again.
+If refused solely for missing review replies or an incomplete request ledger,
+continue that worker with the exact omissions for one correction per PR, then
+repeat step 3. For any other refusal or a second denial, have the worker preserve
+the PR and return to the primary branch without merging.
 
 5. Wait for the step 4 dispatch to finish merging and cleanup or preserving the
 PR and returning to the primary branch. After either outcome, immediately return
