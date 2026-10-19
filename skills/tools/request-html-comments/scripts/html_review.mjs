@@ -61,8 +61,7 @@ function upstreamHostname(hostname) {
 }
 
 function httpAuthority(hostname, port, protocol) {
-  const authorityHostname = isIP(hostname) === 6 ? `[${hostname}]` : hostname
-  return Number(port) === (protocol === 'https' ? 443 : 80) ? authorityHostname : `${authorityHostname}:${port}`
+  return Number(port) === (protocol === 'https' ? 443 : 80) ? hostname : `${hostname}:${port}`
 }
 
 export function validateReviewHost(host, interfaces = networkInterfaces()) {

@@ -1028,35 +1028,6 @@ test('file reviews retain exact-entry cross-site navigation isolation', async t 
   }
 })
 
-test('IPv6 loopback reviews advertise a bracketed authority and proxy the page', async t => {
-  const upstream = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'text/html' })
-    response.end('<html><body>IPv6 review</body></html>')
-  })
-  try {
-    await new Promise((resolve, reject) => {
-      upstream.once('error', reject)
-      upstream.listen(0, '::1', resolve)
-    })
-  } catch (error) {
-    if (['EADDRNOTAVAIL', 'EAFNOSUPPORT'].includes(error.code)) return t.skip('IPv6 loopback unavailable')
-    throw error
-  }
-  t.after(() => new Promise(resolve => upstream.close(resolve)))
-  const review = await createReviewServer({
-    source: parseSource(`http://[::1]:${upstream.address().port}/app?q=1`),
-    draftOutput: null, initialComments: [], overlayScript: OVERLAY_SCRIPT, log: () => {},
-  })
-  t.after(() => review.close())
-  assert.match(review.reviewUrl, /^http:\/\/\[::1\]:\d+\/app\?q=1$/)
-  assert.match(await (await fetch(review.reviewUrl)).text(), /IPv6 review/)
-  assert.equal(await rawHttpStatus(review.localPort, '::1', `[::1]:${review.localPort}`, {
-    method: 'POST', path: `${review.endpoint}/cancel`,
-    headers: { Origin: new URL(review.reviewUrl).origin }, body: '{}',
-  }), 200)
-  assert.equal((await review.completion).action, 'cancel')
-})
-
 test('geometry retains CommonJS exports for Node helper consumers', () => {
   const nodeModule = { exports: {} }
   new Function('module', GEOMETRY_SCRIPT)(nodeModule)
