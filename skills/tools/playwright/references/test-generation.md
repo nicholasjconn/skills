@@ -77,9 +77,7 @@ playwright-cli click e5
 
 ### 3. Add Assertions Manually
 
-Generated code captures actions, not assertions. Derive expectations from the
-intended behavior or acceptance criteria, then compare them with the actual
-page state using these matchers:
+Generated code captures actions but not assertions. Add expectations in your test using one of the recommended matchers:
 
 - `toBeVisible()` — element is rendered and visible
 - `toHaveText(text)` — element text content matches
@@ -88,33 +86,28 @@ page state using these matchers:
 - `toBeChecked()` / `toBeChecked({ checked: false })` — checkbox state matches
 - `toMatchAriaSnapshot(snapshot)` — page (or locator) matches a partial accessibility snapshot
 
-Use `playwright-cli generate-locator <target>` for the assertion locator.
-Snapshot/eval commands inspect actual state; their output is evidence to check
-against the requirements, not the source of expected values.
+Use `playwright-cli generate-locator <target>` to produce the locator expression for the assertion. Derive expected values from intended behavior; use snapshot/eval commands to inspect actual values.
 
 When asserting text content, make sure that generated locator does not contain text from the element itself. `getByTestId()` or `getByLabel()` usually work well with asserting text. When locator is text-based, prefer `toBeVisible()` instead.
 
-Write expected ARIA snapshots from the intended accessible structure, scoped
-to the behavior under test. Use regular expressions only for variation that
-the requirements allow.
+The expected snapshot does not have to contain all the information - include only what's necessary for the assertion. You can use regular expressions for unstable values.
 
 ```bash
-# Illustrative refs from a current snapshot: e5 Submit button, e6 welcome
-# heading, e7 Email textbox, e8 notifications checkbox, e9 navigation.
+# Example refs: e5 Submit button, e6 heading, e7 Email textbox, e8 checkbox, e9 navigation
 # Get a stable locator for an element ref to use in the assertion
 playwright-cli --raw generate-locator e5
 # getByRole('button', { name: 'Submit' })
 
-# Inspect actual text content for comparison with intended text
+# Inspect actual text content for toHaveText
 playwright-cli --raw eval "el => el.textContent" e6
 
-# Inspect the actual input value for toHaveValue/toBeEmpty
+# Inspect actual input value for toHaveValue/toBeEmpty
 playwright-cli --raw eval "el => el.value" e7
 
-# Inspect the actual checkbox state for toBeChecked
+# Inspect actual checkbox state for toBeChecked
 playwright-cli --raw eval "el => el.checked" e8
 
-# Inspect the actual accessible structure for toMatchAriaSnapshot
+# Inspect actual aria snapshot for toMatchAriaSnapshot
 # (whole page, or use a ref to scope to a region)
 playwright-cli --raw snapshot
 playwright-cli --raw snapshot e9
@@ -124,20 +117,20 @@ playwright-cli --raw snapshot e9
 // Generated action
 await page.getByRole('button', { name: 'Submit' }).click();
 
-// Illustrative expectations from the intended signed-in page behavior:
+// Assertions from intended behavior:
 await expect(page.getByRole('alert', { name: 'Success' })).toBeVisible();
 await expect(page.getByTestId('main-header')).toHaveText('Welcome, user');
 await expect(page.getByRole('textbox', { name: 'Email' })).toHaveValue('user@example.com');
 await expect(page.getByRole('checkbox', { name: 'Enable notifications' })).toBeChecked();
 
-// Require the intended signed-in controls in a matching page region
+// toMatchAriaSnapshot on the whole page, finds a matching region
 await expect(page).toMatchAriaSnapshot(`
   - heading "Welcome, user"
   - link /\\d+ new messages?/
   - button "Sign out"
 `);
 
-// Require the intended links in the navigation region
+// toMatchAriaSnapshot scoped to a region
 await expect(page.getByRole('navigation')).toMatchAriaSnapshot(`
   - link "Home"
   - link /\\d+ new messages?/

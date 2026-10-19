@@ -35,8 +35,7 @@ Keep the test running in the background while you explore and look for a fix.
 The test is paused at the start, so you should step over or pause at a particular location
 where the problem is most likely to be.
 
-For translating observed browser actions into a test fix, follow
-[test generation](test-generation.md). Use the intended behavior to decide
-whether the failure reflects a test defect or a bug in the app.
+Every action you perform with `playwright-cli` generates corresponding Playwright TypeScript code.
+This code appears in the output and can be copied directly into the test. Use intended behavior to decide whether to fix the test or the app.
 
 After fixing the test, stop the background test run. Rerun to check that test passes.
