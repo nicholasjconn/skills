@@ -18,7 +18,7 @@ answer that distinguishes retrieved facts from your synthesis.
   configuration changes require an explicit user setup request.
 - Prefer `--json` when supported. Keep searches short and focused; use relevant
   domain/time filters or selected URLs instead of dumping large raw outputs.
-- Quick lookups need no artifact. Save retrieval output in `.agent-layer/tmp/`
+- Quick lookups need no artifact. Save needed retrieval output in `.agent-layer/tmp/`
   as `tavily-web.<run-id>.<type>` with a `.json` or `.md` extension.
 - Do not use Tavily MCP or Fetch MCP as a fallback, or `tvly crawl` in the
   default Agent Layer workflow.
