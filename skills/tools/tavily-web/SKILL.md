@@ -47,8 +47,8 @@ remaining blockers without substituting tools or performing setup.
 | `tvly map` | Discover URLs or structure within a known site/domain, then extract only useful pages. Use search for general web discovery. |
 | `tvly research` | The user wants multi-source cited synthesis, comparison, or a report. Use search/extract for quick facts or discovery alone. |
 
-For long-running research, retain its request ID and use the live-help
-status/poll flow when it avoids blocking or losing the request.
+For research that would block, use `--no-wait` to obtain and retain the request
+ID, then use the live-help status/poll flow.
 
 ## Final handoff
 
