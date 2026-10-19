@@ -852,7 +852,7 @@ async function launchAsync(args) {
   })
   closeSync(descriptor)
   child.unref()
-  log('info', 'Detached review worker', { worker_pid: child.pid })
+  log('info', 'Detached review worker', { worker_pid: child.pid, ready_file: readyFile })
 
   const deadline = Date.now() + (args.tailscale ? 120_000 : 10_000)
   while (Date.now() < deadline) {
