@@ -984,7 +984,6 @@ test('served reviews accept external document returns across app paths and queri
     assert.equal(await rawHttpStatus(Number(url.port), url.hostname, url.host, request), 403, `${request.method || 'GET'} ${request.path}`)
   }
   assert.equal(reached.length, beforeBlocked, 'blocked requests must not reach the app')
-
 })
 
 test('file reviews retain exact-entry cross-site navigation isolation', async t => {
@@ -1003,7 +1002,6 @@ test('file reviews retain exact-entry cross-site navigation isolation', async t 
   assert.equal(await status(`${url.pathname}?changed=1`), 403)
   assert.equal(await status('/other.html'), 403)
   assert.equal(await status(`${review.endpoint}/ready`), 403)
-
 })
 
 test('geometry retains CommonJS exports for Node helper consumers', () => {
@@ -1048,12 +1046,10 @@ test('an upload started before submission cannot replace saved feedback afterwar
   })
   const response = await fetch(new URL(`${review.endpoint}/submit`, review.reviewUrl), { method: 'POST', body: '{}' })
   assert.equal(response.status, 200)
-  const outcome = { action: 'submit', comments }
-  assert.deepEqual(await review.completion, outcome)
+  assert.deepEqual(await review.completion, { action: 'submit', comments })
   request.end(body)
   assert.equal(await result, 409)
   assert.equal(readFileSync(draft, 'utf8'), originalDraft)
-  assert.deepEqual(await review.completion, outcome)
 })
 
 test('foreground review CLI saves submission but fails incomplete cleanup, preserving cancellation and primary failure', { timeout: 30_000 }, async t => {

@@ -1,10 +1,12 @@
-# Private HTTPS with Tailscale
+# Networking
+
+## Private HTTPS with Tailscale
 
 For review from another tailnet device or a trusted HTTPS context, prefer
 Tailscale Serve when installed, connected, and HTTPS is enabled for the tailnet.
 On Linux, this mode requires normal kernel networking; userspace-only Tailscale
 networking does not provide the local listener needed for HTTPS verification.
-Use `--tailscale` with the launch command from SKILL.md on Linux or macOS:
+Use `--tailscale` on Linux or macOS:
 
 ```bash
 SCRIPT="<skill-directory>/scripts/html_review.mjs"
@@ -16,9 +18,9 @@ node "$SCRIPT" /absolute/path/to/page.html --tailscale --async \
 the separate local listener. Do not use Funnel, reset Serve, replace an existing
 route, or combine this mode with `--host` or direct TLS flags.
 
-The CLI verifies HTTPS before reporting the review ready. Give the user the
-returned URL. Their other device must be connected to the
-tailnet and permitted by its access rules. Tailnet peers with access can read
+The CLI binds its local listener to loopback and verifies HTTPS before
+reporting readiness. Give the user the returned URL. Their other device must
+be connected to the tailnet and permitted by its access rules. Tailnet peers with access can read
 the allowed file tree or use the proxied application's routes and WebSockets.
 The DNS hostname appears in public certificate logs; the content stays private.
 

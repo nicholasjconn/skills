@@ -44,10 +44,7 @@
   <script src="../scripts/review_geometry.js"></script>
   <script src="../scripts/review_overlay.js"></script>
   <script>
-    // Exercise gestures on parsed frames; parser-time recovery is a separate case.
-    window.addEventListener('load', () => {
-      window.reviewApi = createHtmlReview({saveDraft: async () => {}, onFinish: async () => {}});
-    }, {once: true});
+    window.reviewApi = createHtmlReview({saveDraft: async () => {}, onFinish: async () => {}});
   </script>
 </body>
 </html>

@@ -68,8 +68,8 @@ For `result.json`, record:
 Submit, cancel, the 12-hour safety timeout, or worker termination stops the
 review and releases its forwarding session. Timeout does not submit feedback.
 Logs, drafts, and submitted feedback remain available. Cleanup failures are
-reported separately: saved feedback survives, successful submission exits with
-failure, and cancellation/error outcomes are retained.
+reported separately. Saved feedback survives; submission exits nonzero if
+cleanup is incomplete. Cancellation/error outcomes are retained.
 
 Then end the turn while the user reviews. Do not poll or keep the worker
 attached; the user must send another chat message.

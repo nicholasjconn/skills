@@ -38,7 +38,7 @@ async (page) => {
   }
 
   await page.goto('about:blank');
-  await page.setContent('<dialog id="host"><p>Review target</p></dialog>');
+  await page.setContent('<dialog id="host"><p id="target">Review target</p></dialog>');
   await page.evaluate(() => document.querySelector('#host').showModal());
   await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
   await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
@@ -49,8 +49,12 @@ async (page) => {
       saveDraft: () => { if (window.failSave) throw new Error('Disk full'); },
       onFinish: () => {},
     });
-    window.api.addComment({id: 'modal-draft', comment: 'Keep modal feedback'});
+    window.api.addComment({
+      id: 'modal-draft', comment: 'Keep modal feedback', target_type: 'element',
+      element: {css_selector: '#target'}, anchor: {x: 30, y: 100}, anchor_coordinate_space: 'viewport',
+    });
   });
+  await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'visible'});
   await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
   await page.locator('.sr-send').waitFor({state: 'hidden'});
   await page.getByRole('status').filter({hasText: 'Disk full'}).waitFor({state: 'visible'});
@@ -59,6 +63,9 @@ async (page) => {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   await page.getByRole('status').filter({hasText: 'Disk full'}).waitFor({state: 'visible'});
   if (await page.locator('.sr-send').isVisible()) throw new Error('Modal close reopened completed controls');
+  if (await page.locator('.steward-review-pin:visible, .steward-review-highlight:visible, .steward-review-popup:visible').count()) {
+    throw new Error('Modal close reopened completed annotations');
+  }
   if (await page.evaluate(() => window.api.getComments()[0]?.comment) !== 'Keep modal feedback') {
     throw new Error('Modal close lost feedback');
   }
