@@ -1,31 +1,21 @@
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import { connect } from 'node:net'
-import { networkInterfaces, tmpdir } from 'node:os'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import {
-  createReviewServer,
-  injectHtml,
-  loadRestoredComments,
-  parseArgs,
-  parseSource,
-  sourceIdentity,
-  logPath,
-  validateReviewHost,
+  createReviewServer, injectHtml, loadRestoredComments, parseArgs,
+  parseSource, sourceIdentity, logPath, validateReviewHost,
 } from '../scripts/html_review.mjs'
 
-const GEOMETRY_SCRIPT = readFileSync(fileURLToPath(new URL('../scripts/review_geometry.js', import.meta.url)), 'utf8')
-const geometry = new Function(`${GEOMETRY_SCRIPT}\nreturn __stewardReviewGeometry`)()
-const OVERLAY_SCRIPT = [
-  GEOMETRY_SCRIPT,
-  readFileSync(fileURLToPath(new URL('../scripts/review_overlay.js', import.meta.url)), 'utf8'),
-  readFileSync(fileURLToPath(new URL('../scripts/review_local.js', import.meta.url)), 'utf8'),
-].join('\n')
+const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
+const GEOMETRY_SCRIPT = readFileSync(new URL('../scripts/review_geometry.js', import.meta.url), 'utf8')
+const overlayScript = 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;'
+const navigation = { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }
 
 function temporaryDirectory(t) {
   const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
@@ -33,168 +23,86 @@ function temporaryDirectory(t) {
   return directory
 }
 
-function listen(server) {
-  return new Promise((resolveListen, rejectListen) => {
-    server.once('error', rejectListen)
-    server.listen(0, '127.0.0.1', () => resolveListen(server.address().port))
-  })
+async function startReview(t, source, options = {}) {
+  const review = await createReviewServer({ source, draftOutput: null, initialComments: [], overlayScript, log: () => {}, ...options })
+  t.after(() => review.close())
+  return review
 }
 
-function websocketHandshake(port, path, origin, hostHeader = `127.0.0.1:${port}`, connectHost = '127.0.0.1') {
-  return new Promise((resolveHandshake, rejectHandshake) => {
-    const socket = connect(port, connectHost, () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: ${hostHeader}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
-    })
-    let response = ''
-    socket.setEncoding('utf8')
-    socket.on('data', chunk => {
-      response += chunk
-      if (response.includes('\r\n\r\n')) {
-        socket.end()
-        resolveHandshake(response)
-      }
-    })
-    socket.on('error', rejectHandshake)
-  })
-}
-
-function rawHttpStatus(port, connectHost, hostHeader, {
-  method = 'GET',
-  path = '/',
-  headers = {},
-  body = '',
-} = {}) {
-  return new Promise((resolveStatus, rejectStatus) => {
-    const socket = connect(port, connectHost, () => {
-      const lines = [`${method} ${path} HTTP/1.1`, `Host: ${hostHeader}`]
-      for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`)
-      if (body) lines.push(`Content-Length: ${Buffer.byteLength(body)}`)
-      socket.write(`${lines.join('\r\n')}\r\nConnection: close\r\n\r\n${body}`)
-    })
-    let response = ''
-    socket.setEncoding('utf8')
-    socket.on('data', chunk => { response += chunk })
-    socket.on('end', () => {
-      const status = /^HTTP\/1\.1 (\d{3})/.exec(response)?.[1]
-      if (!status) rejectStatus(new Error(`missing HTTP status in ${response}`))
-      else resolveStatus(Number(status))
-    })
-    socket.on('error', rejectStatus)
-  })
-}
-
-function activeLanIpv4() {
-  return Object.values(networkInterfaces()).flat().find(address => (
-    address && (address.family === 'IPv4' || address.family === 4) && !address.internal
-  ))?.address || null
-}
-
-function connectionResult(port, host) {
-  return new Promise(resolveResult => {
-    const socket = connect(port, host)
-    socket.setTimeout(500, () => {
-      socket.destroy()
-      resolveResult('ETIMEDOUT')
-    })
-    socket.once('connect', () => {
-      socket.end()
-      resolveResult('connected')
-    })
-    socket.once('error', error => resolveResult(error.code || error.message))
-  })
-}
-
-async function terminateProcess(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return
-  for (const signal of ['SIGTERM', 'SIGKILL']) {
-    try {
-      process.kill(pid, signal)
-    } catch (error) {
-      if (error.code === 'ESRCH') return
-      throw error
-    }
-    const deadline = Date.now() + 2_000
-    while (Date.now() < deadline) {
-      await new Promise(resolveWait => setTimeout(resolveWait, 50))
-      try {
-        process.kill(pid, 0)
-      } catch (error) {
-        if (error.code === 'ESRCH') return
-        throw error
-      }
-    }
-  }
-}
-
-async function cleanupAsyncReview(output) {
-  let log = ''
-  try {
-    log = readFileSync(logPath(output), 'utf8')
-  } catch {
-    return
-  }
-  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
-  if (ready) {
-    try {
-      const response = await fetch(ready)
-      if (response.status === 200) {
-        const endpoint = endpointFromHtml(await response.text())
-        await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })
-      }
-    } catch {}
-  }
-  const workerPid = Number(/"worker_pid":(\d+)/.exec(log)?.[1] || 0)
-  if (workerPid) await terminateProcess(workerPid)
-}
-
-function openWebsocket(port, path, origin) {
-  return new Promise((resolveSocket, rejectSocket) => {
-    const socket = connect(port, '127.0.0.1', () => {
-      socket.write(`GET ${path} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nOrigin: ${origin}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGVzdA==\r\nSec-WebSocket-Version: 13\r\n\r\n`)
-    })
-    socket.once('data', () => resolveSocket(socket))
-    socket.once('error', rejectSocket)
-  })
-}
-
-function endpointFromHtml(html) {
-  const match = /const endpoint\s*=\s*"([^"]+)"/.exec(html)
-  assert.ok(match, 'the review page should contain its generated action endpoint')
-  return match[1]
-}
-
-test('source parsing accepts HTML files and loopback HTTP URLs only', t => {
+async function fileReview(t, options = {}) {
   const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html></html>')
+  const served = join(directory, 'served')
+  mkdirSync(served)
+  const html = join(served, 'page.html')
+  const draftOutput = join(directory, 'feedback.draft.json')
+  writeFileSync(html, '<html><body>Review me</body></html>')
+  const review = await startReview(t, parseSource(html), { draftOutput, ...options })
+  return { ...review, directory, served, html, draftOutput }
+}
 
+function listen(t, server) {
+  t.after(() => new Promise(resolve => server.close(resolve)))
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve(server.address().port))
+  })
+}
+
+function request(url, { body, ...options } = {}) {
+  return new Promise((resolve, reject) => {
+    const send = new URL(url).protocol === 'https:' ? httpsRequest : httpRequest
+    const outgoing = send(url, options, response => {
+      let text = ''
+      response.setEncoding('utf8')
+      response.on('data', chunk => { text += chunk })
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, text }))
+      response.on('error', reject)
+    })
+    outgoing.setTimeout(3000, () => outgoing.destroy(new Error('test request timed out')))
+    outgoing.on('error', reject)
+    outgoing.end(body)
+  })
+}
+
+function post(review, action, payload = {}) {
+  return request(new URL(`${review.endpoint}/${action}`, review.reviewUrl), { method: 'POST', body: JSON.stringify(payload) })
+}
+
+test('source and CLI parsing reject unsupported inputs and unsafe TLS paths', t => {
+  const directory = temporaryDirectory(t)
+  const served = join(directory, 'served')
+  mkdirSync(served)
+  const html = join(served, 'page.html')
+  const cert = join(directory, 'cert.pem')
+  const key = join(served, 'key.pem')
+  writeFileSync(html, '<html></html>')
+  writeFileSync(cert, 'test certificate')
+  writeFileSync(key, 'test key')
   assert.deepEqual(sourceIdentity(parseSource(html)), { type: 'file', value: html })
-  assert.deepEqual(sourceIdentity(parseSource('http://localhost:3000/path')), {
-    type: 'url',
-    value: 'http://localhost:3000/path',
-  })
-  assert.throws(() => parseSource('https://localhost:3000/path'), /http:\/\/ loopback URL/)
-  assert.throws(() => parseSource('http://example.com/path'), /http:\/\/ loopback URL/)
+  assert.deepEqual(sourceIdentity(parseSource('http://localhost:3000/path')), { type: 'url', value: 'http://localhost:3000/path' })
+  for (const source of ['https://localhost:3000', 'http://example.com']) {
+    assert.throws(() => parseSource(source), /http:\/\/ loopback URL/)
+  }
   assert.throws(() => parseSource(join(directory, 'missing.html')), /existing .html/)
-})
-
-test('CLI accepts no-open, explicit port, and a validated local-interface host', t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const output = join(directory, 'feedback.json')
-  writeFileSync(html, '<html></html>')
-  const host = activeLanIpv4()
-  const argv = [html, '--async', '--output', output, '--no-open', '--port', '56158']
-  if (host) argv.push('--host', host)
-  const args = parseArgs(argv)
+  const args = parseArgs([html, '--async', '--output', join(directory, 'feedback.json'), '--no-open', '--port', '56158'])
   assert.equal(args.no_open, true)
   assert.equal(args.port, 56158)
-  assert.equal(args.host, host)
-  assert.throws(() => parseArgs([html, '--port', '0']), /integer from 1 to 65535/)
-  assert.throws(() => parseArgs([html, '--port', '65536']), /integer from 1 to 65535/)
+  for (const port of ['0', '65536']) assert.throws(() => parseArgs([html, '--port', port]), /integer from 1 to 65535/)
+  assert.throws(() => parseArgs([html, '--tls-cert', cert]), /must be given together/)
+  assert.throws(() => parseArgs([html, '--tls-cert', directory, '--tls-key', key]), /existing PEM file/)
+  const tlsArgs = keyPath => [html, '--tls-cert', cert, '--tls-key', keyPath]
+  assert.throws(() => parseArgs(tlsArgs(key)), /outside the reviewed file directory tree/)
+  if (process.platform !== 'win32') {
+    const link = join(directory, 'key-link.pem')
+    symlinkSync(key, link)
+    assert.throws(() => parseArgs(tlsArgs(link)), /outside the reviewed file directory tree/)
+  }
+  const safeKey = join(directory, 'safe.pem')
+  writeFileSync(safeKey, 'test key')
+  assert.equal(parseArgs(tlsArgs(safeKey)).tls_key, safeKey)
 })
 
-test('trusted-LAN host validation accepts only an exact active non-loopback IPv4 address', () => {
+test('LAN host validation requires an exact active non-loopback IPv4 address', () => {
   const interfaces = {
     en0: [{ address: '192.0.2.44', family: 'IPv4', internal: false }],
     lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
@@ -205,166 +113,38 @@ test('trusted-LAN host validation accepts only an exact active non-loopback IPv4
   }
 })
 
-test('review server binds an explicit port and reports an actionable bind failure', async t => {
+test('restore accepts both artifact versions but rejects malformed or unrelated feedback', t => {
   const directory = temporaryDirectory(t)
+  const source = parseSource('http://localhost:3100/review-me')
   const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const reservation = createServer()
-  const port = await listen(reservation)
-  t.after(() => new Promise(resolveClose => reservation.close(resolveClose)))
-  await assert.rejects(createReviewServer({
-    source: parseSource(html), draftOutput: null, initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {}, port,
-  }), new RegExp(`could not bind review server to 127\\.0\\.0\\.1:${port}.*EADDRINUSE`))
-})
-
-test('trusted-LAN server binds and advertises only the selected local interface', async t => {
-  const host = activeLanIpv4()
-  if (!host) return t.skip('no active non-loopback IPv4 interface is available')
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>LAN review</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html), draftOutput: null, initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {}, host,
-  })
-  t.after(() => review.close())
-  assert.equal(new URL(review.reviewUrl).hostname, host)
-  assert.equal((await fetch(review.reviewUrl)).status, 200)
-  assert.notEqual(await connectionResult(Number(new URL(review.reviewUrl).port), '127.0.0.1'), 'connected')
-  assert.equal(await rawHttpStatus(
-    Number(new URL(review.reviewUrl).port), host, `127.0.0.1:${new URL(review.reviewUrl).port}`,
-  ), 403)
-  // Explicit fetch metadata avoids depending on the Node fetch version's defaults.
-  assert.equal(await rawHttpStatus(
-    Number(new URL(review.reviewUrl).port), host, new URL(review.reviewUrl).host,
-    { path: new URL(review.reviewUrl).pathname, headers: { Origin: 'http://example.test', 'Sec-Fetch-Mode': 'cors' } },
-  ), 403)
-})
-
-
-test('invalid startup input leaves an actionable worker log', t => {
-  const directory = temporaryDirectory(t)
-  const output = join(directory, 'feedback.json')
-  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
-  const result = spawnSync(process.execPath, [script, 'http://example.com/page', '--async', '--output', output], {
-    encoding: 'utf8',
-  })
-
-  assert.equal(result.status, 1)
-  assert.match(result.stderr, /loopback URL/)
-  // Async mode detaches, so the log file is the only diagnostic the caller gets.
-  assert.match(readFileSync(logPath(output), 'utf8'), /loopback URL/)
-})
-
-test('async no-open forwards explicit launch controls to the worker', async t => {
-  const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
-  const html = join(directory, 'page.html')
-  const output = join(directory, 'feedback.json')
-  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
-  writeFileSync(html, '<html><body>Async review</body></html>')
-  t.after(async () => { await cleanupAsyncReview(output); rmSync(directory, { recursive: true, force: true }) })
-  const reservation = createServer()
-  const port = await listen(reservation)
-  await new Promise(resolveClose => reservation.close(resolveClose))
-  const host = activeLanIpv4()
-  const argv = [script, html, '--async', '--output', output, '--no-open', '--port', String(port)]
-  if (host) argv.push('--host', host)
-  const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
-  assert.equal(launched.status, 0, launched.stderr)
-  assert.match(launched.stdout, /Review server started/)
-  const logFile = logPath(output)
-  const log = readFileSync(logFile, 'utf8')
-  assert.match(log, /Skipped default browser launch/)
-  assert.match(log, new RegExp(`"port":${port}`))
-  assert.match(log, new RegExp(`"host":${host ? `"${host}"` : 'null'}`))
-  if (host) {
-    assert.match(launched.stdout, /WARNING: --host has no auth;/)
-    assert.match(log, /WARN WARNING: --host has no auth;/)
-  }
-  const ready = /"review_url":"([^"]+)"/.exec(log)?.[1]
-  assert.ok(ready, 'worker log should report the review URL')
-  assert.ok(launched.stdout.includes(`Review URL: ${ready}`), 'async no-open should print its review URL')
-  const response = await fetch(ready)
-  assert.equal(response.status, 200)
-  const endpoint = endpointFromHtml(await response.text())
-  assert.equal((await fetch(new URL(`${endpoint}/cancel`, ready), { method: 'POST', body: '{}' })).status, 200)
-})
-
-test('restore accepts legacy and versioned artifacts but rejects another source', t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const other = join(directory, 'other.html')
-  const legacy = join(directory, 'legacy.json')
-  const versioned = join(directory, 'versioned.json')
   writeFileSync(html, '<html></html>')
-  writeFileSync(other, '<html></html>')
-  const comments = [{
-    id: 'one',
-    comment: 'Keep this',
-    iframe_path: [
-      { css_selector: '#outer-frame', tag: 'iframe' },
-      { css_selector: '#inner-frame', tag: 'iframe' },
-    ],
-  }]
-  writeFileSync(legacy, JSON.stringify({ version: 1, source: html, comments }))
-  const servedSource = parseSource('http://localhost:3100/review-me')
-  writeFileSync(versioned, JSON.stringify({ version: 2, source: sourceIdentity(servedSource), comments }))
-
-  assert.deepEqual(loadRestoredComments(legacy, parseSource(html)), comments)
-  assert.deepEqual(loadRestoredComments(versioned, servedSource), comments)
-  const malformed = join(directory, 'malformed.json')
-  writeFileSync(malformed, JSON.stringify({ version: 2, source: sourceIdentity(parseSource(html)), comments: [{ id: 'broken' }] }))
-  assert.throws(() => loadRestoredComments(malformed, parseSource(html)), /comments list/)
-  // Restoring onto the wrong page would silently attach comments to it.
-  assert.throws(() => loadRestoredComments(legacy, parseSource(other)), /different source/)
-  assert.throws(
-    () => loadRestoredComments(versioned, parseSource('http://localhost:3100/another-page')),
-    /different source/,
-  )
+  const artifact = join(directory, 'feedback.json')
+  const comments = [{ id: 'one', comment: 'Keep this', iframe_path: [{ css_selector: '#frame', tag: 'iframe' }] }]
+  for (const version of [1, 2]) {
+    const restoredSource = version === 1 ? parseSource(html) : source
+    writeFileSync(artifact, JSON.stringify({ version, source: version === 1 ? html : sourceIdentity(source), comments }))
+    assert.deepEqual(loadRestoredComments(artifact, restoredSource), comments)
+    assert.throws(() => loadRestoredComments(artifact, parseSource('http://localhost:3100/another-page')), /different source/)
+  }
+  writeFileSync(artifact, JSON.stringify({ version: 2, source: sourceIdentity(source), comments: [{ id: 'broken' }] }))
+  assert.throws(() => loadRestoredComments(artifact, source), /comments list/)
 })
 
-test('overlay injection keeps comment text inert and yields a parseable script', () => {
-  const rendered = injectHtml(
-    '<html><head></head><body>Review me</body></html>',
-    '/token',
-    [{ id: 'one', comment: 'Keep </script> and __ENDPOINT__ __INITIAL_COMMENTS__ $& $` safe' }],
-    OVERLAY_SCRIPT,
-  )
-
-  assert.match(rendered, /Keep \\u003c\/script>/)
-  assert.match(rendered, /const endpoint = "\/token"/)
-  // Comment text is substituted last, and never as a replacement pattern,
-  // so placeholders and `$` sequences inside it stay literal.
-  assert.match(rendered, /and __ENDPOINT__ __INITIAL_COMMENTS__ \$& \$` safe/)
-  const scriptStart = rendered.lastIndexOf('<script>') + '<script>'.length
-  const scriptEnd = rendered.indexOf('</script>', scriptStart)
-  assert.ok(scriptEnd < rendered.toLowerCase().lastIndexOf('</body>'))
-  assert.doesNotThrow(() => new Function(rendered.slice(scriptStart, scriptEnd)))
-})
-
-test('file overlay injection preserves non-ASCII restored comments through Latin-1 encoding', () => {
-  const comments = [{ id: 'unicode', comment: 'Keep the em dash — and 中文 😀' }]
-  const rendered = injectHtml(
-    '<html><body>Review me</body></html>',
-    '/token',
-    comments,
-    'globalThis.restoredComments=__INITIAL_COMMENTS__;',
-  )
-  const encoded = Buffer.from(rendered, 'latin1').toString('latin1')
-  const scriptStart = encoded.lastIndexOf('<script>') + '<script>'.length
-  const scriptEnd = encoded.indexOf('</script>', scriptStart)
-  const target = {}
-
-  new Function('globalThis', encoded.slice(scriptStart, scriptEnd))(target)
-
-  assert.deepEqual(target.restoredComments, comments)
-  assert.doesNotMatch(encoded.slice(scriptStart, scriptEnd), /[^\x00-\x7f]/)
+test('injection keeps Unicode, script delimiters and replacement patterns inert', () => {
+  const comments = [{ id: 'one', comment: 'Keep </script> — 中文 😀 __ENDPOINT__ __INITIAL_COMMENTS__ $& $`' }]
+  const html = injectHtml('<html><body>Review</body></html>', '/token', comments, 'return [__ENDPOINT__,__INITIAL_COMMENTS__]')
+  const encoded = Buffer.from(html, 'latin1').toString('latin1')
+  const start = encoded.lastIndexOf('<script>') + '<script>'.length
+  const end = encoded.indexOf('</script>', start)
+  assert.ok(end < encoded.lastIndexOf('</body>'))
+  assert.doesNotMatch(encoded.slice(start, end), /[^\x00-\x7f]/)
+  assert.deepEqual(new Function(encoded.slice(start, end))(), ['/token', comments])
 })
 
 test('frame geometry maps, clips, and rejects unsupported transforms', () => {
+  const nodeModule = { exports: {} }
+  new Function('module', GEOMETRY_SCRIPT)(nodeModule)
+  const geometry = nodeModule.exports
   const geometryForFrames = {
     source: { left: 0, top: 0, right: 100, bottom: 50 },
     hops: [
@@ -401,510 +181,179 @@ test('frame geometry maps, clips, and rejects unsupported transforms', () => {
   assert.equal(globalThis.__stewardReviewGeometry, undefined)
 })
 
-test('file review serves relative local assets, persists drafts, and accepts feedback', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const css = join(directory, 'page.css')
-  const outsideDirectory = temporaryDirectory(t)
-  const outside = join(outsideDirectory, 'private.txt')
-  const escapedLink = join(directory, 'escaped.txt')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><head><link rel="stylesheet" href="page.css"></head><body>Review me</body></html>')
-  writeFileSync(css, 'body { color: red; }')
-  writeFileSync(outside, 'must remain private')
-  if (process.platform !== 'win32') symlinkSync(outside, escapedLink)
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-  })
-  t.after(() => review.close())
-
-  const pageResponse = await fetch(review.reviewUrl)
-  assert.equal(pageResponse.status, 200)
-  const endpoint = endpointFromHtml(await pageResponse.text())
-  const assetResponse = await fetch(new URL('page.css', review.reviewUrl))
-  assert.equal(assetResponse.status, 200)
-  assert.equal(await assetResponse.text(), 'body { color: red; }')
+test('file review serves safe assets and merges, retries, deletes and restores shared drafts', async t => {
+  const review = await fileReview(t)
+  writeFileSync(join(review.served, 'page.css'), 'body { color: red; }')
+  writeFileSync(join(review.directory, 'private.txt'), 'private')
   if (process.platform !== 'win32') {
-    const escapedResponse = await fetch(new URL('/escaped.txt', review.reviewUrl))
-    assert.equal(escapedResponse.status, 404)
+    symlinkSync(join(review.directory, 'private.txt'), join(review.served, 'escaped.txt'))
+    assert.equal((await request(new URL('/escaped.txt', review.reviewUrl))).status, 404)
   }
-
-  const comments = [{ id: 'one', target_type: 'text', comment: 'Clarify this' }]
-  const draftResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ comments, deleted_ids: [] }),
-  })
-  assert.equal(draftResponse.status, 200)
-  const persisted = JSON.parse(readFileSync(draft, 'utf8'))
+  assert.equal((await request(new URL('/page.css', review.reviewUrl))).text, 'body { color: red; }')
+  const first = { id: 'one', comment: 'First tab' }
+  const second = { id: 'two', comment: 'Second tab' }
+  assert.equal((await post(review, 'draft', { comments: [first] })).status, 200)
+  assert.match((await request(review.reviewUrl)).text, /First tab/)
+  for (let retry = 0; retry < 2; retry++) {
+    assert.equal((await post(review, 'draft', { comments: [second] })).status, 200)
+  }
+  const persisted = JSON.parse(readFileSync(review.draftOutput, 'utf8'))
   assert.equal(persisted.version, 2)
-  assert.deepEqual(persisted.source, { type: 'file', value: html })
-  assert.deepEqual(persisted.comments, comments)
-
-  // Retrying the same operation is harmless.
-  const retryResponse = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ comments, deleted_ids: [] }),
-  })
-  assert.equal(retryResponse.status, 200)
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, comments)
-
-  const submitResponse = await fetch(new URL(`${endpoint}/submit`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  })
-  assert.equal(submitResponse.status, 200)
-  assert.deepEqual(await review.completion, { action: 'submit', comments })
-})
-
-test('reloads and additional tabs share recoverable comments without ownership', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-  })
-  t.after(() => review.close())
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const post = (action, payload) => fetch(new URL(`${endpoint}/${action}`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
-  const firstTabComment = { id: 'one', comment: 'Keep this through the reload' }
-  const secondTabComment = { id: 'two', comment: 'Added from another tab' }
-
-  assert.equal((await post('draft', { comments: [firstTabComment], deleted_ids: [] })).status, 200)
-
-  // A reload receives the latest server-side draft in the injected overlay.
-  assert.match(await (await fetch(review.reviewUrl)).text(), /Keep this through the reload/)
-
-  // Another tab contributes only its change. It never replaces comments it
-  // did not load, and replaying its request does not duplicate anything.
-  const secondPayload = { comments: [secondTabComment], deleted_ids: [] }
-  assert.equal((await post('draft', secondPayload)).status, 200)
-  assert.equal((await post('draft', secondPayload)).status, 200)
-  const combined = [firstTabComment, secondTabComment]
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, combined)
-
-  // A newly opened page sees the combined server draft, and submission uses
-  // that draft rather than a possibly stale tab-local snapshot.
-  const reopenedHtml = await (await fetch(review.reviewUrl)).text()
-  assert.match(reopenedHtml, /Keep this through the reload/)
-  assert.match(reopenedHtml, /Added from another tab/)
-  assert.equal((await post('submit', {})).status, 200)
-  assert.deepEqual(await review.completion, { action: 'submit', comments: combined })
-})
-
-test('comment deletion is idempotent and the worker ignores browser lifecycle', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  const draft = join(directory, 'feedback.draft.json')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: draft,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-    safetyTimeoutMs: 30,
-  })
-  t.after(() => review.close())
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  const comments = [{ id: 'one', comment: 'Remove this' }, { id: 'two', comment: 'Keep this' }]
-  const save = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ comments, deleted_ids: [] }),
-  })
-  assert.equal(save.status, 200)
-  for (let retry = 0; retry < 2; retry += 1) {
-    const deletion = await fetch(new URL(`${endpoint}/draft`, review.reviewUrl), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ comments: [], deleted_ids: ['one'] }),
-    })
-    assert.equal(deletion.status, 200)
+  assert.deepEqual(persisted.source, { type: 'file', value: review.html })
+  assert.deepEqual(persisted.comments, [first, second])
+  assert.match((await request(review.reviewUrl)).text, /Second tab/)
+  for (let retry = 0; retry < 2; retry++) {
+    assert.equal((await post(review, 'draft', { comments: [], deleted_ids: ['one'] })).status, 200)
   }
-  assert.deepEqual(JSON.parse(readFileSync(draft, 'utf8')).comments, [comments[1]])
-  assert.equal((await fetch(new URL(`${endpoint}/heartbeat`, review.reviewUrl), { method: 'POST' })).status, 404)
-  assert.equal((await fetch(new URL(`${endpoint}/abandon`, review.reviewUrl), { method: 'POST' })).status, 404)
-  assert.deepEqual(await review.completion, { action: 'timeout', comments: [] })
+  assert.deepEqual(JSON.parse(readFileSync(review.draftOutput, 'utf8')).comments, [second])
+  assert.equal((await post(review, 'submit')).status, 200)
+  assert.deepEqual(await review.completion, { action: 'submit', comments: [second] })
 })
 
-test('the safety timeout completes an otherwise idle review', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-    safetyTimeoutMs: 20,
-  })
-  t.after(() => review.close())
-
-  assert.deepEqual(await review.completion, { action: 'timeout', comments: [] })
-})
-
-test('request filesystem failures return an error without ending the review worker', async t => {
-  const directory = temporaryDirectory(t)
-  const html = join(directory, 'page.html')
-  writeFileSync(html, '<html><body>Review me</body></html>')
-  const events = []
-  const review = await createReviewServer({
-    source: parseSource(html),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: (level, message, details) => events.push({ level, message, details }),
-  })
-  t.after(() => review.close())
-  const endpoint = endpointFromHtml(await (await fetch(review.reviewUrl)).text())
-  rmSync(directory, { recursive: true, force: true })
-
-  const failedAsset = await fetch(new URL('/missing.css', review.reviewUrl))
-  assert.equal(failedAsset.status, 500)
-  assert.equal(await failedAsset.text(), 'Review request failed')
-  assert.ok(events.some(event => event.level === 'error' && event.message === 'Review request failed'))
-
-  const cancel = await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  })
-  assert.equal(cancel.status, 200)
+test('file review limits external navigation to its exact entry and protects control endpoints', async t => {
+  const review = await fileReview(t)
+  writeFileSync(join(review.served, 'other.html'), '<h1>Other</h1>')
+  const url = new URL(review.reviewUrl)
+  const get = (path, headers) => request(new URL(path, url), { headers })
+  assert.equal((await get(url.pathname, navigation)).status, 200)
+  for (const path of [`${url.pathname}?changed=1`, '/other.html', `${review.endpoint}/ready`]) {
+    assert.equal((await get(path, navigation)).status, 403)
+  }
+  assert.equal((await get(url.pathname, { host: `localhost:${url.port}` })).status, 403)
+  assert.equal((await get(url.pathname, { origin: 'https://example.com' })).status, 403)
+  for (const action of ['heartbeat', 'abandon']) assert.equal((await post(review, action)).status, 404)
+  assert.equal((await post(review, 'cancel')).status, 200)
   assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
 })
 
-test('served-page review proxies HTML and assets while removing blocking CSP', async t => {
-  let pageOrigin
-  let websocketOrigin
-  const upstream = createServer((request, response) => {
-    if (request.url === '/app?theme=dark') {
-      pageOrigin = request.headers.origin
-      const body = '<html><body><script src="app.js"></script>Live app</body></html>'
-      response.writeHead(200, {
-        'content-type': 'text/html; charset=utf-8',
-        'content-security-policy': "script-src 'self'",
-      })
-      response.end(body)
-      return
+test('app proxy injects HTML, serves assets and permits document returns without exposing controls', async t => {
+  const reached = []
+  const upstream = createServer((req, res) => {
+    reached.push(`${req.method} ${req.url}`)
+    if (req.headers.origin) assert.equal(req.headers.origin, `http://127.0.0.1:${port}`)
+    res.writeHead(200, { 'content-type': req.url === '/app.js' ? 'text/javascript' : 'text/html', 'content-security-policy': "script-src 'self'" })
+    res.end(req.url === '/app.js' ? 'window.appLoaded = true;' : '<html><body>Live app</body></html>')
+  })
+  const port = await listen(t, upstream)
+  const review = await startReview(t, parseSource(`http://127.0.0.1:${port}/sign-in`))
+  const page = await request(review.reviewUrl, { headers: { origin: new URL(review.reviewUrl).origin } })
+  assert.equal(page.status, 200)
+  assert.equal(page.headers['content-security-policy'], undefined)
+  assert.match(page.text, /Live app.*const endpoint=/s)
+  assert.equal((await request(new URL('/app.js', review.reviewUrl))).text, 'window.appLoaded = true;')
+  for (const method of ['GET', 'HEAD']) {
+    assert.equal((await request(new URL('/account?code=synthetic', review.reviewUrl), { method, headers: navigation })).status, 200)
+    assert.equal(reached.at(-1), `${method} /account?code=synthetic`)
+  }
+  const before = reached.length
+  const blocked = [
+    { headers: { 'Sec-Fetch-Site': 'cross-site' } },
+    { headers: { ...navigation, 'Sec-Fetch-Mode': 'cors' } },
+    { headers: { ...navigation, 'Sec-Fetch-Dest': 'iframe' } },
+    { method: 'POST', headers: navigation },
+    { method: 'PUT', headers: navigation },
+  ]
+  for (const options of blocked) assert.equal((await request(review.reviewUrl, options)).status, 403)
+  for (const action of ['', '/ready', '/draft', '/submit', '/cancel']) {
+    for (const method of ['GET', 'POST']) {
+      assert.equal((await request(new URL(`${review.endpoint}${action}`, review.reviewUrl), { method, headers: navigation })).status, 403)
     }
-    if (request.url === '/app.js') {
-      response.writeHead(200, { 'content-type': 'text/javascript' })
-      response.end('window.appLoaded = true;')
-      return
-    }
-    response.writeHead(404)
-    response.end()
-  })
-  upstream.on('upgrade', (request, socket) => {
-    websocketOrigin = request.headers.origin
-    socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
-  })
-  const upstreamPort = await listen(upstream)
-  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
-  const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${upstreamPort}/app?theme=dark`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-  })
-  t.after(() => review.close())
-
-  const browserOrigin = new URL(review.reviewUrl).origin
-  const pageResponse = await fetch(review.reviewUrl, {
-    headers: { origin: browserOrigin, 'sec-fetch-site': 'same-origin' },
-  })
-  assert.equal(pageResponse.status, 200)
-  assert.equal(pageResponse.headers.get('content-security-policy'), null)
-  const pageHtml = await pageResponse.text()
-  const endpoint = endpointFromHtml(pageHtml)
-  assert.match(pageHtml, /Live app.*const endpoint=/s)
-  const upstreamOrigin = `http://127.0.0.1:${upstreamPort}`
-  assert.equal(pageOrigin, upstreamOrigin)
-  const assetResponse = await fetch(new URL('app.js', review.reviewUrl))
-  assert.equal(assetResponse.status, 200)
-  assert.equal(await assetResponse.text(), 'window.appLoaded = true;')
-  const reviewUrl = new URL(review.reviewUrl)
-  const handshake = await websocketHandshake(Number(reviewUrl.port), '/socket', browserOrigin)
-  assert.match(handshake, /^HTTP\/1\.1 101 Switching Protocols/)
-  assert.equal(websocketOrigin, upstreamOrigin)
-  const crossOriginResponse = await fetch(review.reviewUrl, {
-    headers: { origin: 'https://example.com' },
-  })
-  assert.equal(crossOriginResponse.status, 403)
-  const crossSiteResponse = await fetch(review.reviewUrl, {
-    headers: { 'sec-fetch-site': 'cross-site' },
-  })
-  assert.equal(crossSiteResponse.status, 403)
-  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
-    method: 'GET',
-    path: `${reviewUrl.pathname}${reviewUrl.search}`,
-    headers: {
-      'Sec-Fetch-Site': 'cross-site',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-    },
-  }), 200)
-  assert.equal(await rawHttpStatus(Number(reviewUrl.port), reviewUrl.hostname, reviewUrl.host, {
-    method: 'GET',
-    path: `${reviewUrl.pathname}?theme=light`,
-    headers: {
-      'Sec-Fetch-Site': 'cross-site',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-    },
-  }), 403)
-  const rejectedHandshake = await websocketHandshake(Number(reviewUrl.port), '/socket', 'https://example.com')
-  assert.match(rejectedHandshake, /^HTTP\/1\.1 403 Forbidden/)
-  assert.equal(await rawHttpStatus(Number(reviewUrl.port), '127.0.0.1', `localhost:${reviewUrl.port}`), 403)
-  const rejectedHostHandshake = await websocketHandshake(
-    Number(reviewUrl.port), '/socket', browserOrigin, `localhost:${reviewUrl.port}`,
-  )
-  assert.match(rejectedHostHandshake, /^HTTP\/1\.1 403 Forbidden/)
-  await fetch(new URL(`${endpoint}/cancel`, review.reviewUrl), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: '{}',
-  })
-  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
+  }
+  assert.equal(reached.length, before, 'rejected requests must not reach the app')
 })
 
-test('server shutdown destroys upgraded sockets instead of waiting indefinitely', async t => {
-  const upstreamSockets = new Set()
-  const upstream = createServer((_request, response) => response.end('<html></html>'))
-  upstream.on('upgrade', (_request, socket) => {
-    upstreamSockets.add(socket)
-    socket.once('close', () => upstreamSockets.delete(socket))
-    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
-  })
-  const upstreamPort = await listen(upstream)
-  t.after(() => {
-    for (const socket of upstreamSockets) socket.destroy()
-    return new Promise(resolveClose => upstream.close(resolveClose))
-  })
-  const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${upstreamPort}/app`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-  })
-  t.after(() => review.close())
-  const reviewUrl = new URL(review.reviewUrl)
-  const socket = await openWebsocket(Number(reviewUrl.port), '/socket', reviewUrl.origin)
-  t.after(() => socket.destroy())
-
-  const shutdown = await Promise.race([
-    review.close().then(() => 'closed'),
-    new Promise(resolveWait => setTimeout(() => resolveWait('timed out'), 100)),
-  ])
-  assert.equal(shutdown, 'closed')
-})
-
-test('an unavailable served page returns a visible error instead of hanging', async t => {
-  const probe = createServer()
-  const unavailablePort = await listen(probe)
-  await new Promise(resolveClose => probe.close(resolveClose))
-  const events = []
-  const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${unavailablePort}/missing`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: (level, message, details) => events.push({ level, message, details }),
-  })
-  t.after(() => review.close())
-
-  const response = await fetch(review.reviewUrl)
-  assert.equal(response.status, 502)
-  assert.match(await response.text(), /Could not reach local page/)
-  assert.ok(events.some(event => event.level === 'error' && event.message === 'Could not reach served-page source'))
-})
-
-test('a stalled served page times out and releases the proxied request', async t => {
+test('bind and upstream failures report useful errors rather than hanging', async t => {
   const upstream = createServer(() => {})
-  const upstreamPort = await listen(upstream)
-  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
-  const events = []
-  const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${upstreamPort}/stalled`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: (level, message, details) => events.push({ level, message, details }),
-    upstreamTimeoutMs: 20,
-  })
-  t.after(() => review.close())
-
-  const response = await fetch(review.reviewUrl)
-  assert.equal(response.status, 502)
-  assert.match(await response.text(), /did not respond in time/)
-  assert.ok(events.some(event => (
-    event.level === 'error'
-    && event.message === 'Could not reach served-page source'
-    && /did not respond in time/.test(event.details.error)
-  )))
+  const port = await listen(t, upstream)
+  const review = await startReview(t, parseSource(`http://127.0.0.1:${port}/stalled`), { upstreamTimeoutMs: 20 })
+  await assert.rejects(startReview(t, parseSource(`http://127.0.0.1:${port}/`), { port }), /could not bind.*EADDRINUSE/)
+  const stalled = await request(review.reviewUrl)
+  assert.equal(stalled.status, 502)
+  assert.match(stalled.text, /did not respond in time/)
+  await new Promise(resolve => upstream.close(resolve))
+  const unavailable = await request(review.reviewUrl)
+  assert.equal(unavailable.status, 502)
+  assert.match(unavailable.text, /Could not reach local page/)
 })
 
-test('localhost served-page reviews retain the localhost browser hostname', async t => {
-  const upstream = createServer((_request, response) => response.end('<html><body>Local session</body></html>'))
-  const upstreamPort = await new Promise((resolveListen, rejectListen) => {
-    upstream.once('error', rejectListen)
-    upstream.listen(0, 'localhost', () => resolveListen(upstream.address().port))
-  })
-  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
-  const review = await createReviewServer({
-    source: parseSource(`http://localhost:${upstreamPort}/session`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: OVERLAY_SCRIPT,
-    log: () => {},
-  })
-  t.after(() => review.close())
-
-  assert.equal(new URL(review.reviewUrl).hostname, 'localhost')
-  assert.equal((await fetch(review.reviewUrl)).status, 200)
+test('filesystem failures leave cancellation available and idle reviews still time out', async t => {
+  const review = await fileReview(t)
+  rmSync(review.served, { recursive: true })
+  const failure = await request(new URL('/missing.css', review.reviewUrl))
+  assert.equal(failure.status, 500)
+  assert.equal(failure.text, 'Review request failed')
+  assert.equal((await post(review, 'cancel')).status, 200)
+  assert.deepEqual(await review.completion, { action: 'cancel', comments: [] })
+  const idle = await fileReview(t, { safetyTimeoutMs: 20 })
+  assert.deepEqual(await idle.completion, { action: 'timeout', comments: [] })
 })
 
-function selfSignedCertificate(t, directory) {
-  const key = join(directory, 'key.pem')
-  const cert = join(directory, 'cert.pem')
-  const result = spawnSync('openssl', [
-    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes',
-    '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1',
-    '-keyout', key, '-out', cert,
-  ])
-  if (result.error?.code === 'ENOENT') {
-    t.skip('openssl is not available to create a test certificate')
-    return null
-  }
-  assert.equal(result.status, 0, String(result.stderr))
-  return { cert: readFileSync(cert), key: readFileSync(key), certPath: cert, keyPath: key }
-}
-
-function httpsText(url, ca, { method = 'GET', headers = {}, body } = {}) {
-  return new Promise((resolveRequest, rejectRequest) => {
-    const request = httpsRequest(url, { method, headers, ca }, response => {
-      let text = ''
-      response.setEncoding('utf8')
-      response.on('data', chunk => { text += chunk })
-      response.on('end', () => resolveRequest({ status: response.statusCode, text }))
-    })
-    request.on('error', rejectRequest)
-    request.end(body)
-  })
-}
-
-test('TLS reviews serve HTTPS and accept only same-origin HTTPS requests', async t => {
-  const tls = selfSignedCertificate(t, temporaryDirectory(t))
-  if (!tls) return
-  const upstream = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'text/html' })
-    response.end('<html><body>Secure app</body></html>')
-  })
-  const upstreamPort = await listen(upstream)
-  t.after(() => new Promise(resolveClose => upstream.close(resolveClose)))
-  const review = await createReviewServer({
-    source: parseSource(`http://127.0.0.1:${upstreamPort}/`),
-    draftOutput: null,
-    initialComments: [],
-    overlayScript: 'const endpoint=__ENDPOINT__;const comments=__INITIAL_COMMENTS__;',
-    log: () => {},
-    tls,
-  })
-  t.after(() => review.close())
-
-  assert.match(review.reviewUrl, /^https:\/\/127\.0\.0\.1:\d+\/$/)
-  const origin = new URL(review.reviewUrl).origin
-  const page = await httpsText(review.reviewUrl, tls.cert, { headers: { origin, 'sec-fetch-site': 'same-origin' } })
-  assert.equal(page.status, 200)
-  assert.match(page.text, /Secure app.*const endpoint=/s)
-
-  const draft = new URL(`${endpointFromHtml(page.text)}/draft`, review.reviewUrl)
-  const body = JSON.stringify({ comments: [] })
-  const sameOrigin = await httpsText(draft, tls.cert, { method: 'POST', headers: { origin }, body })
-  assert.equal(sameOrigin.status, 200)
-  const plainOrigin = origin.replace('https:', 'http:')
-  const crossProtocol = await httpsText(draft, tls.cert, { method: 'POST', headers: { origin: plainOrigin }, body })
-  assert.equal(crossProtocol.status, 403)
+test('invalid async input leaves a diagnostic log', t => {
+  const output = join(temporaryDirectory(t), 'feedback.json')
+  const result = spawnSync(process.execPath, [script, 'http://example.com/page', '--async', '--output', output], { encoding: 'utf8', timeout: 5000 })
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /loopback URL/)
+  assert.match(readFileSync(logPath(output), 'utf8'), /loopback URL/)
 })
 
-test('CLI requires the TLS certificate and key together', t => {
-  const directory = temporaryDirectory(t)
-  const page = join(directory, 'page.html')
-  writeFileSync(page, '<html></html>')
-  writeFileSync(join(directory, 'cert.pem'), '')
-  assert.throws(() => parseArgs([page, '--tls-cert', join(directory, 'cert.pem')]), /--tls-cert and --tls-key must be given together/)
-  assert.throws(() => parseArgs([page, '--tls-key', join(directory, 'cert.pem')]), /--tls-cert and --tls-key must be given together/)
-  assert.throws(
-    () => parseArgs([page, '--tls-cert', directory, '--tls-key', join(directory, 'cert.pem')]),
-    /--tls-cert must be an existing PEM file/,
-  )
-  assert.throws(
-    () => parseArgs([page, '--tls-cert', join(directory, 'cert.pem'), '--tls-key', join(directory, 'missing.pem')]),
-    /--tls-key must be an existing PEM file/,
-  )
-})
-
-test('async TLS reviews forward the certificate to the worker', async t => {
-  const directory = temporaryDirectory(t)
-  const tls = selfSignedCertificate(t, temporaryDirectory(t))
-  if (!tls) return
-  const html = join(directory, 'page.html')
-  const output = join(directory, 'feedback.json')
-  const script = fileURLToPath(new URL('../scripts/html_review.mjs', import.meta.url))
-  writeFileSync(html, '<html><body>Async secure review</body></html>')
-  t.after(() => cleanupAsyncReview(output))
-  const argv = [script, html, '--async', '--output', output, '--no-open', '--tls-cert', tls.certPath, '--tls-key', tls.keyPath]
-  const launched = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 15_000 })
-  assert.equal(launched.status, 0, launched.stderr)
-  const ready = /Review URL: (https:\/\/\S+)/.exec(launched.stdout)?.[1]
-  assert.ok(ready, 'async TLS review should print an https review URL')
-  const page = await httpsText(ready, tls.cert)
-  assert.equal(page.status, 200)
-  const cancel = new URL(`${endpointFromHtml(page.text)}/cancel`, ready)
-  assert.equal((await httpsText(cancel, tls.cert, { method: 'POST', body: '{}' })).status, 200)
-})
-
-test('CLI rejects TLS keys in the served tree, including symlinked paths', t => {
-  const directory = temporaryDirectory(t)
+test('async TLS CLI forwards launch options and retains attributable readiness evidence', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'html-review-test-'))
   const served = join(directory, 'served')
   mkdirSync(served)
-  const page = join(served, 'page.html')
-  const key = join(served, 'key.pem')
+  const html = join(served, 'page.html')
+  const output = join(directory, 'feedback.json')
+  const key = join(directory, 'key.pem')
   const cert = join(directory, 'cert.pem')
-  writeFileSync(page, '<html></html>')
-  writeFileSync(key, 'private test key')
-  writeFileSync(cert, 'test certificate')
-  const args = keyPath => [page, '--tls-cert', cert, '--tls-key', keyPath]
-  assert.throws(() => parseArgs(args(key)), /outside the reviewed file directory tree/)
-  const keyLink = join(directory, 'key-link.pem')
-  symlinkSync(key, keyLink)
-  assert.throws(() => parseArgs(args(keyLink)), /outside the reviewed file directory tree/)
-  const servedLink = join(directory, 'served-link')
-  symlinkSync(served, servedLink)
-  assert.throws(() => parseArgs([join(servedLink, 'page.html'), '--tls-cert', cert, '--tls-key', key]), /outside the reviewed file directory tree/)
-  const safeKey = join(directory, 'safe-key.pem')
-  writeFileSync(safeKey, 'private test key')
-  assert.equal(parseArgs(args(safeKey)).tls_key, safeKey)
+  writeFileSync(html, '<html><body>Secure review</body></html>')
+  let workerPid
+  t.after(async () => {
+    // Stop the detached worker before deleting files it may still be writing.
+    if (workerPid) {
+      try { process.kill(workerPid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') throw error }
+      const deadline = Date.now() + 3000
+      while (Date.now() < deadline) {
+        try { process.kill(workerPid, 0) } catch (error) { if (error.code === 'ESRCH') break; throw error }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  })
+  const certificate = spawnSync('openssl', [
+    'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes',
+    '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1', '-keyout', key, '-out', cert,
+  ])
+  if (certificate.error?.code === 'ENOENT') return t.skip('openssl is unavailable')
+  assert.equal(certificate.status, 0, String(certificate.stderr))
+  const reservation = createServer()
+  const port = await listen(t, reservation)
+  await new Promise(resolve => reservation.close(resolve))
+  const launched = spawnSync(process.execPath, [
+    script, html, '--async', '--output', output, '--no-open', '--port', String(port),
+    '--tls-cert', cert, '--tls-key', key,
+  ], { encoding: 'utf8', timeout: 15_000 })
+  const log = readFileSync(logPath(output), 'utf8')
+  const detached = log.split('\n').find(line => line.includes(' INFO Detached review worker '))
+  const record = detached && JSON.parse(detached.slice(detached.indexOf('{')))
+  workerPid = record?.worker_pid
+  assert.equal(launched.status, 0, launched.stderr)
+  assert.ok(workerPid, 'log must identify the detached worker')
+  const ready = /Review URL: (https:\/\/\S+)/.exec(launched.stdout)?.[1]
+  assert.equal(new URL(ready).port, String(port))
+  assert.equal(typeof record.ready_file, 'string', 'worker log must name its retained readiness file')
+  assert.equal(readFileSync(record.ready_file, 'utf8'), `${ready}\n`)
+  assert.match(log, /Skipped default browser launch/)
+  const ca = readFileSync(cert)
+  const page = await request(ready, { ca })
+  assert.equal(page.status, 200)
+  const endpoint = /const endpoint\s*=\s*"([^"]+)"/.exec(page.text)?.[1]
+  assert.ok(endpoint)
+  const control = new URL(`${endpoint}/draft`, ready)
+  const origin = new URL(ready).origin
+  assert.equal((await request(control, { ca, method: 'POST', headers: { origin }, body: '{"comments":[]}' })).status, 200)
+  assert.equal((await request(control, { ca, method: 'POST', headers: { origin: origin.replace('https:', 'http:') }, body: '{}' })).status, 403)
+  assert.equal((await request(new URL(`${endpoint}/cancel`, ready), { ca, method: 'POST', body: '{}' })).status, 200)
 })
+
 test('local adapter persists patches and reports HTTP failures before completion', async () => {
   const { runInNewContext } = await import('node:vm');
   const calls = [];
@@ -928,3 +377,35 @@ test('local adapter persists patches and reports HTTP failures before completion
   context.fetch = async () => ({ ok: false, text: async () => 'Disk full' });
   await assert.rejects(options.saveDraft({ comments: [], deleted_ids: [] }), /Disk full/);
 });
+
+test('an upload started before submission cannot replace saved feedback afterward', async t => {
+  const comments = [{ id: 'saved', comment: 'Original feedback' }]
+  const review = await fileReview(t, { initialComments: comments })
+  const draft = review.draftOutput
+  writeFileSync(draft, JSON.stringify({ comments }))
+  const originalDraft = readFileSync(draft, 'utf8')
+  const body = JSON.stringify({ comments: [{ id: 'late', comment: 'Rejected feedback' }] })
+  const request = httpRequest(new URL(`${review.endpoint}/draft`, review.reviewUrl), {
+    method: 'POST', headers: { Expect: '100-continue', 'Content-Length': Buffer.byteLength(body) },
+  })
+  t.after(() => request.destroy())
+  const result = new Promise((resolve, reject) => {
+    request.once('error', reject)
+    request.once('response', response => {
+      response.resume()
+      response.once('end', () => resolve(response.statusCode))
+    })
+  })
+  // Accept headers first, but hold the body until another request submits.
+  await new Promise((resolve, reject) => {
+    request.once('continue', resolve)
+    request.once('error', reject)
+    request.flushHeaders()
+  })
+  const response = await fetch(new URL(`${review.endpoint}/submit`, review.reviewUrl), { method: 'POST', body: '{}' })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await review.completion, { action: 'submit', comments })
+  request.end(body)
+  assert.equal(await result, 409)
+  assert.equal(readFileSync(draft, 'utf8'), originalDraft)
+})

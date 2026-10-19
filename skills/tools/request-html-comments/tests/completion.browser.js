@@ -3,9 +3,14 @@
 async (page) => {
   await page.goto('about:blank');
   await page.setContent('<h1 id="target" style="margin-top:180px">Review target</h1>');
+  await page.evaluate(() => {
+    window.originalExports = { hostApplication: true };
+    window.module = { exports: window.originalExports };
+  });
   await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
   await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
   await page.evaluate(() => {
+    if (window.module.exports !== window.originalExports) throw new Error('Injection replaced the host CommonJS exports');
     window.calls = 0;
     window.saved = [];
     window.api = createHtmlReview({
@@ -70,5 +75,5 @@ async (page) => {
   await page.waitForFunction(count => window.saved.length > count, retriedSave);
   await page.evaluate(() => window.releaseSave());
   await page.waitForFunction(() => window.calls === 2);
-  console.log('PASS: submission hides review UI; persistence lock, editor focus lock, duplicate completion, resume, failure retry');
+  console.log('PASS: host CommonJS exports preserved; submission hides review UI; persistence lock, editor focus lock, duplicate completion, resume, failure retry');
 }

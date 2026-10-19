@@ -35,8 +35,10 @@ Optional options:
   comments.
 - `submitRequiresPersistence`: default true. A download-only host can set false
   so storage failure does not prevent exporting the in-memory comments. The
-  failure remains visible after completion while the document stays mounted; a
-  host that replaces or navigates the page must show its own warning.
+  failure remains visible after completion while the document stays mounted,
+  including after a modal closes, is removed, or is replaced. Review controls
+  stay hidden until `resume()`. A host that replaces or navigates the page must
+  show its own warning.
 - `actions`: `{ label, run(api) }` toolbar actions. The engine flushes before
   invoking an action and displays errors.
 

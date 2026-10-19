@@ -119,4 +119,6 @@ const __stewardReviewGeometry = (() => {
 
 // Keep direct Node behavioral tests and local helper consumers working without
 // making the browser injection depend on a CommonJS global.
-if (typeof module !== 'undefined' && module.exports) module.exports = __stewardReviewGeometry;
+if (typeof window === 'undefined' && typeof module !== 'undefined' && module.exports) {
+  module.exports = __stewardReviewGeometry;
+}

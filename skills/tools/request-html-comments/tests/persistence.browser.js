@@ -36,5 +36,44 @@ async (page) => {
   if (!(await page.locator('.sr-status').textContent()).includes('Host callback failed')) {
     throw new Error('Saving cleared an unrelated callback error');
   }
-  return 'PASS: failed save, successful retry, retained feedback, and distinct callback errors';
+
+  await page.goto('about:blank');
+  await page.setContent('<dialog id="host"><p id="target">Review target</p></dialog>');
+  await page.evaluate(() => document.querySelector('#host').showModal());
+  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
+  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+  await page.evaluate(() => {
+    window.failSave = true;
+    window.api = createHtmlReview({
+      submitRequiresPersistence: false,
+      saveDraft: () => { if (window.failSave) throw new Error('Disk full'); },
+      onFinish: () => {},
+    });
+    window.api.addComment({
+      id: 'modal-draft', comment: 'Keep modal feedback', target_type: 'element',
+      element: {css_selector: '#target'}, anchor: {x: 30, y: 100}, anchor_coordinate_space: 'viewport',
+    });
+  });
+  await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'visible'});
+  await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
+  await page.locator('.sr-send').waitFor({state: 'hidden'});
+  await page.getByRole('status').filter({hasText: 'Disk full'}).waitFor({state: 'visible'});
+  await page.evaluate(() => document.querySelector('#host').close());
+  // Allow the modal observer and its scheduled placement update to run.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.getByRole('status').filter({hasText: 'Disk full'}).waitFor({state: 'visible'});
+  if (await page.locator('.sr-send').isVisible()) throw new Error('Modal close reopened completed controls');
+  if (await page.locator('.steward-review-pin:visible, .steward-review-highlight:visible, .steward-review-popup:visible').count()) {
+    throw new Error('Modal close reopened completed annotations');
+  }
+  if (await page.evaluate(() => window.api.getComments()[0]?.comment) !== 'Keep modal feedback') {
+    throw new Error('Modal close lost feedback');
+  }
+  await page.evaluate(() => { window.failSave = false; window.api.resume(); });
+  await page.getByRole('button', {name: 'Send review comments', exact: true}).click();
+  await page.locator('.sr-send').waitFor({state: 'hidden'});
+  if (await page.getByRole('status').filter({hasText: 'Disk full'}).isVisible()) {
+    throw new Error('Successful resumed save retained a warning');
+  }
+  return 'PASS: save retry, retained feedback, callback errors, and completion warning across modal close and resume';
 }
