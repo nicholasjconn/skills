@@ -12,14 +12,6 @@ Prerequisites: Requires Tavily CLI (tvly), authentication, and network access. A
 
 Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the smallest useful Tavily command, then summarize the sourced result.
 
-## Defaults
-
-- Use `tvly search` for general web discovery when no URL or known site is provided.
-- Use `tvly extract` directly when the user provides exact URLs.
-- Use `tvly map` only when the user provides a known site/domain and needs URL discovery.
-- Use `tvly research` only when the user wants cited synthesis, comparison, or report-style analysis.
-- Prefer `--json` when the CLI supports it so results can be parsed before summarizing.
-
 ## Global constraints
 
 - Run `tvly --help` before the first Tavily command in a session, then run
@@ -31,7 +23,7 @@ Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the
 - Do not use Tavily MCP or Fetch MCP as a fallback.
 - Do not use `tvly crawl` in the default Agent Layer workflow.
 - When saving output or scratch data, write under `.agent-layer/tmp/`.
-- Before using non-obvious flags, run `tvly <command> --help` or `tvly research <subcommand> --help`; do not rely on memorized CLI syntax.
+- Run command-specific help if flags matter: `tvly <command> --help` or `tvly research <subcommand> --help`.
 
 ## Required artifacts
 
@@ -48,7 +40,7 @@ Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the
 
 Use `tvly search` when:
 
-- The user does not provide a specific URL.
+- The user does not provide a specific URL or known site.
 - The task is source discovery, current facts, recent news, or finding relevant pages.
 - You need domain filters, time filters, or a small set of result snippets.
 
@@ -71,27 +63,15 @@ Use `tvly research` when:
 
 ## Workflow
 
-1. Inspect root help with `tvly --help`, then confirm CLI readiness with
-   `tvly --status`.
-2. Select the smallest command that matches the request.
-3. Run command-specific help if flags matter:
-   - `tvly search --help`
-   - `tvly extract --help`
-   - `tvly map --help`
-   - `tvly research run --help`
-   - `tvly research status --help`
-   - `tvly research poll --help`
-4. Prefer `--json` for agent workflows so results can be parsed and summarized deliberately.
-5. Keep queries short and search-like. Break complex prompts into focused searches instead of sending one long prompt to search.
-6. For known URLs, skip search and go directly to extract.
-7. For known sites with unknown pages, map first and extract only the useful URLs.
-8. For long-running research, use Tavily's async status/poll flow when it prevents blocking or losing the request ID.
+1. Select the smallest command that matches the request.
+2. Prefer `--json` for agent workflows so results can be parsed and summarized deliberately.
+3. Keep queries short and search-like. Break complex prompts into focused searches instead of sending one long prompt to search.
+4. For long-running research, use `tvly research run --no-wait`, then status/poll when it prevents blocking or losing the request ID.
 
 ## Guardrails
 
 - Do not dump large raw outputs into the conversation when a narrower query, domain filter, time filter, or selected URL list would answer the question.
 - Do not ask Tavily to synthesize when the user only needs source discovery; use search and summarize the results yourself.
-- Do not use search when the user gave the exact URL; use extract.
 - Do not use map for general web search; use map only for known sites/domains.
 - Do not use research for quick factual lookups unless the user explicitly wants a cited report.
 - Do not treat Tavily output as authoritative by itself. Report source URLs and distinguish sourced facts from your synthesis.
