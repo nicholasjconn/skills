@@ -1274,7 +1274,12 @@ function createHtmlReview(options) {
   const attachFrameDocument = (frame) => {
     const nested = accessibleFrameDocument(frame);
     const previous = frameDocuments.get(frame);
-    if (previous?.doc === nested) return;
+    if (previous?.doc === nested) {
+      // Parsing can discard an early-injected style without replacing the
+      // Document. Recheck on load without rebinding its existing listeners.
+      ensureDocumentHoverStyle(nested);
+      return;
+    }
     if (previous) {
       previous.controller.abort();
       releaseFrames(previous.doc);

@@ -27,7 +27,7 @@ jobs:
           server_pid=$!
           trap 'playwright-cli -s=html-review-ci close; kill "$server_pid"' EXIT
           playwright-cli -s=html-review-ci open http://127.0.0.1:8765/tests/text-selection.html
-          for scenario in text-selection completion navigation; do
+          for scenario in text-selection completion navigation iframe-style; do
             playwright-cli -s=html-review-ci run-code --filename="skills/tools/request-html-comments/tests/$scenario.browser.js"
           done
           playwright-cli -s=html-review-ci run-code --filename=skills/tools/request-html-comments/tests/persistence.browser.js
