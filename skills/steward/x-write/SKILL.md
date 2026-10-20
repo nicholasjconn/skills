@@ -13,6 +13,9 @@ description: >-
 
 Use `./steward x write` to create reviewable pending X drafts.
 
+Image drafts require a Steward checkout with attachment-preserving
+`upsert-draft`; stop and report missing support before drafting.
+
 ## Defaults
 
 - Draft a `post` unless Nick gives an explicit target post ID or URL, which
@@ -133,6 +136,10 @@ through `--instructions`:
 ./steward x write upsert-draft <run_id> <target-number>
 ```
 
+For supplied images, copy the exact files into the run's `assets/` and record
+their ordered, run-relative paths in `pending_posts[].attachments`. Show them
+with each draft; change the files or their order only when Nick asks.
+
 Before moving to the next target or seeking approval, show Nick the exact
 pending text, weighted count, readiness status, and context path. For long-form
 posts, also show the opening 280 weighted characters separately so he can judge
@@ -165,6 +172,12 @@ file is opened directly to capture the image, so only a sibling reference is
 reliable. The copy is a frozen snapshot alongside the exported image; do not
 edit it to restyle a published package.
 
+When Nick requests HTML comments, use `request-html-comments` for one review
+page showing the exact pending text, weighted count, readiness, and ordered
+images. Include live, annotatable HTML alongside each HTML-backed image.
+Follow that skill's targeting and validation rules. Comments do not approve
+the language or any public action.
+
 ### 5. Record language approval
 
 After Nick approves exact final language, save that text only in
@@ -173,6 +186,9 @@ approval time, and exact-approval session and transcript path in
 `x-posts/approved-posts.json`. Reuse the same post ID for approved revisions
 until publication. If exact language is not approved, leave the item pending and
 do not claim an approved-language comparison.
+
+Save approved images with the package and record their order according to
+`x-posts/README.md`.
 
 Then compare only the first proposed text, the final approved text, and Nick's
 language feedback — excluding planner targets, target edits, strategy, content
