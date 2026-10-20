@@ -111,7 +111,7 @@ playwright-cli --raw eval "el => el.checked" e8
 # Inspect actual aria snapshot for toMatchAriaSnapshot
 # (whole page, or use a unique selector to scope to a region)
 playwright-cli --raw snapshot
-playwright-cli --raw snapshot "nav"
+playwright-cli --raw snapshot "[data-testid='main-nav']"
 ```
 
 ```typescript
