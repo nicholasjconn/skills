@@ -13,6 +13,9 @@ description: >-
 
 Use `./steward x write` to create reviewable pending X drafts.
 
+Image drafts require a Steward checkout with attachment-preserving
+`upsert-draft`; stop and report missing support before drafting.
+
 ## Defaults
 
 - Draft a `post` unless Nick gives an explicit target post ID or URL, which
