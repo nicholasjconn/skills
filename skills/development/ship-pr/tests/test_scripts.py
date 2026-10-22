@@ -356,8 +356,7 @@ class ScriptTests(unittest.TestCase):
 
         # A recoverable partial append must still be refused through a symlink.
         target = self.root / "target.jsonl"
-        self.watch_once(self.watcher(first, dict(first, headRefOid="def")), target)
-        interrupted = target.read_bytes() + b'{"repo":'
+        interrupted = b'{"repo":"acme/widgets","pr":7,"state":{}}\n{"repo":'
         target.write_bytes(interrupted)
         log = self.root / "linked.jsonl"
         log.symlink_to(target.name)

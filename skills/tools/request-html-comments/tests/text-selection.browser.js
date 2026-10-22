@@ -74,12 +74,12 @@ async (page) => {
     }, moved.x + moved.width / 2);
   }
   // A 350 x 50 viewport has a normalized diagonal of 250: 10% is 25 units.
-  // These three fixtures cover viewBox scaling, nested lengths, and CSS sizing.
+  // The first fixture scales y by 3, giving 75px; the other two stay at 25px.
   for (const [fixture, thickness] of [
-    [`<svg style="width:800px;height:200px" viewBox="0 0 800 200"><svg width="700" height="100" viewBox="0 0 350 50" style="width:auto;height:auto">
+    [`<svg style="width:800px;height:200px" viewBox="0 0 800 200"><svg width="700" height="150" viewBox="0 0 350 50" preserveAspectRatio="none" style="width:auto;height:auto">
       <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
-    </svg></svg>`, 50],
-    [`<svg style="width:700px;height:100px" viewBox="0 0 700 100"><svg width="50%" height="50%" style="width:auto;height:auto">
+    </svg></svg>`, 75],
+    [`<svg style="width:700px;height:100px" viewBox="0 0 700 100"><svg width="50%" height="50%">
       <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
     </svg></svg>`, 25],
     [`<svg width="900" height="450" style="box-sizing:border-box;width:450px;height:150px;padding:40px;border:10px solid black">
@@ -94,7 +94,7 @@ async (page) => {
     const target = page.locator('#percentage-stroke');
     await target.scrollIntoViewIfNeeded();
     const rect = await target.evaluate(node => node.getBoundingClientRect().toJSON());
-    const point = { x: Math.round(rect.x + rect.width / 3), y: Math.round(rect.y + thickness / 4) };
+    const point = { x: rect.x + rect.width / 3, y: rect.y + thickness / 4 };
     await page.locator('.sr-add').click();
     await page.mouse.click(point.x, point.y);
     const comment = await saveComment();
