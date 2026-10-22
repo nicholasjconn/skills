@@ -319,6 +319,19 @@ function createHtmlReview(options) {
     }
   };
   shieldReviewUi(root);
+  const svgViewportLength = (svg, axis) => {
+    const viewBoxLength = svg.viewBox?.animVal[axis];
+    if (viewBoxLength > 0) return viewBoxLength;
+    // Nested viewport attributes resolve percentages in the parent SVG's units.
+    if (svg.ownerSVGElement) return svg[axis].animVal.value;
+    // Outermost SVGs use CSS content sizes, which can override their attributes.
+    const style = ownerWindowOf(svg).getComputedStyle(svg);
+    const size = Number.parseFloat(style[axis]);
+    if (style.boxSizing !== 'border-box') return size;
+    const [start, end] = axis === 'width' ? ['Left', 'Right'] : ['Top', 'Bottom'];
+    return size - Number.parseFloat(style[`padding${start}`]) - Number.parseFloat(style[`padding${end}`])
+      - Number.parseFloat(style[`border${start}Width`]) - Number.parseFloat(style[`border${end}Width`]);
+  };
   // SVG line/path bounds omit the stroke. A painted horizontal or vertical
   // segment can therefore have a zero-area DOM rect despite being clickable.
   // Give its degenerate axis a stroke-sized annotation box, shared by hit
@@ -330,8 +343,17 @@ function createHtmlReview(options) {
         || typeof node.getScreenCTM !== 'function'
         || (rect.width === 0 && rect.height === 0)) return rect;
     const style = ownerWindowOf(node).getComputedStyle(node);
-    const stroke = Number.parseFloat(style.strokeWidth);
+    let stroke = Number.parseFloat(style.strokeWidth);
     if (style.stroke === 'none' || !(stroke > 0)) return rect;
+    if (style.strokeWidth.endsWith('%')) {
+      const viewport = node.viewportElement || node.ownerSVGElement;
+      if (!viewport) return rect;
+      const width = svgViewportLength(viewport, 'width');
+      const height = svgViewportLength(viewport, 'height');
+      if (!(width > 0 && height > 0)) return rect;
+      // Percentages use the normalized user-space diagonal, before CTM scaling.
+      stroke *= Math.hypot(width, height) / (100 * Math.SQRT2);
+    }
     const matrix = node.getScreenCTM();
     if (!matrix) return rect;
     const fixedStroke = style.vectorEffect === 'non-scaling-stroke';

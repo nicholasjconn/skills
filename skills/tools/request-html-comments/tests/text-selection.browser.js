@@ -73,6 +73,40 @@ async (page) => {
       return Math.abs(rect.x + rect.width / 2 - center) < 2;
     }, moved.x + moved.width / 2);
   }
-  await page.evaluate(() => reviewApi.clearComments());
-  return 'PASS: three native text selections and two stroke targets with moving pins';
+  // A 350 x 50 viewport has a normalized diagonal of 250: 10% is 25 units.
+  // The first fixture scales y by 3, giving 75px; the other two stay at 25px.
+  for (const [fixture, thickness] of [
+    [`<svg style="width:800px;height:200px" viewBox="0 0 800 200"><svg width="700" height="150" viewBox="0 0 350 50" preserveAspectRatio="none" style="width:auto;height:auto">
+      <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
+    </svg></svg>`, 75],
+    [`<svg style="width:700px;height:100px" viewBox="0 0 700 100"><svg width="50%" height="50%">
+      <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
+    </svg></svg>`, 25],
+    [`<svg width="900" height="450" style="box-sizing:border-box;width:450px;height:150px;padding:40px;border:10px solid black">
+      <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
+    </svg>`, 25],
+  ]) {
+    await page.evaluate(fixture => {
+      reviewApi.clearComments();
+      document.querySelector('#percentage-fixture')?.remove();
+      document.body.insertAdjacentHTML('beforeend', `<div id="percentage-fixture">${fixture}</div>`);
+    }, fixture);
+    const target = page.locator('#percentage-stroke');
+    await target.scrollIntoViewIfNeeded();
+    const rect = await target.evaluate(node => node.getBoundingClientRect().toJSON());
+    const point = { x: rect.x + rect.width / 3, y: rect.y + thickness / 4 };
+    await page.locator('.sr-add').click();
+    await page.mouse.click(point.x, point.y);
+    const comment = await saveComment();
+    const expected = { x: Math.round(rect.x), y: Math.round(rect.y - thickness / 2), width: Math.round(rect.width), height: thickness };
+    if (comment.element.css_selector !== '#percentage-stroke') throw new Error('Percentage stroke: selected another target');
+    if (JSON.stringify(comment.element.bounding_rect) !== JSON.stringify(expected)) {
+      throw new Error(`Percentage stroke: wrong painted bounds ${JSON.stringify(comment.element.bounding_rect)}; expected ${JSON.stringify(expected)}`);
+    }
+  }
+  await page.evaluate(() => {
+    reviewApi.clearComments();
+    document.querySelector('#percentage-fixture').remove();
+  });
+  return 'PASS: three native text selections, two numeric strokes with moving pins, and three percentage strokes with painted bounds';
 }

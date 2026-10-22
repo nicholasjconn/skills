@@ -18,6 +18,7 @@ An invalid, unterminated final log line is recovered only if complete records
 remain; the original log is preserved as <path>.interrupted.<unique suffix>,
 reported on stderr. A partial first record, malformed earlier records, or
 newline-terminated records stop the watcher with an error and leave the log unchanged.
+Invalid symlink logs are refused; recover their target explicitly.
 EOF
 }
 
@@ -133,6 +134,10 @@ trap cleanup EXIT
 # A killed append can leave a partial final JSON line. Validate the preceding
 # history before recovering, and retain the original bytes as evidence.
 if ! jq -nR 'inputs | fromjson | empty' "$log_file" 2>"$workdir/log-error"; then
+  if [[ -L "$log_file" ]]; then
+    printf 'watch-pr-events: invalid log %s; refusing recovery through symlink; recover its target explicitly\n' "$log_file" >&2
+    exit 1
+  fi
   sed '$d' "$log_file" >"$workdir/log-prefix.jsonl"
   if [[ -z "$(tail -c 1 "$log_file")" ]] || ! jq -nR 'inputs | fromjson | empty' "$workdir/log-prefix.jsonl" 2>/dev/null; then
     printf 'watch-pr-events: invalid log %s; refusing recovery of completed or interior records\n' "$log_file" >&2
