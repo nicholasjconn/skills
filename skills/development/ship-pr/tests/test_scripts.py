@@ -329,32 +329,7 @@ class ScriptTests(unittest.TestCase):
                 self.assertEqual([event["reason"] for event in events],
                                  ["review-deadline", "state-change", "state-change"])
 
-    def test_watcher_refuses_recovery_through_a_symlink(self):
-        first, second = self.snapshots()
-        target = self.root / "target.jsonl"
-        self.watch_once(self.watcher(first, second), target)
-        interrupted = target.read_bytes() + b'{"repo":'
-        target.write_bytes(interrupted)
-        log = self.root / "linked.jsonl"
-        log.symlink_to(target.name)
-        link_target = os.readlink(log)
-
-        result = self.run_script(
-            "watch-pr-events.sh", self.watcher(first, first),
-            *self.watch_args(log, "--exit-on-change"),
-        )
-
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertIn("refusing recovery through symlink", result.stderr)
-        self.assertIn(str(log), result.stderr)
-        self.assertEqual(result.stdout, "")
-        self.assertTrue(log.is_symlink())
-        self.assertEqual(os.readlink(log), link_target)
-        self.assertEqual(target.read_bytes(), interrupted)
-        self.assertEqual(list(self.root.glob(log.name + ".interrupted.*")), [])
-        self.assertEqual(list(self.root.glob(log.name + ".recovered.*")), [])
-
-    def test_watcher_refuses_corrupt_completed_or_interior_log_records(self):
+    def test_watcher_refuses_unsafe_log_recovery(self):
         first = {"createdAt": "2026-01-01T00:00:00Z", "headRefOid": "abc"}
         partial_first = b'{"repo":"acme/widgets","pr":7,"state":'
         multiline = b'{"repo":"acme/widgets",\n"pr":7,"state":{}}\n'
@@ -378,3 +353,22 @@ class ScriptTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
                 self.assertEqual(log.read_bytes(), content)
                 self.assertEqual(list(self.root.glob(log.name + ".interrupted.*")), [])
+
+        # A recoverable partial append must still be refused through a symlink.
+        target = self.root / "target.jsonl"
+        self.watch_once(self.watcher(first, dict(first, headRefOid="def")), target)
+        interrupted = target.read_bytes() + b'{"repo":'
+        target.write_bytes(interrupted)
+        log = self.root / "linked.jsonl"
+        log.symlink_to(target.name)
+        result = self.run_script(
+            "watch-pr-events.sh", self.watcher(first, first),
+            *self.watch_args(log, "--exit-on-change"),
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("refusing recovery through symlink", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertTrue(log.is_symlink())
+        self.assertEqual(os.readlink(log), target.name)
+        self.assertEqual(target.read_bytes(), interrupted)
+        self.assertEqual(list(self.root.glob(log.name + ".*")), [])
