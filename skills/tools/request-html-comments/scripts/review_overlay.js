@@ -320,8 +320,9 @@ function createHtmlReview(options) {
   };
   shieldReviewUi(root);
   const svgViewportLength = (svg, axis) => {
-    const viewBoxLength = svg.viewBox?.animVal[axis];
-    if (viewBoxLength > 0) return viewBoxLength;
+    const viewBox = svg.viewBox?.animVal;
+    // Invalid viewBoxes fall back as a whole.
+    if (viewBox?.width > 0 && viewBox.height > 0) return viewBox[axis];
     // Nested viewport attributes resolve percentages in the parent SVG's units.
     if (svg.ownerSVGElement) return svg[axis].animVal.value;
     // Outermost SVGs use CSS content sizes, which can override their attributes.
