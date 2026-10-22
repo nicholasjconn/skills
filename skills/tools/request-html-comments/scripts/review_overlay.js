@@ -330,8 +330,33 @@ function createHtmlReview(options) {
         || typeof node.getScreenCTM !== 'function'
         || (rect.width === 0 && rect.height === 0)) return rect;
     const style = ownerWindowOf(node).getComputedStyle(node);
-    const stroke = Number.parseFloat(style.strokeWidth);
+    let stroke = Number.parseFloat(style.strokeWidth);
     if (style.stroke === 'none' || !(stroke > 0)) return rect;
+    if (style.strokeWidth.endsWith('%')) {
+      const viewport = node.viewportElement || node.ownerSVGElement;
+      if (!viewport) return rect;
+      const viewBox = viewport.viewBox?.animVal;
+      const viewportStyle = ownerWindowOf(viewport).getComputedStyle(viewport);
+      // Nested SVG viewports use resolved SVG lengths, not computed CSS sizes.
+      const nestedViewport = Boolean(viewport.ownerSVGElement);
+      let viewportWidth = viewBox?.width || (nestedViewport
+        ? viewport.width.animVal.value : Number.parseFloat(viewportStyle.width));
+      let viewportHeight = viewBox?.height || (nestedViewport
+        ? viewport.height.animVal.value : Number.parseFloat(viewportStyle.height));
+      // Outermost CSS border-box sizes include space outside the SVG viewport.
+      if (!nestedViewport && viewportStyle.boxSizing === 'border-box') {
+        if (!viewBox?.width) viewportWidth -= Number.parseFloat(viewportStyle.paddingLeft)
+          + Number.parseFloat(viewportStyle.paddingRight) + Number.parseFloat(viewportStyle.borderLeftWidth)
+          + Number.parseFloat(viewportStyle.borderRightWidth);
+        if (!viewBox?.height) viewportHeight -= Number.parseFloat(viewportStyle.paddingTop)
+          + Number.parseFloat(viewportStyle.paddingBottom) + Number.parseFloat(viewportStyle.borderTopWidth)
+          + Number.parseFloat(viewportStyle.borderBottomWidth);
+      }
+      if (!(viewportWidth > 0 && viewportHeight > 0)) return rect;
+      // SVG percentages use the nearest viewport's normalized user-space
+      // diagonal, before scaling (including for non-scaling strokes).
+      stroke *= Math.hypot(viewportWidth, viewportHeight) / (100 * Math.SQRT2);
+    }
     const matrix = node.getScreenCTM();
     if (!matrix) return rect;
     const fixedStroke = style.vectorEffect === 'non-scaling-stroke';

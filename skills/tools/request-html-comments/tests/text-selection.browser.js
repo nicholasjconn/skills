@@ -73,6 +73,80 @@ async (page) => {
       return Math.abs(rect.x + rect.width / 2 - center) < 2;
     }, moved.x + moved.width / 2);
   }
+  // Percentages use the nearest viewport's normalized diagonal in user units,
+  // before viewBox scaling. A non-scaling stroke keeps that resolved thickness.
+  for (const scenario of [
+    { name: 'scaled-viewBox', width: 400, height: 200, scale: 2 },
+    { name: 'nested-viewBox', width: 300, height: 100, scale: 2, nested: true },
+    { name: 'nested-non-scaling', width: 300, height: 100, scale: 2, nested: true, fixed: true },
+    { name: 'viewport-without-viewBox', width: 600, height: 300, scale: 1, noViewBox: true },
+    { name: 'nested-without-viewBox', width: 600, height: 200, scale: 1, nested: true, noViewBox: true },
+    { name: 'nested-percentage-attributes', width: 600, height: 200, scale: 1, nested: true, noViewBox: true, percentageAttributes: true },
+    { name: 'nested-percentage-css', width: 600, height: 200, scale: 1, nested: true, noViewBox: true, viewportCss: 'width:50%;height:25%' },
+    { name: 'outer-border-box', width: 500, height: 200, scale: 1, noViewBox: true, viewportCss: 'box-sizing:border-box;width:600px;height:300px;padding:40px;border:10px solid black' },
+    { name: 'outer-content-box', width: 500, height: 200, scale: 1, noViewBox: true, viewportCss: 'box-sizing:content-box;width:500px;height:200px;padding:40px;border:10px solid black' },
+    { name: 'border-box-viewBox', width: 250, height: 100, scale: 2, viewportCss: 'box-sizing:border-box;width:600px;height:300px;padding:40px;border:10px solid black' },
+  ]) {
+    await page.evaluate(() => reviewApi.clearComments());
+    await page.evaluate(({ name, width, height, scale, nested, fixed, noViewBox, percentageAttributes, viewportCss }) => {
+      const outer = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      outer.style.cssText = `display:block;width:${nested ? 800 : width * scale}px;height:${nested ? 400 : height * scale}px`;
+      if (nested) outer.setAttribute('viewBox', '0 0 800 400');
+      let viewport = outer;
+      if (nested) {
+        viewport = document.createElementNS(outer.namespaceURI, 'svg');
+        viewport.setAttribute('x', '40');
+        viewport.setAttribute('y', '40');
+        outer.appendChild(viewport);
+      }
+      viewport.setAttribute('width', percentageAttributes ? '75%' : String(width * scale));
+      viewport.setAttribute('height', percentageAttributes ? '50%' : String(height * scale));
+      // Neutralize the fixture's global svg sizes; nested viewport attributes
+      // determine its dimensions even when computed CSS is auto or a percentage.
+      if (nested) viewport.style.cssText = viewportCss || 'width:auto;height:auto';
+      else if (viewportCss) {
+        viewport.style.cssText += `;${viewportCss}`;
+        // Definite outer CSS sizing must take precedence over intrinsic attributes.
+        viewport.setAttribute('width', '900');
+        viewport.setAttribute('height', '450');
+      }
+      if (!noViewBox) viewport.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      const line = document.createElementNS(outer.namespaceURI, 'line');
+      line.id = `percentage-${name}`;
+      for (const [key, value] of Object.entries({ x1: 40, x2: width - 40, y1: height / 2, y2: height / 2, stroke: 'blue', 'stroke-width': '10%' })) {
+        line.setAttribute(key, String(value));
+      }
+      if (fixed) line.setAttribute('vector-effect', 'non-scaling-stroke');
+      viewport.appendChild(line);
+      document.body.appendChild(outer);
+    }, scenario);
+    const target = page.locator(`#percentage-${scenario.name}`);
+    await target.scrollIntoViewIfNeeded();
+    const rect = await target.evaluate(node => {
+      const { x, y, width, height } = node.getBoundingClientRect();
+      return { x, y, width, height };
+    });
+    const thickness = 0.1 * Math.sqrt((scenario.width ** 2 + scenario.height ** 2) / 2) * (scenario.fixed ? 1 : scenario.scale);
+    const point = { x: Math.round(rect.x + rect.width * 0.35), y: Math.round(rect.y + thickness / 4) };
+    const anchor = { x: (point.x - rect.x) / rect.width, y: (point.y - rect.y + thickness / 2) / thickness };
+    await page.locator('.sr-add').click();
+    await page.mouse.click(point.x, point.y);
+    await page.getByRole('textbox', { name: 'Comment', exact: true }).waitFor({ timeout: 2000 });
+    const comment = await saveComment();
+    const expected = { x: Math.round(rect.x), y: Math.round(rect.y - thickness / 2), width: Math.round(rect.width), height: Math.round(thickness) };
+    if (comment.element.css_selector !== `#percentage-${scenario.name}`) throw new Error(`${scenario.name}: selected another target`);
+    if (JSON.stringify(comment.element.bounding_rect) !== JSON.stringify(expected)) {
+      throw new Error(`${scenario.name}: wrong painted bounds ${JSON.stringify(comment.element.bounding_rect)}; expected ${JSON.stringify(expected)}`);
+    }
+    if (Math.abs(comment.anchor_ratio.x - anchor.x) > 0.01 || Math.abs(comment.anchor_ratio.y - anchor.y) > 0.01) {
+      throw new Error(`${scenario.name}: wrong offset anchor ${JSON.stringify(comment.anchor_ratio)}`);
+    }
+    await page.waitForFunction(({ x, y }) => {
+      const pin = document.querySelector('.sr-layer').shadowRoot.querySelector('.steward-review-pin');
+      const rect = pin.getBoundingClientRect();
+      return Math.abs(rect.x + rect.width / 2 - x) < 2 && Math.abs(rect.y + rect.height / 2 - y) < 2;
+    }, point);
+  }
   await page.evaluate(() => reviewApi.clearComments());
-  return 'PASS: three native text selections and two stroke targets with moving pins';
+  return 'PASS: three native text selections, two numeric strokes and ten percentage strokes with bounds, offset anchors and pins';
 }
