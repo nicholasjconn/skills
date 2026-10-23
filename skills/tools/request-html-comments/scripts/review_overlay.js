@@ -549,6 +549,7 @@ function createHtmlReview(options) {
   modalHostObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
+    characterData: true,
     attributes: true,
     attributeFilter: ['open', 'role', 'aria-modal', 'class', 'style', 'hidden', 'inert']
   });
@@ -823,6 +824,7 @@ function createHtmlReview(options) {
     if (!reference?.css_selector || !scopeDocument) return null;
     const node = resolveSelectorReference(reference, scopeDocument);
     if (!visible(node)) return null;
+    // Changed text hides the marker without discarding its saved comment.
     const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
     return !reference.text_excerpt || text === reference.text_excerpt ? node : null;
   };
@@ -1371,7 +1373,7 @@ function createHtmlReview(options) {
       }
       scheduleCommentRefresh();
     });
-    observer.observe(root, { subtree: true, childList: true });
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
     shadowFrameObservers.set(root, observer);
     signal?.addEventListener('abort', () => {
       observer.disconnect();
@@ -1478,6 +1480,7 @@ function createHtmlReview(options) {
   discoverFrames(document);
   refreshComments();
   window.addEventListener('resize', () => {
+    if (!active) return;
     closeInfo();
     applyOverlayPlacement(copyRect(root), copyRect(popup));
   });
@@ -1559,7 +1562,7 @@ function createHtmlReview(options) {
       active = true;
       overlayLayer.style.setProperty('display', 'block', 'important');
       syncOverlayHost();
-      scheduleCommentRefresh();
+      applyOverlayPlacement(copyRect(root), copyRect(popup));
     },
     // The host must durably archive/clear its draft before clearing the UI.
     clearComments() {

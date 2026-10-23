@@ -50,9 +50,9 @@ async (page) => {
   }
   await page.getByRole('button', {name: 'Save', exact: true}).click();
   await page.setViewportSize(viewport);
-  await page.locator('#target').evaluate(node => { node.textContent = 'Unrelated replacement'; });
+  await page.locator('#target').evaluate(node => { node.firstChild.data = 'Unrelated replacement'; });
   await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'hidden'});
-  await page.locator('#target').evaluate(node => { node.textContent = 'Review target'; });
+  await page.locator('#target').evaluate(node => { node.firstChild.data = 'Review target'; });
   await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'visible'});
   await page.getByRole('button', {name: 'Open comment 1', exact: true}).click();
   await page.getByRole('textbox', {name: 'Comment', exact: true}).fill('Preserve this draft');
