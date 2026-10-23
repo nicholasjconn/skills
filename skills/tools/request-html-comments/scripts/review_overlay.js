@@ -500,7 +500,7 @@ function createHtmlReview(options) {
   const applyOverlayPlacement = (toolbarRect, popupRect, infoRect) => {
     showOverlayLayer();
     const origin = containingBlockOrigin();
-    if (toolbarRect) restoreFixedPosition(root, toolbarRect, origin);
+    if (toolbarRect) placeFixedElement(root, toolbarRect.left, toolbarRect.top, origin);
     else placeToolbarDefault(origin);
     if (infoPanel) {
       showAsPopover(infoPanel);
@@ -822,7 +822,9 @@ function createHtmlReview(options) {
   const resolveElement = (reference, scopeDocument = document) => {
     if (!reference?.css_selector || !scopeDocument) return null;
     const node = resolveSelectorReference(reference, scopeDocument);
-    return visible(node) ? node : null;
+    if (!visible(node)) return null;
+    const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    return !reference.text_excerpt || text === reference.text_excerpt ? node : null;
   };
   const rangeRects = (range) => [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
   const removeHighlight = (id) => {
@@ -998,7 +1000,7 @@ function createHtmlReview(options) {
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
       const target = resolveElement(item.element, frameDocument);
-      if (!target) return fallbackAnchor();
+      if (!target) return hideCommentAnchor(item);
       const geometry = frameGeometryFor(target);
       if (!geometry || (geometry.frame && !geometry.clip)) return hideCommentAnchor(item);
       const rect = annotationRect(target);
@@ -1477,7 +1479,7 @@ function createHtmlReview(options) {
   refreshComments();
   window.addEventListener('resize', () => {
     closeInfo();
-    scheduleCommentRefresh();
+    applyOverlayPlacement(copyRect(root), copyRect(popup));
   });
   // Route changes can leave the DOM untouched. Refresh explicitly rather than
   // relying on mutations, scroll, or resize to update page-scoped annotations.
