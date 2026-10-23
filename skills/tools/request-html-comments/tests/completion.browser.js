@@ -32,7 +32,9 @@ async (page) => {
       return window.saved.length;
     });
   };
+  await page.setViewportSize({width: 1280, height: 720});
   const viewport = page.viewportSize();
+  await page.getByRole('button', {name: 'Drag toolbar', exact: true}).hover();
   const handle = await page.getByRole('button', {name: 'Drag toolbar', exact: true}).boundingBox();
   await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
   await page.mouse.down();
