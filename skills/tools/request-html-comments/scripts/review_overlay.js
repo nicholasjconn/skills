@@ -320,8 +320,9 @@ function createHtmlReview(options) {
   };
   shieldReviewUi(root);
   const svgViewportLength = (svg, axis) => {
-    const viewBoxLength = svg.viewBox?.animVal[axis];
-    if (viewBoxLength > 0) return viewBoxLength;
+    const viewBox = svg.viewBox?.animVal;
+    // Invalid viewBoxes fall back as a whole.
+    if (viewBox?.width > 0 && viewBox.height > 0) return viewBox[axis];
     // Nested viewport attributes resolve percentages in the parent SVG's units.
     if (svg.ownerSVGElement) return svg[axis].animVal.value;
     // Outermost SVGs use CSS content sizes, which can override their attributes.
@@ -499,7 +500,7 @@ function createHtmlReview(options) {
   const applyOverlayPlacement = (toolbarRect, popupRect, infoRect) => {
     showOverlayLayer();
     const origin = containingBlockOrigin();
-    if (toolbarRect) restoreFixedPosition(root, toolbarRect, origin);
+    if (toolbarRect) placeFixedElement(root, toolbarRect.left, toolbarRect.top, origin);
     else placeToolbarDefault(origin);
     if (infoPanel) {
       showAsPopover(infoPanel);
@@ -548,6 +549,7 @@ function createHtmlReview(options) {
   modalHostObserver.observe(document.documentElement, {
     subtree: true,
     childList: true,
+    characterData: true,
     attributes: true,
     attributeFilter: ['open', 'role', 'aria-modal', 'class', 'style', 'hidden', 'inert']
   });
@@ -821,7 +823,10 @@ function createHtmlReview(options) {
   const resolveElement = (reference, scopeDocument = document) => {
     if (!reference?.css_selector || !scopeDocument) return null;
     const node = resolveSelectorReference(reference, scopeDocument);
-    return visible(node) ? node : null;
+    if (!visible(node)) return null;
+    // Changed text hides the marker without discarding its saved comment.
+    const text = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    return !reference.text_excerpt || text === reference.text_excerpt ? node : null;
   };
   const rangeRects = (range) => [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
   const removeHighlight = (id) => {
@@ -997,7 +1002,7 @@ function createHtmlReview(options) {
     }
     if (item.target_type === 'element' && item.anchor_ratio) {
       const target = resolveElement(item.element, frameDocument);
-      if (!target) return fallbackAnchor();
+      if (!target) return hideCommentAnchor(item);
       const geometry = frameGeometryFor(target);
       if (!geometry || (geometry.frame && !geometry.clip)) return hideCommentAnchor(item);
       const rect = annotationRect(target);
@@ -1368,7 +1373,7 @@ function createHtmlReview(options) {
       }
       scheduleCommentRefresh();
     });
-    observer.observe(root, { subtree: true, childList: true });
+    observer.observe(root, { subtree: true, childList: true, characterData: true });
     shadowFrameObservers.set(root, observer);
     signal?.addEventListener('abort', () => {
       observer.disconnect();
@@ -1475,8 +1480,9 @@ function createHtmlReview(options) {
   discoverFrames(document);
   refreshComments();
   window.addEventListener('resize', () => {
+    if (!active) return;
     closeInfo();
-    scheduleCommentRefresh();
+    applyOverlayPlacement(copyRect(root), copyRect(popup));
   });
   // Route changes can leave the DOM untouched. Refresh explicitly rather than
   // relying on mutations, scroll, or resize to update page-scoped annotations.
@@ -1556,7 +1562,7 @@ function createHtmlReview(options) {
       active = true;
       overlayLayer.style.setProperty('display', 'block', 'important');
       syncOverlayHost();
-      scheduleCommentRefresh();
+      applyOverlayPlacement(copyRect(root), copyRect(popup));
     },
     // The host must durably archive/clear its draft before clearing the UI.
     clearComments() {

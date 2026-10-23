@@ -32,10 +32,30 @@ async (page) => {
       return window.saved.length;
     });
   };
+  await page.setViewportSize({width: 1280, height: 720});
+  const viewport = page.viewportSize();
+  await page.getByRole('button', {name: 'Drag toolbar', exact: true}).hover();
+  const handle = await page.getByRole('button', {name: 'Drag toolbar', exact: true}).boundingBox();
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(viewport.width - 60, viewport.height - 60);
+  await page.mouse.up();
   await page.locator('.sr-add').click();
   await page.locator('#target').click();
   await page.getByRole('textbox', {name: 'Comment', exact: true}).fill('Saved feedback');
+  await page.setViewportSize({width: 390, height: 500});
+  for (const selector of ['#steward-review-root', '.steward-review-popup']) {
+    await page.waitForFunction(selector => {
+      const rect = document.querySelector('.sr-layer').shadowRoot.querySelector(selector).getBoundingClientRect();
+      return rect.x >= 0 && rect.y >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
+    }, selector);
+  }
   await page.getByRole('button', {name: 'Save', exact: true}).click();
+  await page.locator('#target').evaluate(node => { node.firstChild.data = 'Unrelated replacement'; });
+  await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'hidden'});
+  await page.locator('#target').evaluate(node => { node.firstChild.data = 'Review target'; });
+  await page.getByRole('button', {name: 'Open comment 1', exact: true}).waitFor({state: 'visible'});
+  await page.setViewportSize(viewport);
   await page.getByRole('button', {name: 'Open comment 1', exact: true}).click();
   await page.getByRole('textbox', {name: 'Comment', exact: true}).fill('Preserve this draft');
   const firstSave = await delaySave('Preserve this draft');

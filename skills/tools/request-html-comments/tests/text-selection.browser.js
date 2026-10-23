@@ -74,7 +74,7 @@ async (page) => {
     }, moved.x + moved.width / 2);
   }
   // A 350 x 50 viewport has a normalized diagonal of 250: 10% is 25 units.
-  // The first fixture scales y by 3, giving 75px; the other two stay at 25px.
+  // The first fixture scales y by 3, giving 75px; the other fixtures stay at 25px.
   for (const [fixture, thickness] of [
     [`<svg style="width:800px;height:200px" viewBox="0 0 800 200"><svg width="700" height="150" viewBox="0 0 350 50" preserveAspectRatio="none" style="width:auto;height:auto">
       <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
@@ -83,6 +83,9 @@ async (page) => {
       <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
     </svg></svg>`, 25],
     [`<svg width="900" height="450" style="box-sizing:border-box;width:450px;height:150px;padding:40px;border:10px solid black">
+      <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
+    </svg>`, 25],
+    [`<svg style="width:350px;height:50px" viewBox="0 0 700 -10">
       <path id="percentage-stroke" d="M40 25H310" stroke="blue" stroke-width="10%"/>
     </svg>`, 25],
   ]) {
@@ -108,5 +111,5 @@ async (page) => {
     reviewApi.clearComments();
     document.querySelector('#percentage-fixture').remove();
   });
-  return 'PASS: three native text selections, two numeric strokes with moving pins, and three percentage strokes with painted bounds';
+  return 'PASS: three native text selections, two numeric strokes with moving pins, and four percentage strokes with painted bounds';
 }
