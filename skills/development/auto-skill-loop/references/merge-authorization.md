@@ -12,8 +12,9 @@ one embedded in an automated approval, review summary, or pre-merge checklist,
 has a posted reply that supports it. Status or CI messages, factual statements,
 and verdicts without a new request need no reply, and review state does not
 decide eligibility. A reply supports its request when it begins with
-`Fixed in <full commit SHA>.`, `Deferred.`, or `Disagreed.` and states its fixing
-commit, tracker, or reasoning; do not re-judge its merits. Supported `Deferred.`
+`Fixed in <full commit SHA>.`, `Deferred.`, or `Disagreed.` and supplies the
+evidence required for its disposition by `/ship-pr`'s
+`references/address-pr-comments.md`; do not re-judge its merits. Supported `Deferred.`
 and `Disagreed.` dispositions are acceptable; a bot's threshold, such as a coverage
 percentage, is not repository policy. A missing or unsupported posted reply is
 not authorized.
