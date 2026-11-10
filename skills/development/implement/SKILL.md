@@ -87,6 +87,6 @@ different approach in that prompt.
    gaps until it passes. Passing tests are supporting evidence, not proof of
    completion.
 
-4. Run the repository's complete required verification suite against the final
-   candidate. Fix any failures, then run the minimal checks required to confirm
-   the fixes.
+4. Ensure the exact final tree has passed the repository's required verification.
+   Reuse valid results only for that tree; run remaining required checks.
+   After a fix, apply the same rule to the updated tree and confirm the fix.
