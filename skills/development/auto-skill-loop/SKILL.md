@@ -10,8 +10,8 @@ compatibility: Requires dispatch-agent, implement, ship-pr, the Agent Dispatch M
 
 Prerequisites: Requires dispatch-agent, implement, ship-pr, the Agent Dispatch MCP dispatch_start/inspect/wait/output/continue/cancel contract, and named operator, planner, plan_reviewers, implementer, code_reviewer, pr_worker, and rote_worker targets. Issue/backlog modes use docs/agent-layer project memory conventions. Missing dispatch capabilities must be reported; tracked skill content can advance independently of the installed CLI.
 
-Continue across PRs until the user stops the loop or step 1 reaches its no-work
-exit condition. A merged PR or a worker's final reply does not complete the loop.
+Continue across PRs until the user stops the loop or step 1 reaches an exit
+condition. A merged PR or a worker's final reply does not complete the loop.
 Report iteration outcomes as progress updates without ending the turn or asking
 whether to continue.
 
@@ -38,9 +38,32 @@ unnamed input from unstructured text or from another input.
 
 - Use `/dispatch-agent` for every dispatch.
 - Act as the orchestrator. Delegate all work.
-- Build each dispatch prompt only from its specified prompt template.
+- Build dispatch prompts from the templates and continuation directions below.
 - When compacting, retain the original user inputs and this skill verbatim in
   addition to what you would normally retain.
+- Follow `/dispatch-agent` termination safeguards: require
+  `termination_confirmed: true` before continuing, advancing, or replacing; never
+  replace active work or start discovery from unconfirmed state.
+  Monitor active or unconfirmed invocations with wait/inspect; cancel only when
+  the user or an active skill instruction authorizes abandonment, never merely
+  to advance after progress. Cancellation is not termination proof; if monitoring
+  cannot confirm termination, report a blocker and stop the loop.
+- Keep an inventory of every PR opened or touched and pre-PR preserved work:
+  PR URL once one exists, exact branch, last full head SHA, one-line scope, repair
+  rounds used, resumes used, and state: `open` (being shipped), `preserved`
+  (needs-human, substantive refusal, repair bound exhausted, re-preserved, or
+  blocker), or `merged`. Update at each handoff; mark repeat preservation
+  re-preserved. Include in every planner prompt and retain with counters/evidence
+  across iterations and compaction. Keep branch-only entries in later
+  reconciliation; never create placeholder PRs.
+- After a terminal planner/worker result with `termination_confirmed: true`,
+  for status-only/incomplete handoffs, continue the SAME session; refetch fresh
+  GitHub/repository state and monitor. Continuations seeing only healthy waits
+  (required checks changing within 60 minutes, or required reviewer feedback
+  within ship-pr's deadline) are NOT no-progress and do not count toward the
+  two-continuation bound; only stalled waits past those limits or no change
+  outside healthy waits count. After two consecutive no-progress continuations,
+  continue once to preserve as a blocker; if unconfirmed, report and stop.
 
 ## Acting on the User's Behalf
 
@@ -63,18 +86,39 @@ waiting for human input.
 ```text
 <complete contents of references/modes/<mode>.md>
 <planner_context, if provided>
+Run PR inventory: <complete inventory, or none yet>
 
 implementer: <implementer>
 plan_reviewers: <plan_reviewers>
 code_reviewer: <code_reviewer>
 
-Return a self-contained `<implementation_input>` that states the actual task,
-request, or spec you implemented and includes paths to plan artifacts if used.
-This context will preserve the intended scope during later review.
+Forward the inventory and a current open-PR snapshot to any delegated discovery
+worker to exclude overlapping work except permitted resumes below.
+Before implementing, avoid inventory/open-PR overlap except permitted resumes.
+If all candidates are excluded, return no-work citing those entries. Resume other
+preserved work once per run, only when its reason no longer applies and no human
+decision is pending; reuse it and report evidence. If preserved again, mark
+re-preserved and non-resumable for this run. Repair bound exhaustion or substantive
+refusal also prevents resumption without new human direction.
+
+Return exactly one typed outcome:
+- ready: self-contained `<implementation_input>` stating the task/request/spec
+  implemented, plan artifact paths if used, and reconciliation evidence.
+- no-work: fresh open-PR/inventory evidence that no independent work qualifies.
+- blocker: new blocker reason, remote branch/full head/scope, and confirmation
+  that blocked work was pushed and primary is checked out clean.
 ```
 
-If `planner` is unable to find work to complete, repeat the dispatch one more
-time. If two invocations in a row cannot find work, exit and inform the user.
+Before step 2, reject `ready` overlapping a different open PR or non-resumable
+inventory entry by branch or scope; continue the SAME planner with inventory and
+exclusion evidence to select other work under the unfinished-handoff bound.
+On `blocker`, return to step 1 after preservation.
+Two consecutive typed `no-work` outcomes exit; report both evidences.
+Repeat step 1 after the first; `ready` or a new `blocker` resets the count. A
+`blocker` merely re-reporting an existing preserved entry does not reset it.
+Diminishing-returns prose that selects work is not `no-work`.
+Exit and report on the second consecutive step 1 outcome with the SAME unchanged
+systemic blocking cause and no progress; distinct causes or progress reset it.
 
 2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
 
@@ -86,9 +130,16 @@ Use the following context to preserve intended scope and behavior throughout the
 workflow:
 
 <implementation_input>
+
+Return one typed outcome with PR URL (if any), branch, and full current head SHA:
+ready (exact PR/head merge-authorization request with ship-pr readiness evidence)
+or blocker (reason and confirmed preservation/return to primary).
+After authorization, return merged-and-cleaned-up,
+preserved-and-returned-to-primary, or a fresh ready request, with evidence.
 ```
 
-Continue when it returns a merge-authorization request.
+Advance to step 3 only on `ready`; on `blocker`, return to step 1 after
+preservation.
 
 3. Dispatch `operator` in a new session. Use the complete contents of
 `references/merge-authorization.md` as its prompt, then append:
@@ -98,10 +149,31 @@ Continue when it returns a merge-authorization request.
 request: <rote_worker merge-authorization request>
 ```
 
-4. If authorized, continue the dispatch session from step 2 with the exact
-authorization. If not, continue the dispatch to preserve the PR and return to
-the primary branch without merging.
+No verdict is not a denial: after confirmed termination, retry step 3 once
+in a new operator session; if still no authorized/denied verdict, preserve as a
+blocker under step 4.
 
-5. Wait for the step 4 dispatch to finish merging and cleanup or preserving the
-PR and returning to the primary branch. After either outcome, immediately return
-to step 1 in the same run.
+4. If authorized, continue the step 2 session with its single-use authorization
+for that exact PR/full head SHA and ship-pr's post-authorization checks. Lock
+the merge to that full SHA, e.g.
+`gh pr merge --match-head-commit <authorized full SHA>`, or equivalent. Any
+head change invalidates it; if refetch finds anything changed (including new
+eligible comments at the same head), do not merge: return a fresh `ready` request.
+ANY fresh `ready` request returns to step 3 in a NEW operator session. A stale
+head alone requires a fresh request; neither that nor a post-authorization
+re-request is a repair round. Never self-authorize.
+
+If all denial reasons are `repairable-process`, continue the SAME worker with
+the classified reasons to repair through ship-pr without scope changes or human
+decisions and return a fresh `ready` request. One repair round is one repair
+continuation after a denial; allow two per PR across the run, then preserve if
+still denied.
+
+For any `substantive-refusal` or unclassified denial, preserve without further
+PR mutation or replies; never re-ask for authorization. On refusal, repair
+exhaustion, or blocker, direct the same worker to save existing work and
+return to the primary branch without merging.
+
+5. For `merged-and-cleaned-up`, require evidence that the merged PR head equals
+the authorized full SHA; otherwise report a blocker and stop. On verified merge
+or `preserved-and-returned-to-primary`, update inventory and return to step 1.
