@@ -25,7 +25,7 @@ verify that all of its requirements are also met.
 State `authorized` or `denied` for the exact PR URL and full head SHA.
 For each denial, cite evidence and classify it as `repairable-process` if
 ship-pr can correct the omission within reviewed scope and existing authority
-(e.g. missing/stale ledger, missing/noncanonical/unsupported reply, changed
-head), or `substantive-refusal` if it requires judgment, scope change, human
-input, or is an explicit refusal. Treat uncertainty about repair permission
-as `substantive-refusal`.
+(e.g. a missing, noncanonical, or unsupported posted reply), or
+`substantive-refusal` if it requires judgment, scope change, human input, or is
+an explicit refusal. Treat uncertainty about repair permission as
+`substantive-refusal`.

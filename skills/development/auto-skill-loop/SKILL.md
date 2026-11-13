@@ -45,20 +45,21 @@ unnamed input from unstructured text or from another input.
   `termination_confirmed: true` before continuing, advancing, or replacing; never
   replace active work or start discovery from unconfirmed state.
   Monitor active or unconfirmed invocations with wait/inspect; cancel only when
-  the user or an active skill instruction authorizes abandoning that work,
-  never merely to advance after a progress reply; cancellation is not
-  termination proof.
+  the user or an active skill instruction authorizes abandonment, never merely
+  to advance after progress. Cancellation is not termination proof; if monitoring
+  cannot confirm termination, report a blocker and stop the loop.
 - Keep an inventory of every PR opened or touched and pre-PR preserved work:
-  PR URL once one exists, exact branch, last full head SHA, one-line scope, and
-  state: `open` (being shipped), `preserved` (needs-human, substantive refusal,
-  repair bound exhausted, or blocker), or `merged`. Update it at each handoff,
-  include it in every planner prompt, and retain it and counters/evidence across
-  iterations and compaction. Keep branch-only entries in later reconciliation;
-  never create placeholder PRs.
-- Planner/worker status-only replies (including waiting on CI/reviews) or
-  incomplete outcomes are unfinished: continue the SAME session from fresh
-  state and resume monitoring; after two consecutive continuations without
-  concrete progress, continue once to preserve as a blocker. If preservation
+  PR URL once one exists, exact branch, last full head SHA, one-line scope,
+  repair rounds used, and state: `open` (being shipped), `preserved` (needs-human,
+  substantive refusal, repair bound exhausted, or blocker), or `merged`. Update
+  it at each handoff, include it in every planner prompt, and retain it and
+  counters/evidence across iterations and compaction. Keep branch-only entries
+  in later reconciliation; never create placeholder PRs.
+- After a terminal planner/worker result with `termination_confirmed: true`,
+  a status-only reply (including waiting on CI/reviews) or incomplete outcome
+  is unfinished: continue the SAME session, refetch fresh GitHub/repository
+  state, and resume monitoring. After two consecutive continuations without
+  concrete progress, continue once to preserve as a blocker; if preservation
   is unconfirmed, report the blocker and stop.
 
 ## Acting on the User's Behalf
@@ -90,23 +91,25 @@ code_reviewer: <code_reviewer>
 
 Forward the inventory and a current open-PR snapshot to any delegated discovery
 worker so it excludes overlapping work before selection.
-Before implementing, reconcile selected work with this inventory and the
-repository's currently open PRs; choose non-overlapping work or report
-no-work/blocker. Resume a preserved PR only when its reason no longer applies
-and no human decision is pending; reuse it and report evidence. Never reopen
-a substantive refusal without new human direction.
+Before implementing, choose work that does not overlap the inventory or current
+open PRs. If every candidate overlaps an open PR or an entry whose preservation
+reason still applies, return no-work citing those entries. Resume other preserved
+work only when its reason no longer applies and no human decision is pending;
+reuse it and report evidence. Entries preserved for repair bound exhaustion or
+substantive refusal cannot resume in this run without new human direction.
 
 Return exactly one typed outcome:
 - ready: self-contained `<implementation_input>` stating the task/request/spec
   implemented, plan artifact paths if used, and reconciliation evidence.
 - no-work: evidence that no qualifying, non-duplicate work remains.
-- blocker: reason and preservation location (branch/full head/scope if no PR);
-  blocked work is not no-work.
+- blocker: new blocker reason, remote branch/full head/scope, and confirmation
+  that blocked work was pushed and primary is checked out.
 ```
 
 Only `ready` advances to step 2; `blocker` returns to step 1 after preservation.
 Only two consecutive typed `no-work` outcomes exit; report both evidences.
-Repeat step 1 after the first; `ready`/`blocker` resets the count.
+Repeat step 1 after the first; `ready` or a new `blocker` resets the count. A
+`blocker` merely re-reporting an existing preserved entry does not reset it.
 Diminishing-returns prose that selects work is not `no-work`.
 
 2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
@@ -121,10 +124,10 @@ workflow:
 <implementation_input>
 
 Return one typed outcome with PR URL (if any), branch, and full current head SHA:
-ready (exact PR/head merge-authorization request with ship-pr ledger/readiness
-evidence) or blocker (reason and confirmed preservation/return to primary).
-After authorization, return merged-and-cleaned-up or
-preserved-and-returned-to-primary with evidence.
+ready (exact PR/head merge-authorization request with ship-pr readiness evidence)
+or blocker (reason and confirmed preservation/return to primary).
+After authorization, return merged-and-cleaned-up,
+preserved-and-returned-to-primary, or a fresh ready request, with evidence.
 ```
 
 Advance to step 3 only on `ready`; on `blocker`, return to step 1 after
@@ -138,22 +141,29 @@ preservation.
 request: <rote_worker merge-authorization request>
 ```
 
-4. If authorized, continue the step 2 session with the exact authorization and
-ship-pr's post-authorization checks. It authorizes only that PR/full head SHA;
-any head change (including repair commits) invalidates it: obtain a fresh
-request and repeat step 3 in a NEW operator session. Never self-authorize.
+No verdict is not a denial: after confirmed termination, retry step 3 once
+in a new operator session; if still no authorized/denied verdict, preserve as a
+blocker under step 4.
+
+4. If authorized, continue the step 2 session with its single-use authorization
+for that exact PR/full head SHA and ship-pr's post-authorization checks. Any
+head change invalidates it; if refetch finds anything changed (including new
+eligible comments at the same head), do not merge: return a fresh `ready` request.
+ANY fresh `ready` request returns to step 3 in a NEW operator session. A stale
+head alone requires a fresh request; neither that nor a post-authorization
+re-request is a repair round. Never self-authorize.
 
 If all denial reasons are `repairable-process`, continue the SAME worker with
-the classified reasons to repair through ship-pr without scope changes or
-human decisions and return a fresh `ready` request. Allow two rounds per PR for
-the whole run, then preserve if still denied; repeat step 3 after each repair
-in a NEW operator session, even with an unchanged head.
+the classified reasons to repair through ship-pr without scope changes or human
+decisions and return a fresh `ready` request. One repair round is one repair
+continuation after a denial; allow two per PR across the run, then preserve if
+still denied.
 
 For any `substantive-refusal` or unclassified denial, preserve without further
 PR mutation or replies; never re-ask for authorization. On refusal, repair
 exhaustion, or blocker, direct the same worker to save existing work and
 return to the primary branch without merging.
 
-5. Wait for `merged-and-cleaned-up` or `preserved-and-returned-to-primary` with
-evidence, update the inventory with state and preservation reason, then
-immediately return to step 1 in the same run.
+5. Accept `merged-and-cleaned-up` only with evidence that the merged PR head
+equals the authorized full head SHA, or `preserved-and-returned-to-primary` with
+evidence. Update the inventory, then immediately return to step 1 in the same run.
