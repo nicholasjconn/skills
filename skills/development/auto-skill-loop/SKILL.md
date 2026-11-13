@@ -57,11 +57,12 @@ unnamed input from unstructured text or from another input.
   across iterations and compaction. Keep branch-only entries in later
   reconciliation; never create placeholder PRs.
 - After a terminal planner/worker result with `termination_confirmed: true`,
-  a status-only reply (including waiting on CI/reviews) or incomplete outcome
-  is unfinished: continue the SAME session, refetch fresh GitHub/repository
-  state, and resume monitoring. Only absent required reviewer feedback stalls
-  after ship-pr's review deadline; pending checks stall only after 60 minutes
-  without a check state change. After two consecutive no-progress continuations,
+  for status-only/incomplete handoffs, continue the SAME session; refetch fresh
+  GitHub/repository state and monitor. Continuations seeing only healthy waits
+  (required checks changing within 60 minutes, or required reviewer feedback
+  within ship-pr's deadline) are NOT no-progress and do not count toward the
+  two-continuation bound; only stalled waits past those limits or no change
+  outside healthy waits count. After two consecutive no-progress continuations,
   continue once to preserve as a blocker; if unconfirmed, report and stop.
 
 ## Acting on the User's Behalf
