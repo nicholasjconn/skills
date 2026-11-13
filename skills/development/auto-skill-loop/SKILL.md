@@ -59,9 +59,9 @@ unnamed input from unstructured text or from another input.
 - After a terminal planner/worker result with `termination_confirmed: true`,
   a status-only reply (including waiting on CI/reviews) or incomplete outcome
   is unfinished: continue the SAME session, refetch fresh GitHub/repository
-  state, and resume monitoring. Pending required waits count as no-progress only
-  after ship-pr's review deadline for reviews, or 60 minutes without a check
-  state change for checks. After two consecutive no-progress continuations,
+  state, and resume monitoring. Only absent required reviewer feedback stalls
+  after ship-pr's review deadline; pending checks stall only after 60 minutes
+  without a check state change. After two consecutive no-progress continuations,
   continue once to preserve as a blocker; if unconfirmed, report and stop.
 
 ## Acting on the User's Behalf
@@ -92,33 +92,32 @@ plan_reviewers: <plan_reviewers>
 code_reviewer: <code_reviewer>
 
 Forward the inventory and a current open-PR snapshot to any delegated discovery
-worker so it excludes overlapping work before selection.
-Before implementing, choose work that does not overlap the inventory or current
-open PRs. If every candidate overlaps an open PR or an entry whose preservation
-reason still applies, return no-work citing those entries. Resume other preserved
-work once per run, only when its reason no longer applies and no human decision
-is pending; reuse it and report evidence. If preserved again, mark re-preserved
-and non-resumable for this run. Repair bound exhaustion or substantive refusal
-also prevents resumption without new human direction.
+worker to exclude overlapping work except permitted resumes below.
+Before implementing, avoid inventory/open-PR overlap except permitted resumes.
+If all candidates are excluded, return no-work citing those entries. Resume other
+preserved work once per run, only when its reason no longer applies and no human
+decision is pending; reuse it and report evidence. If preserved again, mark
+re-preserved and non-resumable for this run. Repair bound exhaustion or substantive
+refusal also prevents resumption without new human direction.
 
 Return exactly one typed outcome:
 - ready: self-contained `<implementation_input>` stating the task/request/spec
   implemented, plan artifact paths if used, and reconciliation evidence.
-- no-work: evidence that no qualifying, non-duplicate work remains.
+- no-work: fresh open-PR/inventory evidence that no independent work qualifies.
 - blocker: new blocker reason, remote branch/full head/scope, and confirmation
   that blocked work was pushed and primary is checked out clean.
 ```
 
-Before step 2, the orchestrator converts `ready` matching the branch or scope of
-a non-resumable preserved entry to `no-work`, citing it (refusal, repair bound
-exhaustion, needs-human/pending decision, or re-preserved).
+Before step 2, reject `ready` overlapping a different open PR or non-resumable
+inventory entry by branch or scope; continue the SAME planner with inventory and
+exclusion evidence to select other work under the unfinished-handoff bound.
 On `blocker`, return to step 1 after preservation.
 Two consecutive typed `no-work` outcomes exit; report both evidences.
 Repeat step 1 after the first; `ready` or a new `blocker` resets the count. A
 `blocker` merely re-reporting an existing preserved entry does not reset it.
 Diminishing-returns prose that selects work is not `no-work`.
-Also exit and report after three consecutive step 1 `blocker` outcomes;
-`ready` or `no-work` resets this blocker count.
+Exit and report on the second consecutive step 1 outcome with the SAME unchanged
+systemic blocking cause and no progress; distinct causes or progress reset it.
 
 2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
 
