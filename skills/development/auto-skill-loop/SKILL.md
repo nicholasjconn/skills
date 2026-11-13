@@ -44,11 +44,17 @@ unnamed input from unstructured text or from another input.
 - Follow `/dispatch-agent` termination safeguards: require
   `termination_confirmed: true` before continuing, advancing, or replacing; never
   replace active work or start discovery from unconfirmed state.
-- Keep an inventory of every PR opened or touched: URL, branch, last full head
-  SHA, one-line work summary, and state `open` (being shipped), `preserved`
-  (needs-human, substantive refusal, repair bound exhausted, or blocker), or
-  `merged`. Update it at each handoff, include it in every planner prompt,
-  and retain it and counters/evidence across iterations and compaction.
+  Monitor active or unconfirmed invocations with wait/inspect; cancel only when
+  the user or an active skill instruction authorizes abandoning that work,
+  never merely to advance after a progress reply; cancellation is not
+  termination proof.
+- Keep an inventory of every PR opened or touched and pre-PR preserved work:
+  PR URL once one exists, exact branch, last full head SHA, one-line scope, and
+  state: `open` (being shipped), `preserved` (needs-human, substantive refusal,
+  repair bound exhausted, or blocker), or `merged`. Update it at each handoff,
+  include it in every planner prompt, and retain it and counters/evidence across
+  iterations and compaction. Keep branch-only entries in later reconciliation;
+  never create placeholder PRs.
 - Planner/worker status-only replies (including waiting on CI/reviews) or
   incomplete outcomes are unfinished: continue the SAME session from fresh
   state and resume monitoring; after two consecutive continuations without
@@ -82,6 +88,8 @@ implementer: <implementer>
 plan_reviewers: <plan_reviewers>
 code_reviewer: <code_reviewer>
 
+Forward the inventory and a current open-PR snapshot to any delegated discovery
+worker so it excludes overlapping work before selection.
 Before implementing, reconcile selected work with this inventory and the
 repository's currently open PRs; choose non-overlapping work or report
 no-work/blocker. Resume a preserved PR only when its reason no longer applies
@@ -92,7 +100,8 @@ Return exactly one typed outcome:
 - ready: self-contained `<implementation_input>` stating the task/request/spec
   implemented, plan artifact paths if used, and reconciliation evidence.
 - no-work: evidence that no qualifying, non-duplicate work remains.
-- blocker: reason and preservation location; blocked work is not no-work.
+- blocker: reason and preservation location (branch/full head/scope if no PR);
+  blocked work is not no-work.
 ```
 
 Only `ready` advances to step 2; `blocker` returns to step 1 after preservation.
@@ -111,8 +120,8 @@ workflow:
 
 <implementation_input>
 
-Return one typed outcome with PR URL, branch, and full current head SHA: ready
-(exact PR/head merge-authorization request with ship-pr ledger/readiness
+Return one typed outcome with PR URL (if any), branch, and full current head SHA:
+ready (exact PR/head merge-authorization request with ship-pr ledger/readiness
 evidence) or blocker (reason and confirmed preservation/return to primary).
 After authorization, return merged-and-cleaned-up or
 preserved-and-returned-to-primary with evidence.
