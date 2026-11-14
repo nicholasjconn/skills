@@ -24,10 +24,6 @@ Difficulty executing the work does not by itself make it a human decision.
 Apply project guidance and norms, preserving and reporting inaccessible work
 while continuing independent work.
 
-A refusal or pending human decision is not permission to mutate a PR and ask
-again. State it explicitly so the caller can preserve the work and continue
-without waiting for human input.
-
 # Responding
 
 Return your final answer(s) to the caller. Do not include commentary on the process you followed or whether or not it was a false alarm.
