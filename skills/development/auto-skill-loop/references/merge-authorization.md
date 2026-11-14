@@ -22,10 +22,5 @@ not authorized.
 If `/ship-pr`'s `references/repo-specific-pr-policy.md` exists, read it and
 verify that all of its requirements are also met.
 
-State `authorized` or `denied` for the exact PR URL and full head SHA.
-For each denial, cite evidence and classify it as `repairable-process` if
-ship-pr can correct the omission within reviewed scope and existing authority
-(e.g. a missing, noncanonical, or unsupported posted reply), or
-`substantive-refusal` if it requires judgment, scope change, human input, or is
-an explicit refusal. Treat uncertainty about repair permission as
-`substantive-refusal`.
+State concisely whether the exact PR and head are authorized for merge. If not
+authorized, give the reason.
