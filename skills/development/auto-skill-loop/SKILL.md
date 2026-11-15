@@ -52,8 +52,9 @@ a blocker, dispatch `operator` in a fresh session with the complete contents of
 question or blocker verbatim. Continue the asking session with the answer.
 
 If the operator determines that a real human must decide, continue the asking
-session to push its work to a remote branch, leave any PR open and unmerged,
-and return to the primary branch. Then return to step 1.
+session to commit a note naming the blocked work and the pending question, push
+its work to a remote branch, leave any PR open and unmerged, and return to the
+primary branch. Then return to step 1.
 
 ## Loop
 
@@ -106,5 +107,5 @@ Outcome: authorized, or denied with a reason.
 4. Continue the step 2 session with the exact authorization or the denial
    reason. Outcome: the PR merged and cleaned up on the primary branch, or a
    fresh merge-authorization request; for the latter, return to step 3. A
-   repeated denial for the same reason is a blocker. After the merge, return
-   to step 1 in the same run.
+   repeated denial for the same reason is a blocker from the step 2 session.
+   After the merge, return to step 1 in the same run.
