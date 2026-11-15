@@ -8,12 +8,10 @@ compatibility: Requires dispatch-agent, implement, ship-pr, the Agent Dispatch M
 
 # auto-skill-loop
 
-Prerequisites: Requires dispatch-agent, implement, ship-pr, the Agent Dispatch MCP dispatch_start/inspect/wait/output/continue/cancel contract, and named operator, planner, plan_reviewers, implementer, code_reviewer, pr_worker, and rote_worker targets. Issue/backlog modes use docs/agent-layer project memory conventions. Missing dispatch capabilities must be reported; tracked skill content can advance independently of the installed CLI.
-
-Continue across PRs until the user stops the loop or step 1 reaches its no-work
-exit condition. A merged PR or a worker's final reply does not complete the loop.
-Report iteration outcomes as progress updates without ending the turn or asking
-whether to continue.
+Each iteration implements one PR's worth of work, ships it, and merges it under
+the gate below. Run iterations until the user stops the loop or two consecutive
+iterations find no work. Report each iteration's outcome as a progress update;
+do not end the turn or ask whether to continue.
 
 ## Inputs
 
@@ -36,29 +34,30 @@ unnamed input from unstructured text or from another input.
 
 ## Rules
 
-- Use `/dispatch-agent` for every dispatch.
-- Act as the orchestrator. Delegate all work.
-- Build each dispatch prompt only from its specified prompt template.
+- Use `/dispatch-agent` for every dispatch. Act as the orchestrator; delegate
+  all work.
+- Build each dispatch prompt only as specified below.
+- A dispatch is finished only when its final reply contains the outcome named
+  for its step, a question, or a blocker. On any other reply, such as a status
+  report or pending monitoring, continue the same session:
+  `Continue the <skill> workflow until you return <outcome>.`
 - When compacting, retain the original user inputs and this skill verbatim in
   addition to what you would normally retain.
 
-## Acting on the User's Behalf
+## Human Input
 
-This loop must run without human intervention. Each iteration is intended to result
-in a merged PR. For each loop that requires human input, dispatch `operator` in
-a fresh session. Use `dispatch_continue` for multiple invocations within a
-single loop. The first prompt should include the complete contents of
-`references/human-guidance.md`, followed by `operator_context` if provided, then
-the item requiring human input with all provided details verbatim.
+The loop runs without human intervention. When a dispatch returns a question or
+a blocker, dispatch `operator` in a fresh session with the complete contents of
+`references/human-guidance.md`, then `operator_context` if provided, then the
+question or blocker verbatim. Continue the asking session with the answer.
 
-If the `operator` determines that real human intervention is required, save the
-work to an appropriate remote branch for future handling, then check out the
-primary branch. Continue with another loop iteration. Do not block the loop
-waiting for human input.
+If the operator determines that a real human must decide, continue the asking
+session to push its work to a remote branch, leave any PR open and unmerged,
+and return to the primary branch. Then return to step 1.
 
 ## Loop
 
-1. Dispatch `planner` with skill `implement`. Use the following as its prompt:
+1. Dispatch `planner` with skill `implement`:
 
 ```text
 <complete contents of references/modes/<mode>.md>
@@ -68,15 +67,19 @@ implementer: <implementer>
 plan_reviewers: <plan_reviewers>
 code_reviewer: <code_reviewer>
 
-Return a self-contained `<implementation_input>` that states the actual task,
-request, or spec you implemented and includes paths to plan artifacts if used.
-This context will preserve the intended scope during later review.
+Exclude work covered by an open PR or an unmerged remote branch, and pass this
+exclusion to any discovery subagent. If no qualifying work remains, or current
+evidence shows diminishing returns, return only `No work: <reason>` and
+implement nothing. Otherwise return a self-contained `<implementation_input>`
+that states the actual task, request, or spec you implemented and includes
+paths to plan artifacts if used.
 ```
 
-If `planner` is unable to find work to complete, repeat the dispatch one more
-time. If two invocations in a row cannot find work, exit and inform the user.
+Outcome: `<implementation_input>` or `No work`. Count a reply that reports
+diminishing returns as `No work`, after shipping any work it implemented. Two
+consecutive `No work` outcomes end the loop; report both reasons.
 
-2. Dispatch `rote_worker` with skill `ship-pr` and this prompt:
+2. Dispatch `rote_worker` with skill `ship-pr`:
 
 ```text
 pr_worker: <pr_worker>
@@ -88,20 +91,20 @@ workflow:
 <implementation_input>
 ```
 
-Continue when it returns a merge-authorization request.
+Outcome: a merge-authorization request for an exact PR and head.
 
-3. Dispatch `operator` in a new session. Use the complete contents of
-`references/merge-authorization.md` as its prompt, then append:
+3. Dispatch `operator` in a new session with the complete contents of
+   `references/merge-authorization.md`, then:
 
 ```text
 <operator_context, if provided>
 request: <rote_worker merge-authorization request>
 ```
 
-4. If authorized, continue the dispatch session from step 2 with the exact
-authorization. If not, continue the dispatch to preserve the PR and return to
-the primary branch without merging.
+Outcome: authorized, or denied with a reason.
 
-5. Wait for the step 4 dispatch to finish merging and cleanup or preserving the
-PR and returning to the primary branch. After either outcome, immediately return
-to step 1 in the same run.
+4. Continue the step 2 session with the exact authorization or the denial
+   reason. Outcome: the PR merged and cleaned up on the primary branch, or a
+   fresh merge-authorization request; for the latter, return to step 3. A
+   repeated denial for the same reason is a blocker. After the merge, return
+   to step 1 in the same run.
