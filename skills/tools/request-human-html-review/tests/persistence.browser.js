@@ -2,8 +2,8 @@
 async (page) => {
   await page.goto('about:blank');
   await page.setContent('<p>Review fixture</p>');
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_geometry.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_overlay.js'});
   await page.evaluate(() => {
     window.failSave = true;
     window.api = createHtmlReview({
@@ -40,8 +40,8 @@ async (page) => {
   await page.goto('about:blank');
   await page.setContent('<dialog id="host"><p id="target">Review target</p></dialog>');
   await page.evaluate(() => document.querySelector('#host').showModal());
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_geometry.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_overlay.js'});
   await page.evaluate(() => {
     window.failSave = true;
     window.api = createHtmlReview({

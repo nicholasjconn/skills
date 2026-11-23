@@ -1,14 +1,13 @@
 ---
-name: request-html-comments
+name: request-human-html-review
 description: >-
-  Request and return element- or text-linked comments on a local HTML file or
-  loopback-served page through an interactive browser overlay. Use when the user
-  wants to annotate local HTML; do not use for remote URLs, browser automation,
-  or code review.
+  Request a human review of a local HTML file or loopback-served page. Use when
+  someone wants to leave element- or text-linked comments on the rendered page
+  through a browser overlay.
 license: MIT
 ---
 
-# Request HTML Comments
+# Request Human HTML Review
 
 Review an existing `.html`/`.htm` file or running `http://` loopback app.
 File reviews annotate one HTML file and load assets only within its directory

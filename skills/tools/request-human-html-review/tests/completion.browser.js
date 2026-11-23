@@ -1,5 +1,5 @@
 // From the repository root, with a playwright-cli browser session open:
-// playwright-cli run-code --filename=skills/tools/request-html-comments/tests/completion.browser.js
+// playwright-cli run-code --filename=skills/tools/request-human-html-review/tests/completion.browser.js
 async (page) => {
   await page.goto('about:blank');
   await page.setContent('<h1 id="target" style="margin-top:180px">Review target</h1>');
@@ -7,8 +7,8 @@ async (page) => {
     window.originalExports = { hostApplication: true };
     window.module = { exports: window.originalExports };
   });
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-  await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_geometry.js'});
+  await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_overlay.js'});
   await page.evaluate(() => {
     if (window.module.exports !== window.originalExports) throw new Error('Injection replaced the host CommonJS exports');
     window.calls = 0;

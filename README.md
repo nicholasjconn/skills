@@ -7,12 +7,14 @@ When a leaf skill name exists in more than one group, install it with its
 namespaced `<group>/<skill>` identifier. For example:
 
 ```bash
-gh skill install nicholasjconn/skills tools/request-html-comments
+gh skill install nicholasjconn/skills tools/request-human-html-review
 ```
 
 ## Development
 
-- [`code-review`](skills/development/code-review/) opens browser reviews of Git diffs and standalone patches with file review tracking and text comments.
+- [`request-human-code-review`](skills/development/request-human-code-review/)
+  requests a human review of a Git diff or standalone patch in a browser with
+  file review tracking and text comments.
 - [`pr-retrospective`](skills/development/pr-retrospective/): Scores merged GitHub PRs and posts structured retrospective comments.
 
 ## Steward
@@ -22,7 +24,9 @@ gh skill install nicholasjconn/skills tools/request-html-comments
 
 ## Tools
 
-- [`request-html-comments`](skills/tools/request-html-comments/): Collects element- and text-linked feedback on local HTML through an interactive browser overlay.
+- [`request-human-html-review`](skills/tools/request-human-html-review/)
+  requests element- and text-linked human feedback on local HTML through an
+  interactive browser overlay.
 
 ## Instructions
 
