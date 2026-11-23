@@ -1,8 +1,9 @@
 ---
-name: code-review
+name: request-human-code-review
 description: >-
-  Open a code diff for interactive human review in a browser, track previously
-  reviewed files, and collect comments on selected code.
+  Request a human review of a Git diff or standalone patch in a browser. Use
+  when someone wants to mark files reviewed or leave comments on selected
+  code. For agent-led code review, use the project's review workflow.
 ---
 
 Use `python3 <skill-directory>/scripts/code_review.py start --help` to choose a

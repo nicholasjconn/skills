@@ -1,4 +1,4 @@
-name: request-html-comments tests
+name: request-human-html-review tests
 on: [push, pull_request]
 permissions:
   contents: read
@@ -15,7 +15,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Run existing Node tests
-        run: node --test skills/tools/request-html-comments/tests/*.test.mjs
+        run: node --test skills/tools/request-human-html-review/tests/*.test.mjs
       - name: Install browser test tooling
         run: |
           npm install -g @playwright/cli@0.1.18
@@ -23,11 +23,11 @@ jobs:
           playwright-cli install-browser chrome --with-deps
       - name: Run existing browser tests
         run: |
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory skills/tools/request-html-comments &
+          python3 -m http.server 8765 --bind 127.0.0.1 --directory skills/tools/request-human-html-review &
           server_pid=$!
           trap 'playwright-cli -s=html-review-ci close; kill "$server_pid"' EXIT
           playwright-cli -s=html-review-ci open http://127.0.0.1:8765/tests/text-selection.html
           for scenario in text-selection completion navigation iframe-style; do
-            playwright-cli -s=html-review-ci run-code --filename="skills/tools/request-html-comments/tests/$scenario.browser.js"
+            playwright-cli -s=html-review-ci run-code --filename="skills/tools/request-human-html-review/tests/$scenario.browser.js"
           done
-          playwright-cli -s=html-review-ci run-code --filename=skills/tools/request-html-comments/tests/persistence.browser.js
+          playwright-cli -s=html-review-ci run-code --filename=skills/tools/request-human-html-review/tests/persistence.browser.js

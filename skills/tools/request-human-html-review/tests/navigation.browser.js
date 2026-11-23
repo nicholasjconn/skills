@@ -1,5 +1,5 @@
 // From the repository root, with a playwright-cli browser session open:
-// playwright-cli run-code --filename=skills/tools/request-html-comments/tests/navigation.browser.js
+// playwright-cli run-code --filename=skills/tools/request-human-html-review/tests/navigation.browser.js
 async (page) => {
   const origin = 'http://html-review.test';
   await page.route(`${origin}/**`, route => route.fulfill({
@@ -7,8 +7,8 @@ async (page) => {
     body: '<title>Review fixture</title><h1 id="target" style="margin-top:180px">Shared target</h1><a href="/b?x=1">Page B</a>',
   }));
   const mount = async comments => {
-    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+    await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_geometry.js'});
+    await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_overlay.js'});
     await page.evaluate(initialComments => {
       window.saved = [];
       window.submitted = null;

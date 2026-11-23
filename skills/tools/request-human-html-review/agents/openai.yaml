@@ -1,0 +1,4 @@
+interface:
+  display_name: "Request Human HTML Review"
+  short_description: "Collect comments on local HTML in a browser"
+  default_prompt: "Use $request-human-html-review to collect my comments on a local HTML file or loopback-served page."

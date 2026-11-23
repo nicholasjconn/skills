@@ -24,8 +24,8 @@ async (page) => {
       srcdoc='<script src="${scriptUrl}"></script><p>Review target</p>'></iframe>`,
       {waitUntil: 'domcontentloaded'});
     await requested;
-    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_geometry.js'});
-    await page.addScriptTag({path: 'skills/tools/request-html-comments/scripts/review_overlay.js'});
+    await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_geometry.js'});
+    await page.addScriptTag({path: 'skills/tools/request-human-html-review/scripts/review_overlay.js'});
     await page.evaluate(() => {
       const frame = document.querySelector('#parse-frame');
       window.attachedDocument = frame.contentDocument;

@@ -172,9 +172,9 @@ file is opened directly to capture the image, so only a sibling reference is
 reliable. The copy is a frozen snapshot alongside the exported image; do not
 edit it to restyle a published package.
 
-When Nick requests HTML comments, use `request-html-comments` for one review
-page showing the exact pending text, weighted count, readiness, and ordered
-images. Include live, annotatable HTML alongside each HTML-backed image.
+When Nick requests HTML comments, use `request-human-html-review` for one
+review page showing the exact pending text, weighted count, readiness, and
+ordered images. Include live, annotatable HTML alongside each HTML-backed image.
 Follow that skill's targeting and validation rules. Comments do not approve
 the language or any public action.
 
