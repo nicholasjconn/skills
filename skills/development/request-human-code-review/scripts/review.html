@@ -42,8 +42,17 @@
           <span class="sidebar-icon" aria-hidden="true"></span>
         </button>
       </div>
+      <div id="bulk-tools">
+        <button id="toggle-bulk" type="button" aria-expanded="false" aria-controls="bulk-options">Select files</button>
+        <div id="bulk-options" hidden>
+          <input id="bulk-filter" type="search" aria-label="Filter files by path" placeholder="File or folder path">
+          <label><input id="select-visible" type="checkbox"> Select visible</label>
+          <button id="mark-selected" type="button" disabled>Mark selected reviewed</button>
+        </div>
+      </div>
       <nav id="changed-files" aria-label="Changed files">
         <ul id="file-list"></ul>
+        <p id="no-matching-files" role="status" hidden>No matching changed files.</p>
       </nav>
       <div class="files-footer">
         <button id="submit-review" class="primary" type="button" aria-label="Submit review" title="Submit review" disabled>
