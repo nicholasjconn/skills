@@ -3,19 +3,15 @@ name: implement
 description: >-
   Implement a large, substantive code change directly or through a planned
   cross-agent workflow, adding plan or code review only when warranted.
-compatibility: Requires named implementer, plan_reviewers, and code_reviewer targets. Delegated planning/review paths require dispatch-agent and the Agent Dispatch MCP dispatch_start/inspect/wait/output/continue/cancel contract; direct implementation does not dispatch. Project scratch uses .agent-layer/tmp as a convention.
 ---
 
 # implement
 
-Prerequisites: Requires named implementer, plan_reviewers, and code_reviewer targets. Delegated planning/review paths require dispatch-agent and the Agent Dispatch MCP dispatch_start/inspect/wait/output/continue/cancel contract; direct implementation does not dispatch. Project scratch uses .agent-layer/tmp as a convention. Missing dispatch capabilities must be reported; tracked skill content can advance independently of the installed CLI.
-
 ## Inputs
 
-Require a task, request, or spec as `<input>` and dispatch targets named
-`implementer`, `plan_reviewers`, and `code_reviewer`. Providing a target does
-not imply its use. Do not infer missing targets. Use `/dispatch-agent` for every
-dispatch.
+Use the task or spec as `<input>`. For a delegated stage, use `/dispatch-agent`
+with the supplied target for that role. Report missing targets or dispatch
+capabilities when the selected stage needs them.
 
 ## Decide Implementation Approach
 
@@ -32,34 +28,23 @@ answer each question yes or no:
 - Does the implementation's material risk or complexity justify independent
   code review, whether implementation is direct or planned?
 
-If no plan is required, implement `<input>` directly without dispatching or
-writing a plan. Run only targeted checks as needed. Check completion against
-`<input>`, resolve gaps until implementation is complete. Then continue to
-the Finish section.
+If no plan is required, implement `<input>` directly, run targeted checks, and
+continue to Finish.
 
 ## Implementation with a Written Plan
 
-If a plan is required, write the following self-contained artifacts. Set
-`<run-id>` to `YYYYMMDD-HHMMSS-<short-rand>`:
+Write a self-contained plan with the context needed to execute it and a
+checklist for verifying completion.
 
-- `.agent-layer/tmp/write-plan.<run-id>.plan.md` - the implementation plan
-- `.agent-layer/tmp/write-plan.<run-id>.task.md` - a checklist for all
-  requirements, used to assess completion
-- `.agent-layer/tmp/write-plan.<run-id>.context.md` - all background and context
-  required for executing the implementation plan
+If independent plan review is required, dispatch all `plan_reviewers`
+concurrently with self-contained prompts to review the plan against `<input>`
+without editing files. Address valid in-scope findings. Review the plan once.
 
-If independent plan review is required, write each reviewer a self-contained
-prompt instructing it to review the plan artifacts against `<input>` without
-editing files or implementing. Dispatch all `plan_reviewers` concurrently. Then
-update the artifacts to address any findings you agree with that are within
-`<input>`'s scope. Do not repeat plan review.
+Dispatch `implementer` to execute the plan, run targeted checks, and return
+after completion. Tell it to implement directly without invoking this skill
+or dispatching another implementer.
 
-Finally, dispatch `implementer` with a prompt instructing it to implement the
-plan from the artifacts, run only targeted checks as needed, and return only
-after completing the plan. The prompt must also instruct it not to invoke the
-`implement` skill or dispatch another implementer.
-
-Check completion against `<input>` and the plan artifacts. If the implementation
+Check completion against `<input>` and the plan. If the implementation
 is incomplete, call `dispatch_continue` once with the `implementer` session
 handle and a prompt listing the unmet requirements and instructing it to
 complete the plan before returning. If implementation remains incomplete after
@@ -76,14 +61,13 @@ different approach in that prompt.
    code, premature abstractions, and tests that cannot detect a product defect.
 
 2. If independent code review is required, dispatch `code_reviewer` to review
-   the implementation against `<input>` and any plan artifacts without editing
+   the implementation against `<input>` and any plan without editing
    files. Evaluate each finding and fix those that are valid within `<input>`'s
    scope. Check findings related to explicit requirements against `<input>`
    before rejecting them. If the fixes are substantial, perform one fresh final
-   review. Do not
-   automatically repeat it.
+   review.
 
-3. Repeat the completion check against `<input>` and any plan artifacts. Resolve
+3. Check completion against `<input>` and any plan. Resolve
    gaps until it passes. Passing tests are supporting evidence, not proof of
    completion.
 
