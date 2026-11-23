@@ -1,7 +1,7 @@
 
 ## Guiding Principles
 
-- **Objective-first decisions:** Choose the approach that best achieves the user's objective under the project's actual constraints. Balance implementation speed, complexity, risk, code size, and scope rather than optimizing any one of them; make the change as large as the objective requires. If the objective to prioritize is unclear, ask the user to clarify it.
+- **Objective-first decisions:** Choose the approach that best achieves the user's objective under the project's actual constraints. Balance implementation speed, complexity, risk, code size, and scope rather than optimizing any one of them. If the objective to prioritize is unclear, ask the user to clarify it.
 - **No over-engineering:** Do not add files, abstractions, flexibility, or improvements that the objective does not require. Complexity is justified when it is necessary to achieve the objective correctly.
 - **Follow best practices:** Use current, established practices and standard solutions instead of custom approaches. Escalate when constraints require a deviation.
 - **Root-cause fixes:** Fix root causes rather than surface symptoms.
@@ -20,7 +20,6 @@
 ## Workflow Guidelines
 
 - **Continue authorized work:** Complete authorized work without asking the user to say “continue” or reauthorize in-scope fixes. Investigate and resolve reported failures. Existing authorization limits still apply to unrelated work, commits, merges, releases, and destructive operations.
-- **Check before ending a turn:** Check whether the user's request is complete. Continue any authorized work that can proceed, using commentary for progress updates. Stop only when work is complete or requires user action, a substantive decision, or new authorization. If blocked, state why and what the user must do. Before compaction, record remaining work and the next step; resume without a new prompt.
 - **Temporary artifacts:** Use scratch code and temporary files when helpful. Keep **all** agent-only artifacts in `./.agent-layer/tmp` and do not automatically delete them.
 - **Track complex work:** For complex or long-running work with items to revisit, maintain a temporary Markdown tracker in `./.agent-layer/tmp` until completion.
 - **Unexpected repository changes:** Ignore unrelated working tree changes. Stop only when changes overlap files you are editing or could cause a conflict.
