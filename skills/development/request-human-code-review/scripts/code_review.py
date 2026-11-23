@@ -28,6 +28,7 @@ from tailnet import Tailnet
 
 ASSETS = Path(__file__).resolve().parent
 LIFETIME = 12 * 3600
+CONTEXT_PAGE = 20
 GIT_DIFF = (
     "--patch", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
     "--no-relative", "--submodule=short", "--ignore-submodules=dirty", "-U3",
@@ -56,6 +57,19 @@ def stamp():
 
 def display(data):
     return data.decode("utf-8", errors="replace")
+
+
+def markup_lines(path, source):
+    from pygments import highlight
+    from pygments.formatters import HtmlFormatter
+    from pygments.lexers import get_lexer_for_filename
+    from pygments.util import ClassNotFound
+
+    try:
+        lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
+    except ClassNotFound:
+        return []
+    return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
 
 
 @dataclass
@@ -138,18 +152,6 @@ class FileDiff:
 
     @cached_property
     def rendered(self):
-        from pygments import highlight
-        from pygments.formatters import HtmlFormatter
-        from pygments.lexers import get_lexer_for_filename
-        from pygments.util import ClassNotFound
-
-        def markup_lines(path, source):
-            try:
-                lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
-            except ClassNotFound:
-                return []
-            return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
-
         rows = [dict(row) for row in self.rows]
         hunks = list(split_hunks(rows))
         sources = {}
@@ -185,7 +187,89 @@ class FileDiff:
                 if len(highlighted) == len(code_rows) + 1:
                     for row, markup in zip(code_rows, highlighted):
                         row[html_key] = markup
-        return rows
+
+        baseline = sources.get("old")
+        gaps = self.context_gaps(baseline.content) if baseline and baseline.content else {}
+        # Reserve row indices for hidden lines so expanding a gap cannot move a comment anchor.
+        visible = []
+        index = 0
+        for position in range(len(rows) + 1):
+            if gap := gaps.get(position):
+                visible.append({**gap, "kind": "gap", "index": index})
+                index += gap["count"]
+            if position < len(rows):
+                rows[position]["index"] = index
+                visible.append(rows[position])
+                index += 1
+        return visible
+
+    def context_gaps(self, baseline):
+        if not self.new_path or self.binary or len(self.patches) != 1:
+            return {}
+        gaps = {}
+        old_end = new_end = 0
+        total = baseline.count(b"\n") + (not baseline.endswith(b"\n"))
+        for position, row in enumerate(self.rows):
+            if row["kind"] != "hunk":
+                continue
+            match = HUNK.match(row["text"].encode())
+            old_count, new_count = int(match[2] or 1), int(match[4] or 1)
+            old_before = int(match[1]) - (old_count != 0)
+            new_before = int(match[3]) - (new_count != 0)
+            count = old_before - old_end
+            if count < 0 or count != new_before - new_end or old_before + old_count > total:
+                return {}
+            if count:
+                gaps[position] = {"old": old_end + 1, "new": new_end + 1, "count": count,
+                                  "up": True, "down": old_end > 0 or new_end > 0}
+            old_end, new_end = old_before + old_count, new_before + new_count
+        if old_end < total:
+            gaps[len(self.rows)] = {"old": old_end + 1, "new": new_end + 1, "count": total - old_end,
+                                    "up": False, "down": True}
+        return gaps
+
+    def context_rows(self, gap, start, stop, *, highlighted=False):
+        # Unchanged lines come from the immutable Git baseline, even in a worktree review.
+        baseline = git(self.repo, "cat-file", "blob", self.baseline_blob.decode())
+        source = display(baseline).replace("\r\n", "\n")
+        lines = source.split("\n")
+        markup = markup_lines(self.old_path, source) if highlighted else []
+        for index in range(start, stop):
+            offset = index - gap["index"]
+            old, new = gap["old"] + offset, gap["new"] + offset
+            row = {"kind": "context", "index": index, "old_line": old, "new_line": new,
+                   "text": lines[old - 1].removesuffix("\r")}
+            if len(markup) == len(lines):
+                row.update(old_html=markup[old - 1], new_html=markup[old - 1])
+            if old == len(lines) and not baseline.endswith(b"\n"):
+                row["no_newline"] = True
+            yield row
+
+    def context_page(self, start, count, direction):
+        if start < 0 or count < 1 or direction not in ("up", "down"):
+            raise ValueError("Invalid context range")
+        stop = start + count
+        for gap in self.rendered:
+            if (gap["kind"] == "gap" and gap[direction] and
+                    gap["index"] <= start < stop <= gap["index"] + gap["count"]):
+                if direction == "up":
+                    start = max(start, stop - CONTEXT_PAGE)
+                else:
+                    stop = min(stop, start + CONTEXT_PAGE)
+                return list(self.context_rows(gap, start, stop, highlighted=True))
+        raise ValueError("That range has no expandable context")
+
+    def selected_rows(self, start, stop):
+        for row in self.rendered:
+            index = row["index"]
+            if index >= stop:
+                break
+            if row["kind"] == "gap":
+                first, last = max(start, index), min(stop, index + row["count"])
+                if first < last:
+                    yield from self.context_rows(row, first, last)
+            elif start <= index:
+                yield row
 
 
 def split_hunks(rows):
@@ -307,26 +391,35 @@ def annotation(file, target):
         raise ValueError("Select code from one side of the diff")
     side_line = f"{side}_line"
 
-    def endpoint(position):
+    def coordinates(position):
         row, column = position["row"], position["column"]
-        if type(row) is not int or type(column) is not int or not 0 <= row < len(file.rows):
+        if type(row) is not int or type(column) is not int or row < 0:
             raise ValueError("Invalid selection coordinates")
-        source = file.rows[row]
+        return row, column
+
+    first, last = coordinates(target["start"]), coordinates(target["end"])
+    if first >= last:
+        raise ValueError("Select some code before commenting")
+    rows = list(file.selected_rows(first[0], last[0] + 1))
+
+    def endpoint(position, source):
+        row, column = position
+        if source["index"] != row:
+            raise ValueError("Invalid selection coordinates")
         if source.get(side_line) is None or not 1 <= column <= len(source["text"].encode("utf-16-le")) // 2 + 1:
             raise ValueError("Selection must be inside a code line")
         return {"row": row, "column": column, "old_line": source["old_line"], "new_line": source["new_line"]}
 
-    start, end = endpoint(target["start"]), endpoint(target["end"])
-    if (start["row"], start["column"]) >= (end["row"], end["column"]):
-        raise ValueError("Select some code before commenting")
+    if not rows:
+        raise ValueError("Invalid selection coordinates")
+    start, end = endpoint(first, rows[0]), endpoint(last, rows[-1])
     contents = []
-    for row_index in range(start["row"], end["row"] + 1):
-        row = file.rows[row_index]
+    for row in rows:
         if row.get(side_line) is not None:
             content = row["text"].encode("utf-16-le")
-            first = 2 * (start["column"] - 1) if row_index == start["row"] else 0
-            last = 2 * (end["column"] - 1) if row_index == end["row"] else len(content)
-            contents.append(content[first:last].decode("utf-16-le", errors="surrogatepass"))
+            left = 2 * (start["column"] - 1) if row["index"] == start["row"] else 0
+            right = 2 * (end["column"] - 1) if row["index"] == end["row"] else len(content)
+            contents.append(content[left:right].decode("utf-16-le", errors="surrogatepass"))
     return {"side": side, "start": start, "end": end, "selected_text": "\n".join(contents)}
 
 
@@ -369,6 +462,8 @@ class Review:
             file = self.file(index)
             if not asset:
                 return {"rows": file.rendered, "media": describe(file)}
+            if len(asset) == 4 and asset[0] == "context":
+                return {"rows": file.context_page(int(asset[1]), int(asset[2]), asset[3])}
             if len(asset) == 2 and asset[0] == "image" and asset[1] in ("old", "new"):
                 side = asset[1]
                 blob = file.blobs.get(side)
@@ -400,14 +495,17 @@ class Review:
         if status != "pending":
             raise ValueError("This review has ended")
         if route == "reviewed":
-            file = self.file(data["file"])
             flag = data["reviewed"]
             if type(flag) is not bool:
                 raise ValueError("Expected a reviewed checkbox value")
-            db.execute(
+            indices = data["files"] if "files" in data else [data["file"]]
+            if not isinstance(indices, list) or not indices or len(indices) > len(self.files):
+                raise ValueError("Select one or more files to mark")
+            files = [self.file(index) for index in indices]
+            db.executemany(
                 "INSERT OR IGNORE INTO reviewed VALUES (?, ?, ?)" if flag else
                 "DELETE FROM reviewed WHERE scope = ? AND file = ? AND version = ?",
-                (self.scope, file.key, file.version),
+                ((self.scope, file.key, file.version) for file in files),
             )
             return {"reviewed": flag}
         comments = payload["comments"]
@@ -422,8 +520,10 @@ class Review:
                 index = data["file"]
                 file = self.file(index)
                 key = secrets.token_hex(12)
+                selection = data["selection"]
+                anchor = {"scope": "file"} if selection is None else annotation(file, selection)
                 comment = {"id": key, "file": index, **file.metadata(), "body": body,
-                           "created_at": stamp(), **annotation(file, data["selection"])}
+                           "created_at": stamp(), **anchor}
                 comments[key] = comment
             self.save(db, status, payload)
             return comment

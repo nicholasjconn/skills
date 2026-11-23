@@ -13,6 +13,7 @@ let layoutOverride;
 let layout = narrow.matches ? 'unified' : 'split';
 let comments = [];
 let selection = null;
+let selectionFeedback = null;
 let dragging = null;
 let pressedSelection = null;
 let editing = null;
@@ -32,36 +33,47 @@ function button(className, text) {
   return node;
 }
 
-function resizeDivider(handle, {current, limits, update, scale, step}) {
-  function setValue(value) {
-    const [min, max] = limits();
-    update(Math.min(max, Math.max(min, Math.round(value))));
+function resizeDivider(handle, {current, limits, update, scale, step, preview}) {
+  const clamp = (value, [min, max]) => Math.min(max, Math.max(min, Math.round(value)));
+  function setValue(value, bounds = limits()) {
+    value = clamp(value, bounds);
+    update(value);
+    const [min, max] = bounds;
     handle.setAttribute('aria-valuemin', min);
     handle.setAttribute('aria-valuemax', max);
-    handle.setAttribute('aria-valuenow', current());
+    handle.setAttribute('aria-valuenow', value);
   }
   let drag;
+  const dragValue = clientX => clamp(drag.initial + (clientX - drag.x) * drag.scale, drag.bounds);
   handle.addEventListener('pointerdown', event => {
     if (event.button !== 0 || !event.isPrimary) return;
     event.preventDefault();
     handle.focus({preventScroll: true});
     handle.setPointerCapture(event.pointerId);
-    drag = {id: event.pointerId, x: event.clientX, initial: current(), scale: scale()};
+    drag = {id: event.pointerId, x: event.clientX, initial: current(), scale: scale(), bounds: limits()};
     handle.dataset.resizing = '';
   });
   handle.addEventListener('pointermove', event => {
-    if (drag?.id === event.pointerId) setValue(drag.initial + (event.clientX - drag.x) * drag.scale);
+    if (drag?.id !== event.pointerId) return;
+    const value = dragValue(event.clientX);
+    if (preview) preview(value - drag.initial);
+    else setValue(value, drag.bounds);
+  });
+  handle.addEventListener('pointerup', event => {
+    if (preview && drag?.id === event.pointerId) setValue(dragValue(event.clientX));
   });
   handle.addEventListener('lostpointercapture', () => {
     drag = null;
+    preview?.(0);
     delete handle.dataset.resizing;
   });
   handle.addEventListener('keydown', event => {
     const [min, max] = limits();
-    const values = {ArrowLeft: current() - step, ArrowRight: current() + step, Home: min, End: max};
+    const value = current();
+    const values = {ArrowLeft: value - step, ArrowRight: value + step, Home: min, End: max};
     if (!Object.hasOwn(values, event.key)) return;
     event.preventDefault();
-    setValue(values[event.key]);
+    setValue(values[event.key], [min, max]);
   });
   return () => setValue(current());
 }
@@ -91,6 +103,7 @@ function setupSidebar() {
   const workspace = byId('workspace');
   const sidebar = byId('file-sidebar');
   const files = byId('changed-files');
+  const bulk = byId('bulk-tools');
   const divider = byId('sidebar-divider');
   const overview = byId('files-overview');
   const toggle = byId('toggle-files');
@@ -103,6 +116,7 @@ function setupSidebar() {
   function setExpanded(expanded) {
     workspace.classList.toggle('sidebar-hidden', !expanded);
     files.hidden = divider.hidden = overview.hidden = !expanded;
+    bulk.hidden = !expanded || !views.length;
     const label = expanded ? 'Collapse changed files' : 'Expand changed files';
     toggle.title = label;
     toggle.setAttribute('aria-label', label);
@@ -114,6 +128,8 @@ function setupSidebar() {
     limits,
     scale: () => 1,
     step: 16,
+    // Move only the divider during a drag. Reflow the diff once on release.
+    preview: offset => divider.style.setProperty('--drag-offset', `${offset}px`),
     update: width => workspace.style.setProperty('--sidebar-width', `${width}px`),
   });
   const syncWhenVisible = () => { if (!files.hidden && !narrow.matches) sync(); };
@@ -154,15 +170,103 @@ function updateProgress() {
   byId('progress').textContent = `${views.filter(view => view.file.reviewed).length} / ${views.length} reviewed`;
 }
 
+function bulkCandidates() {
+  return views.filter(view => !view.listItem.hidden && !view.file.reviewed);
+}
+
+function updateBulkControls() {
+  const selecting = !byId('bulk-options').hidden;
+  const query = selecting ? byId('bulk-filter').value.trim().toLowerCase().replace(/\/\*$/, '/') : '';
+  const busy = views.some(view => view.savingMark);
+  for (const view of views) {
+    const path = view.file.path.toLowerCase();
+    const matches = query.endsWith('/') ? path.startsWith(query) : path.includes(query);
+    view.listItem.hidden = !matches;
+    view.selectFile.hidden = !selecting;
+    view.selectFile.disabled = !selecting || busy || view.file.reviewed;
+    if (!matches || !selecting) view.selectFile.checked = false;
+  }
+  byId('no-matching-files').hidden = !query || views.some(view => !view.listItem.hidden);
+  const candidates = bulkCandidates();
+  const count = candidates.filter(view => view.selectFile.checked).length;
+  const selectVisible = byId('select-visible');
+  selectVisible.disabled = busy || !candidates.length;
+  selectVisible.checked = count > 0 && count === candidates.length;
+  selectVisible.indeterminate = count > 0 && count < candidates.length;
+  const submit = byId('mark-selected');
+  submit.disabled = busy || Boolean(editing) || count === 0;
+  submit.textContent = count ? `Mark ${count} reviewed` : 'Mark selected reviewed';
+  byId('bulk-filter').disabled = busy;
+  byId('toggle-bulk').disabled = busy;
+}
+
+byId('toggle-bulk').addEventListener('click', () => {
+  const options = byId('bulk-options');
+  options.hidden = !options.hidden;
+  const toggle = byId('toggle-bulk');
+  toggle.setAttribute('aria-expanded', String(!options.hidden));
+  toggle.textContent = options.hidden ? 'Select files' : 'Done selecting';
+  if (options.hidden) byId('bulk-filter').value = '';
+  else byId('bulk-filter').focus();
+  updateBulkControls();
+});
+byId('bulk-filter').addEventListener('input', updateBulkControls);
+byId('select-visible').addEventListener('change', event => {
+  for (const view of bulkCandidates()) view.selectFile.checked = event.target.checked;
+  updateBulkControls();
+});
+byId('mark-selected').addEventListener('click', () => {
+  const selected = bulkCandidates().filter(view => view.selectFile.checked);
+  if (selected.length) saveReviewMarks(selected, true);
+});
+
 function updateReviewActions() {
   byId('submit-review').disabled = Boolean(editing) || savingComment || deletingComments.size > 0 || views.some(view => view.savingMark);
   layoutSelect.disabled = Boolean(editing);
   views.forEach(view => {
     view.mark.disabled = view.savingMark || editing?.view === view;
-    view.diff.querySelectorAll('.comment-actions button').forEach(action => {
+    view.commentOnFile.disabled = Boolean(editing) || savingComment || view.savingMark;
+    view.body.querySelectorAll('.comment-actions button').forEach(action => {
       action.disabled = Boolean(editing) || savingComment || deletingComments.has(action.closest('.comment').dataset.commentId);
     });
   });
+  updateBulkControls();
+}
+
+async function saveReviewMarks(targets, reviewed, scrollTo = null) {
+  const before = targets.map(view => ({view, reviewed: view.file.reviewed, expanded: !view.body.hidden}));
+  const focused = scrollTo?.mark === document.activeElement;
+  for (const {view} of before) {
+    view.savingMark = true;
+    view.file.reviewed = reviewed;
+    view.updateMark();
+    view.setExpanded(!reviewed);
+  }
+  if (scrollTo && reviewed && before[0].expanded && scrollTo.body.hidden) {
+    scrollTo.panel.scrollIntoView({block: 'start'});
+  }
+  if (focused && reviewed) scrollTo.toggle.focus({preventScroll: true});
+  updateProgress();
+  updateReviewActions();
+  showError(null);
+  try {
+    await request('reviewed', {files: targets.map(view => String(view.index)), reviewed});
+    if (reviewed) for (const view of targets) view.selectFile.checked = false;
+  } catch (error) {
+    for (const previous of before) {
+      const {view} = previous;
+      view.file.reviewed = previous.reviewed;
+      if (view.body.hidden === reviewed) view.setExpanded(previous.expanded);
+    }
+    updateProgress();
+    showError(error);
+  } finally {
+    for (const view of targets) {
+      view.updateMark();
+      view.savingMark = false;
+    }
+    updateReviewActions();
+  }
 }
 
 function clearSelection() {
@@ -177,6 +281,7 @@ class FileView {
     this.file = file;
     this.index = index;
     this.sources = [];
+    this.expanding = new Set();
     this.savingMark = false;
     this.panel = element('section', 'file-card');
     const header = element('header', 'file-heading');
@@ -203,30 +308,40 @@ class FileView {
     this.mark.checked = file.reviewed;
     this.mark.setAttribute('aria-label', `Reviewed ${file.path}`);
     reviewed.append(this.mark, document.createTextNode('Reviewed'));
-    this.addComment = button('primary add-comment');
-    this.addComment.setAttribute('aria-label', 'Comment on selection');
-    this.addComment.append(
-      element('span', 'add-comment-ready', 'Comment on selection'),
-      element('span', 'add-comment-idle', 'Select code to comment'),
-    );
-    this.addComment.title = 'Select code from one version to comment';
+    this.commentOnFile = button('comment-on-file', 'Comment on file');
+    this.commentOnFile.addEventListener('click', () => openEditor({view: this}));
+    this.addComment = button('add-comment', 'Comment on code');
+    this.addComment.title = 'Select code to leave an inline comment';
     this.addComment.disabled = true;
     this.addComment.hidden = true;
-    actions.append(reviewed, this.addComment);
-    header.append(name, actions);
+    this.selectionHint = element('p', 'selection-hint');
+    this.selectionHint.id = `selection-hint-${index}`;
+    this.selectionHint.setAttribute('role', 'status');
+    this.addComment.setAttribute('aria-describedby', this.selectionHint.id);
+    actions.append(reviewed, this.commentOnFile, this.addComment);
+    header.append(name, actions, this.selectionHint);
     this.body = element('div', 'file-body');
     this.body.id = `file-body-${index}`;
+    this.fileThread = element('div', 'file-thread');
+    this.fileThread.hidden = true;
     this.media = element('div');
     this.media.hidden = true;
     this.diff = element('div', 'diff');
     this.diff.tabIndex = 0;
-    this.body.append(this.media, this.diff);
+    this.body.append(this.fileThread, this.media, this.diff);
     this.panel.append(header, this.body);
     this.panel.dataset.index = index;
     this.panel.setAttribute('aria-labelledby', this.toggle.id);
     this.setExpanded(!file.reviewed);
 
     this.link = button('file-link');
+    this.selectFile = element('input', 'select-file');
+    this.selectFile.type = 'checkbox';
+    this.selectFile.hidden = true;
+    this.selectFile.setAttribute('aria-label', `Select ${file.path}`);
+    this.selectFile.addEventListener('change', updateBulkControls);
+    this.listItem = element('li');
+    this.listItem.append(this.selectFile, this.link);
     const stats = lineStats(file);
     stats.id = `line-stats-${index}`;
     const filePath = element('span', 'file-path');
@@ -244,7 +359,7 @@ class FileView {
       this.toggle.focus({preventScroll: true});
     });
     this.toggle.addEventListener('click', () => this.setExpanded(this.body.hidden));
-    this.mark.addEventListener('change', () => this.saveMark());
+    this.mark.addEventListener('change', () => saveReviewMarks([this], this.mark.checked, this));
     this.diff.addEventListener('pointerdown', event => {
       const cell = event.target.closest('.diff-cell:not(.blank)');
       dragging = cell && event.button === 0 ? {view: this, side: cell.dataset.side} : null;
@@ -266,7 +381,7 @@ class FileView {
 
   setExpanded(expanded) {
     if (!expanded && editing?.view === this) return;
-    if (!expanded && selection?.view === this) clearSelection();
+    if (!expanded && (selection?.view === this || selectionFeedback?.view === this)) clearSelection();
     this.body.hidden = !expanded;
     this.toggle.setAttribute('aria-expanded', String(expanded));
     this.addComment.hidden = !expanded || !this.hasCode;
@@ -309,31 +424,6 @@ class FileView {
     this.commentCount.textContent = `${count} ${count === 1 ? 'comment' : 'comments'}`;
   }
 
-  async saveMark() {
-    const previous = this.file.reviewed;
-    const wasExpanded = !this.body.hidden;
-    const next = this.mark.checked;
-    this.savingMark = true;
-    this.file.reviewed = next;
-    this.updateMark();
-    this.setExpanded(!next);
-    updateProgress();
-    updateReviewActions();
-    showError(null);
-    try {
-      await request('reviewed', {file: String(this.index), reviewed: next});
-    } catch (error) {
-      this.file.reviewed = previous;
-      if (this.body.hidden === next) this.setExpanded(wasExpanded);
-      updateProgress();
-      showError(error);
-    } finally {
-      this.updateMark();
-      this.savingMark = false;
-      updateReviewActions();
-    }
-  }
-
   cell({row, index}, side, line, unified = false) {
     const cell = element('div', `diff-cell ${row.kind}`);
     cell.dataset.side = side;
@@ -353,15 +443,64 @@ class FileView {
     return cell;
   }
 
+  gapRow(gap) {
+    const row = element('div', 'diff-gap');
+    row.dataset.gapIndex = gap.index;
+    for (const direction of ['down', 'up']) {
+      if (!gap[direction]) continue;
+      const expand = button('expand-context', `Expand ${direction}`);
+      expand.dataset.direction = direction;
+      expand.disabled = this.expanding.has(gap);
+      expand.addEventListener('click', () => this.expandContext(gap, direction));
+      row.append(expand);
+    }
+    const hiddenComments = comments.filter(comment => Number(comment.file) === this.index &&
+      gap.index <= comment.end.row && comment.end.row < gap.index + gap.count).length;
+    const lines = `${gap.count.toLocaleString()} unchanged ${gap.count === 1 ? 'line' : 'lines'}`;
+    const marker = hiddenComments ? ` · ${hiddenComments} ${hiddenComments === 1 ? 'comment' : 'comments'}` : '';
+    row.append(element('span', 'hidden-context', lines + marker));
+    return row;
+  }
+
+  async expandContext(gap, direction) {
+    if (this.expanding.has(gap)) return;
+    const controls = this.diff.querySelector(`[data-gap-index="${gap.index}"]`);
+    this.expanding.add(gap);
+    controls.querySelectorAll('button').forEach(action => { action.disabled = true; });
+    showError(null);
+    try {
+      const {rows} = await request(`file/${this.index}/context/${gap.index}/${gap.count}/${direction}`);
+      const fromTop = direction === 'down';
+      const remaining = {...gap, count: gap.count - rows.length, index: gap.index + (fromTop ? rows.length : 0)};
+      const replacement = remaining.count ? (fromTop ? [...rows, remaining] : [remaining, ...rows]) : rows;
+      this.data.rows.splice(this.data.rows.indexOf(gap), 1, ...replacement);
+      const active = document.activeElement;
+      if (selection?.view === this || selectionFeedback?.view === this) clearSelection();
+      this.render();
+      if (active === commentBody && editing?.view === this) {
+        commentBody.focus({preventScroll: true});
+      } else if (active === document.body || controls.contains(active)) {
+        const next = this.diff.querySelector(`[data-gap-index="${remaining.index}"] [data-direction="${direction}"]`);
+        (next ?? this.diff).focus({preventScroll: true});
+      }
+    } catch (error) {
+      showError(error);
+    } finally {
+      this.expanding.delete(gap);
+      this.diff.querySelectorAll(`[data-gap-index="${gap.index}"] button`).forEach(action => { action.disabled = false; });
+    }
+  }
+
   render() {
     const rows = this.data.rows;
     const block = element('div', `diff-body ${layout}`);
     this.sources = [];
     this.diff.setAttribute('aria-label', layout === 'split' ? 'Side-by-side diff' : 'Unified diff');
     if (layout === 'unified') {
-      rows.forEach((row, index) => {
-        if (row.kind === 'hunk' || row.kind === 'note') block.append(element('div', `diff-${row.kind}`, row.text));
-        else block.append(this.cell({row, index}, {add: 'new', remove: 'old', context: 'both'}[row.kind], null, true));
+      rows.forEach(row => {
+        if (row.kind === 'gap') block.append(this.gapRow(row));
+        else if (row.kind === 'hunk' || row.kind === 'note') block.append(element('div', `diff-${row.kind}`, row.text));
+        else block.append(this.cell({row, index: row.index}, {add: 'new', remove: 'old', context: 'both'}[row.kind], null, true));
       });
     } else {
       const before = element('div', 'diff-pane');
@@ -386,13 +525,17 @@ class FileView {
         for (let index = 0; index < Math.max(removed.length, added.length); index++) pair(removed[index], added[index]);
         removed.length = added.length = 0;
       };
-      rows.forEach((row, index) => {
-        const entry = {row, index};
+      rows.forEach(row => {
+        const entry = {row, index: row.index};
         if (row.kind === 'remove') removed.push(entry);
         else if (row.kind === 'add') added.push(entry);
         else {
           flush();
           if (row.kind === 'context') pair(entry, entry);
+          else if (row.kind === 'gap') {
+            before.append(this.gapRow(row));
+            after.append(element('div', 'diff-gap'));
+          }
           else if (row.kind === 'hunk') {
             const oldHunk = element('div', 'diff-hunk', row.old_range);
             const newHunk = element('div', 'diff-hunk', row.new_range);
@@ -413,13 +556,19 @@ class FileView {
   }
 
   renderThreads() {
-    if (!this.data) return;
-    if (this.diff.contains(editor)) document.body.append(editor);
+    const focused = editor.contains(document.activeElement) ? document.activeElement : null;
+    if (this.body.contains(editor)) document.body.append(editor);
+    this.fileThread.replaceChildren();
+    this.fileThread.hidden = true;
     this.diff.querySelectorAll('.inline-thread').forEach(thread => thread.remove());
-    const block = this.diff.firstElementChild;
-    const lineCount = block.firstElementChild.childElementCount;
+    const block = this.data && this.diff.firstElementChild;
+    const lineCount = block?.firstElementChild?.childElementCount ?? 0;
     const threads = new Map();
     const anchor = target => {
+      if (!target.side) {
+        this.fileThread.hidden = false;
+        return this.fileThread;
+      }
       const point = this.sourceAt(target.side, target.end.row);
       if (!point) return null;
       if (!threads.has(point.line)) {
@@ -445,8 +594,8 @@ class FileView {
       const edit = button('comment-edit', 'Edit');
       const remove = button('comment-delete', 'Delete');
       edit.disabled = remove.disabled = editing !== null || savingComment || deletingComments.has(comment.id);
-      edit.setAttribute('aria-label', `Edit comment on ${locationLabel(target)}`);
-      remove.setAttribute('aria-label', `Delete comment on ${locationLabel(target)}`);
+      edit.setAttribute('aria-label', target.side ? `Edit comment on ${locationLabel(target)}` : 'Edit file comment');
+      remove.setAttribute('aria-label', target.side ? `Delete comment on ${locationLabel(target)}` : 'Delete file comment');
       edit.addEventListener('click', () => openEditor(target));
       remove.addEventListener('click', () => deleteSavedComment(target, edit, remove));
       entry.addEventListener('mouseenter', () => { if (!editing && !selection) highlight(target); });
@@ -458,7 +607,8 @@ class FileView {
       anchor(comment)?.append(entry);
     }
     if (editing?.view === this) anchor(editing)?.append(editor);
-    if (layout === 'split') block.style.setProperty('--rows', lineCount + threads.size);
+    if (focused && this.body.contains(editor)) focused.focus({preventScroll: true});
+    if (layout === 'split' && block) block.style.setProperty('--rows', lineCount + threads.size);
   }
 
   sourceAt(side, index) {
@@ -478,6 +628,7 @@ function nodeElement(node) {
 }
 
 function locationLabel(target) {
+  if (!target.side) return 'File comment';
   const line = point => point[`${target.side}_line`];
   const start = line(target.start);
   const end = line(target.end);
@@ -491,9 +642,13 @@ function selectedCode() {
   const origin = nodeElement(native.anchorNode)?.closest('.diff-cell:not(.blank)');
   const card = origin?.closest('.file-card');
   const view = card && views[Number(card.dataset.index)];
-  if (!view || !view.diff.contains(native.focusNode)) return null;
+  if (!view) return null;
+  if (!view.diff.contains(native.focusNode)) return {view, message: 'Select code within one file to comment.'};
   const split = layout === 'split';
-  if (split && origin.dataset.side !== nodeElement(native.focusNode)?.closest('.diff-pane')?.dataset.side) return null;
+  const versionHint = 'Select code from one version to comment.';
+  if (split && origin.dataset.side !== nodeElement(native.focusNode)?.closest('.diff-pane')?.dataset.side) {
+    return {view, message: versionHint};
+  }
   const range = native.getRangeAt(0);
   const parts = view.sources.filter(entry => (!split || entry.side === origin.dataset.side) && range.intersectsNode(entry.code)).map(entry => {
     const {code, row} = entry;
@@ -506,7 +661,10 @@ function selectedCode() {
   if (first === -1) return null;
   const selected = parts.slice(first, last + 1);
   const changedSides = new Set(selected.map(part => part.side).filter(side => side !== 'both'));
-  if (changedSides.size > 1) return null;
+  if (changedSides.size > 1) return {view, message: versionHint};
+  if (view.data.rows.some(row => row.kind === 'gap' && parts[first].index < row.index && row.index < parts[last].index)) {
+    return {view, message: 'Expand the hidden lines to comment on this selection.'};
+  }
   const side = [...changedSides][0] ?? 'new';
   const start = {...parts[first].row, row: parts[first].index, column: parts[first].from + 1};
   const end = {...parts[last].row, row: parts[last].index, column: parts[last].to + 1};
@@ -515,7 +673,14 @@ function selectedCode() {
 
 function updateSelection() {
   const previous = selection?.view;
-  selection = pressedSelection ?? selectedCode();
+  const attempt = pressedSelection ?? selectedCode();
+  const feedback = attempt?.message ? attempt : null;
+  const oldHint = selectionFeedback?.view.selectionHint;
+  const newHint = feedback?.view.selectionHint;
+  if (oldHint && oldHint !== newHint) oldHint.textContent = '';
+  if (newHint && newHint.textContent !== feedback.message) newHint.textContent = feedback.message;
+  selectionFeedback = feedback;
+  selection = feedback ? null : attempt;
   if (previous && previous !== selection?.view) {
     previous.addComment.disabled = true;
     if (dragging?.view !== previous) delete previous.diff.dataset.selecting;
@@ -542,7 +707,7 @@ function sourcePoint(target, point) {
 function highlight(target) {
   if (!CSS.highlights) return;
   CSS.highlights.delete('review-comment');
-  if (!target) return;
+  if (!target?.side) return;
   const start = sourcePoint(target, target.start);
   const end = sourcePoint(target, target.end);
   if (!start || !end) return;
@@ -584,9 +749,10 @@ function openEditor(target, body = target.body ?? '') {
   target.view.setExpanded(true);
   clearSelection();
   highlight(target);
-  byId('editor-title').textContent = target.id ? 'Edit comment' : 'Comment on code';
-  byId('anchor').textContent = locationLabel(target);
-  byId('quote').textContent = target.selected_text;
+  byId('editor-title').textContent = target.id ? 'Edit comment' : target.side ? 'Comment on code' : 'Comment on file';
+  byId('anchor').textContent = target.side ? locationLabel(target) : target.view.file.path;
+  byId('quote').hidden = !target.side;
+  byId('quote').textContent = target.selected_text ?? '';
   commentBody.value = body;
   byId('delete-comment').hidden = !target.id;
   showError(null, byId('editor-error'));
@@ -707,7 +873,8 @@ async function saveComment() {
   let failure;
   try {
     const position = ({row, column}) => ({row, column});
-    const saved = await request('comment', {id, file, selection: {side, start: position(start), end: position(end)}, body});
+    const selection = side ? {side, start: position(start), end: position(end)} : null;
+    const saved = await request('comment', {id, file, selection, body});
     replaceComment(pending, saved);
   } catch (error) {
     replaceComment(pending, previous);
@@ -771,9 +938,7 @@ async function initialize() {
   for (const [index, file] of result.files.entries()) {
     const view = new FileView(file, index);
     views.push(view);
-    const item = element('li');
-    item.append(view.link);
-    byId('file-list').append(item);
+    byId('file-list').append(view.listItem);
     byId('diffs').append(view.panel);
   }
   const workspace = byId('workspace');
