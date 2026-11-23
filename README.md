@@ -12,6 +12,7 @@ gh skill install nicholasjconn/skills tools/request-html-comments
 
 ## Development
 
+- [`code-review`](skills/development/code-review/) opens browser reviews of Git diffs and standalone patches with file review tracking and text comments.
 - [`pr-retrospective`](skills/development/pr-retrospective/): Scores merged GitHub PRs and posts structured retrospective comments.
 
 ## Steward

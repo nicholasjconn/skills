@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Code review</title>
+  <link rel="stylesheet" href="review.css">
+  <script src="images.js" defer></script>
+  <script src="review.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div class="review-source">
+      <div class="review-title"><h1>Code review</h1><span id="review-totals"></span></div>
+      <p id="comparison"></p>
+      <p id="checkout-details" hidden>
+        <code id="checkout-path" title="Local repository path"></code>
+        <span id="checkout-branch"></span>
+      </p>
+    </div>
+    <div class="actions" id="review-actions">
+      <label id="layout-control" hidden>Diff layout
+        <select id="diff-layout">
+          <option value="split">Split</option>
+          <option value="unified">Unified</option>
+        </select>
+      </label>
+      <button id="submit-review" type="button" disabled>Submit review</button>
+    </div>
+  </header>
+  <p id="error" role="alert" hidden></p>
+  <div id="workspace" class="workspace" hidden>
+    <nav class="files" aria-label="Changed files">
+      <div class="files-heading">
+        <h2>Changed files</h2>
+        <span id="progress" role="status"></span>
+      </div>
+      <ul id="file-list"></ul>
+    </nav>
+    <main id="diffs">
+      <p id="empty" hidden>No changed files in this comparison.</p>
+    </main>
+  </div>
+  <p id="completion" role="status" hidden></p>
+  <section id="editor" aria-labelledby="editor-title" hidden>
+    <form id="comment-form">
+      <p id="anchor"></p>
+      <pre id="quote"></pre>
+      <label id="editor-title" for="comment-body">Comment on code</label>
+      <textarea id="comment-body" required maxlength="12000" rows="3"></textarea>
+      <p id="editor-error" role="alert" hidden></p>
+      <div class="actions editor-actions">
+        <button id="delete-comment" type="button" hidden>Delete</button>
+        <button id="cancel-comment" type="button">Cancel</button>
+        <button id="save-comment" class="primary" type="submit">Save comment</button>
+      </div>
+    </form>
+  </section>
+</body>
+</html>
