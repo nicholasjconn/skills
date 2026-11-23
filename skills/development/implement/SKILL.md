@@ -19,38 +19,43 @@ Inspect the relevant architecture. Reuse existing code and established patterns
 when they fit `<input>`. Resolve substantive requirements and tradeoffs before
 implementation.
 
-Planning and independent review add significant cost. Before implementation,
-answer each question yes or no:
+Before implementation, weigh the cost of each step against the benefit it adds.
+Decide separately:
 
 - Is a written plan required to confidently complete and verify `<input>`?
 - If a plan is required, does its material risk or complexity justify
   independent plan review?
+- Would a separate implementer add enough value to justify the handoff?
 - Does the implementation's material risk or complexity justify independent
   code review, whether implementation is direct or planned?
 
-If no plan is required, implement `<input>` directly, run targeted checks, and
-continue to Finish.
+A written plan can guide direct implementation.
 
-## Implementation with a Written Plan
+## Planning
 
-Write a self-contained plan with the context needed to execute it and a
-checklist for verifying completion.
+If writing a plan, include the context needed to execute it and a checklist for
+verification.
 
 If independent plan review is required, dispatch all `plan_reviewers`
 concurrently with self-contained prompts to review the plan against `<input>`
 without editing files. Address valid in-scope findings. Review the plan once.
 
-Dispatch `implementer` to execute the plan, run targeted checks, and return
-after completion. Tell it to implement directly without invoking this skill
-or dispatching another implementer.
+## Implementation
 
-Check completion against `<input>` and the plan. If the implementation
+If working directly, implement `<input>`, run targeted checks, and continue to
+Finish.
+
+If delegating implementation, dispatch `implementer` to complete `<input>`,
+follow any plan, and run targeted checks before returning. Tell it to implement
+directly without invoking this skill or dispatching another implementer.
+
+Check completion against `<input>` and any plan. If the implementation
 is incomplete, call `dispatch_continue` once with the `implementer` session
-handle and a prompt listing the unmet requirements and instructing it to
-complete the plan before returning. If implementation remains incomplete after
-that continuation, use a fresh dispatch whose prompt includes the original
-plan, current implementation state, and remaining work. Repeat the instruction
-not to invoke the `implement` skill or dispatch another implementer in the
+handle and a prompt listing the unmet requirements and asking it to complete
+them before returning. If implementation remains incomplete after that
+continuation, use a fresh dispatch with any plan, the current implementation
+state, and the remaining work. Repeat the instruction not to invoke the
+`implement` skill or dispatch another implementer in the
 fresh prompt. If the continuation did not make meaningful progress, detail a
 different approach in that prompt.
 
