@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
-from media import describe, git_blobs, image_type, patch_blobs
+from media import ImageBudget, describe, git_blobs, image_type, patch_blobs
 from patch_input import DIFF_HEADER, HUNK, file_paths, patch_sections
 from tailnet import Tailnet
 
@@ -69,6 +69,8 @@ class FileDiff:
     old_mode: bytes = b""
     new_mode: bytes = b""
     blobs: dict = field(default_factory=dict)
+    repo: Path | None = None
+    committed: bool = False
 
     @property
     def path(self):
@@ -141,24 +143,48 @@ class FileDiff:
         from pygments.lexers import get_lexer_for_filename
         from pygments.util import ClassNotFound
 
+        def markup_lines(path, source):
+            try:
+                lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
+            except ClassNotFound:
+                return []
+            return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+
         rows = [dict(row) for row in self.rows]
-        # Each side gets its own lexer state. Deletions cannot affect new code.
-        for patch_rows in split_hunks(rows):
-            for side, path in (("old", self.old_path), ("new", self.new_path)):
-                if path is None:
+        hunks = list(split_hunks(rows))
+        sources = {}
+        if self.repo and hunks:
+            try:
+                sources = git_blobs(git, self.repo, self, self.committed)
+            except (OSError, ValueError):
+                # Source files can change or disappear after the diff was captured.
+                pass
+        for side, path in (("old", self.old_path), ("new", self.new_path)):
+            if path is None:
+                continue
+            line_key = f"{side}_line"
+            html_key = f"{side}_html"
+            blob = sources.get(side)
+            if blob is not None and blob.content is not None:
+                source = display(blob.content).replace("\r\n", "\n").replace("\r", "\n")
+                source_lines = source.split("\n")
+                highlighted = markup_lines(path, source)
+                if len(highlighted) == len(source_lines):
+                    for row in rows:
+                        line = row.get(line_key)
+                        if line is not None and 0 < line <= len(highlighted) and source_lines[line - 1] == row["text"]:
+                            row[html_key] = highlighted[line - 1]
                     continue
-                code_rows = [row for row in patch_rows if row.get(f"{side}_line") is not None]
+            # Patches may contain only the hunks. Keep the two lexer states separate.
+            for hunk in hunks:
+                code_rows = [row for row in hunk if row.get(line_key) is not None]
                 if not code_rows:
                     continue
                 source = "\n".join(row["text"] for row in code_rows) + "\n"
-                try:
-                    lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
-                except ClassNotFound:
-                    continue
-                highlighted = highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+                highlighted = markup_lines(path, source)
                 if len(highlighted) == len(code_rows) + 1:
                     for row, markup in zip(code_rows, highlighted):
-                        row[f"{side}_html"] = markup
+                        row[html_key] = markup
         return rows
 
 
@@ -245,9 +271,12 @@ def git_snapshot(args):
         "head": args.head, "head_commit": head, "merge_base": args.merge_base,
         "checkout_branch": branch.removeprefix("refs/heads/") or None, "captured_at": stamp(),
     }
+    image_budget = ImageBudget()
     for file in files:
+        file.repo = repo
+        file.committed = bool(head)
         if file.binary or image_type(file.old_path) or image_type(file.new_path):
-            file.blobs = git_blobs(git, repo, file, bool(head))
+            file.blobs = git_blobs(git, repo, file, bool(head), image_budget=image_budget)
     return scope, comparison, files
 
 
@@ -255,11 +284,12 @@ def patch_snapshot(path):
     path = path.resolve()
     content = path.read_bytes()
     files = []
+    image_budget = ImageBudget()
     for patch in patch_sections(content):
         old, new, status = file_paths(patch)
         file = FileDiff(os.fsdecode(old) if old else None, os.fsdecode(new) if new else None, status, (patch,))
         if file.binary:
-            file.blobs = patch_blobs(file)
+            file.blobs = patch_blobs(file, image_budget)
         files.append(file)
     if content.strip() and not files:
         raise ValueError(f"No unified diff found in {path}")
@@ -331,15 +361,9 @@ class Review:
         status, raw = db.execute("SELECT status, payload FROM sessions WHERE id = ?", (self.session,)).fetchone()
         return status, json.loads(raw)
 
-    def get(self, db, route):
+    def get_snapshot(self, route):
         if route in self.assets:
             return self.assets[route]
-        if route == "data":
-            status, payload = self.load(db)
-            if status != "pending":
-                raise ValueError("This review has ended")
-            return {"comparison": payload["comparison"], "files": self.file_statuses(db),
-                    "comments": list(payload["comments"].values())}
         if route.startswith("file/"):
             index, *asset = route.removeprefix("file/").split("/")
             file = self.file(index)
@@ -348,9 +372,16 @@ class Review:
             if len(asset) == 2 and asset[0] == "image" and asset[1] in ("old", "new"):
                 side = asset[1]
                 blob = file.blobs.get(side)
-                if blob is not None and blob.image is not None:
-                    return image_type(getattr(file, f"{side}_path")), blob.image
+                if blob is not None and blob.content is not None:
+                    return image_type(getattr(file, f"{side}_path")), blob.content
         raise KeyError(route)
+
+    def get_data(self, db):
+        status, payload = self.load(db)
+        if status != "pending":
+            raise ValueError("This review has ended")
+        return {"comparison": payload["comparison"], "files": self.file_statuses(db),
+                "comments": list(payload["comments"].values())}
 
     def file(self, index):
         if not (isinstance(index, str) and index.isascii() and index.isdecimal() and int(index) < len(self.files)):
@@ -458,8 +489,11 @@ def serve(args):
                     if not 0 < length <= 256 * 1024:
                         raise ValueError("Invalid or oversized request")
                     data = json.loads(self.rfile.read(length))
-                with lock, closing(connect(review.state)) as db, db:
-                    response = review.get(db, route) if self.command == "GET" else review.post(db, route, data)
+                if self.command == "GET" and route != "data":
+                    response = review.get_snapshot(route)
+                else:
+                    with lock, closing(connect(review.state)) as db, db:
+                        response = review.get_data(db) if self.command == "GET" else review.post(db, route, data)
             except KeyError:
                 self.send(404, {"error": "Unknown review item"})
                 return

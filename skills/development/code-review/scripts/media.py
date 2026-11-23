@@ -15,6 +15,8 @@ IMAGE_TYPES = {
     ".bmp": "image/bmp", ".ico": "image/x-icon", ".svg": "image/svg+xml",
 }
 INDEX = re.compile(rb"^index ([0-9a-f]+)\.\.([0-9a-f]+)", re.MULTILINE)
+MAX_HIGHLIGHT_BYTES = 512 * 1024
+MAX_SNAPSHOT_IMAGE_BYTES = 128 * 1024 * 1024
 
 
 def image_type(path):
@@ -24,7 +26,18 @@ def image_type(path):
 @dataclass
 class Blob:
     size: int | None
-    image: bytes | None = None
+    content: bytes | None = None
+
+
+@dataclass
+class ImageBudget:
+    remaining: int = MAX_SNAPSHOT_IMAGE_BYTES
+
+    def retain(self, size, content):
+        if content is None or len(content) > self.remaining:
+            return Blob(size)
+        self.remaining -= len(content)
+        return Blob(size, content)
 
 
 def describe(file):
@@ -34,12 +47,12 @@ def describe(file):
         sides[name] = {
             "present": path is not None,
             "size": blob.size if blob is not None else None,
-            "image": blob is not None and blob.image is not None,
+            "image": blob is not None and blob.content is not None,
         }
     return {"binary": file.binary, "image": bool(image_type(file.old_path) or image_type(file.new_path)), **sides}
 
 
-def patch_blobs(file):
+def patch_blobs(file, image_budget):
     candidates = {}
     for patch in file.patches:
         new, old = (binary_blocks(patch) + [None, None])[:2]
@@ -58,10 +71,10 @@ def patch_blobs(file):
                         image = apply_delta(other[2], data)
             if size is not None:
                 candidates[side] = Blob(size, image if image_type(path) else None)
-    return candidates
+    return {side: image_budget.retain(blob.size, blob.content) for side, blob in candidates.items()}
 
 
-def git_blobs(git, repo, file, committed):
+def git_blobs(git, repo, file, committed, *, image_budget=None):
     old = file.baseline_blob
     new = file.head_blob
     for patch in file.patches:
@@ -73,19 +86,29 @@ def git_blobs(git, repo, file, committed):
     if not new.strip(b"0") and not any(INDEX.search(patch) for patch in file.patches):
         new = old  # only rename or mode metadata changed
 
-    def object_blob(object_id, want_image):
+    def limit(path):
+        if image_budget is None:
+            return MAX_HIGHLIGHT_BYTES
+        return MAX_BINARY if image_type(path) else 0
+
+    def can_load(size, max_content):
+        return 0 < max_content and size <= max_content and (image_budget is None or size <= image_budget.remaining)
+
+    retain = Blob if image_budget is None else image_budget.retain
+
+    def object_blob(object_id, max_content):
         size = int(git(repo, "cat-file", "-s", object_id.decode()))
-        image = git(repo, "cat-file", "blob", object_id.decode()) if want_image and size <= MAX_BINARY else None
-        return Blob(size, image)
+        content = git(repo, "cat-file", "blob", object_id.decode()) if can_load(size, max_content) else None
+        return retain(size, content)
 
     blobs = {}
-    if file.old_path and old and (file.binary or image_type(file.old_path)) and file.old_mode != b"160000":
-        blobs["old"] = object_blob(old, image_type(file.old_path))
-    if not file.new_path or not (file.binary or image_type(file.new_path)) or file.new_mode == b"160000":
+    if file.old_path and old and (file.binary or limit(file.old_path)) and file.old_mode != b"160000":
+        blobs["old"] = object_blob(old, limit(file.old_path))
+    if not file.new_path or not (file.binary or limit(file.new_path)) or file.new_mode == b"160000":
         return blobs
-    want_image = image_type(file.new_path)
+    max_content = limit(file.new_path)
     if new and (committed or new == old):
-        blobs["new"] = object_blob(new, want_image)
+        blobs["new"] = object_blob(new, max_content)
         return blobs
     if new.strip(b"0"):
         candidate = repo / file.new_path
@@ -94,12 +117,14 @@ def git_blobs(git, repo, file, committed):
             # as the source for the image or its size.
             with candidate.open("rb") as stream:
                 size = os.fstat(stream.fileno()).st_size
+                if image_budget is None and size > max_content:
+                    return blobs
                 digest = hashlib.new("sha256" if len(new) == 64 else "sha1", f"blob {size}\0".encode())
-                image = bytearray() if want_image and size <= MAX_BINARY else None
+                content = bytearray() if can_load(size, max_content) else None
                 while chunk := stream.read(1024 * 1024):
                     digest.update(chunk)
-                    if image is not None:
-                        image.extend(chunk)
+                    if content is not None:
+                        content.extend(chunk)
                 if digest.hexdigest().encode() == new:
-                    blobs["new"] = Blob(size, bytes(image) if image is not None else None)
+                    blobs["new"] = retain(size, bytes(content) if content is not None else None)
     return blobs

@@ -17,14 +17,16 @@ def patch_sections(content):
     current = []
     paths = False
     old = new = 0
-    lines = content.split(b"\n")
+    lines = content.removesuffix(b"\n").split(b"\n")
     for index, raw in enumerate(lines):
         line = raw.removesuffix(b"\r")
         if old or new:
-            marker = line[:1]
             if line.startswith(b"\\ No newline at end of file"):
                 current.append(raw)
                 continue
+            if not line:
+                raw = b" " + raw
+            marker = raw[:1]
             if marker not in (b" ", b"+", b"-"):
                 raise ValueError(f"Invalid unified hunk at patch line {index + 1}")
             old -= marker != b"+"

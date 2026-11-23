@@ -2,6 +2,7 @@
 
 const byId = id => document.getElementById(id);
 const editor = byId('editor');
+const commentBody = byId('comment-body');
 const layoutSelect = byId('diff-layout');
 const narrow = matchMedia('(max-width: 780px)');
 const changes = {A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied', T: 'Type changed', '?': 'Untracked'};
@@ -16,6 +17,7 @@ let dragging = null;
 let pressedSelection = null;
 let editing = null;
 let savingComment = false;
+let baselineWidth = 50;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -28,6 +30,100 @@ function button(className, text) {
   const node = element('button', className, text);
   node.type = 'button';
   return node;
+}
+
+function resizeDivider(handle, {current, limits, update, scale, step}) {
+  function setValue(value) {
+    const [min, max] = limits();
+    update(Math.min(max, Math.max(min, Math.round(value))));
+    handle.setAttribute('aria-valuemin', min);
+    handle.setAttribute('aria-valuemax', max);
+    handle.setAttribute('aria-valuenow', current());
+  }
+  let drag;
+  handle.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    handle.focus({preventScroll: true});
+    handle.setPointerCapture(event.pointerId);
+    drag = {id: event.pointerId, x: event.clientX, initial: current(), scale: scale()};
+    handle.dataset.resizing = '';
+  });
+  handle.addEventListener('pointermove', event => {
+    if (drag?.id === event.pointerId) setValue(drag.initial + (event.clientX - drag.x) * drag.scale);
+  });
+  handle.addEventListener('lostpointercapture', () => {
+    drag = null;
+    delete handle.dataset.resizing;
+  });
+  handle.addEventListener('keydown', event => {
+    const [min, max] = limits();
+    const values = {ArrowLeft: current() - step, ArrowRight: current() + step, Home: min, End: max};
+    if (!Object.hasOwn(values, event.key)) return;
+    event.preventDefault();
+    setValue(values[event.key]);
+  });
+  return () => setValue(current());
+}
+
+function splitDivider(block) {
+  const handle = element('div', 'resize-handle split-divider');
+  handle.tabIndex = 0;
+  handle.setAttribute('role', 'separator');
+  handle.setAttribute('aria-orientation', 'vertical');
+  handle.setAttribute('aria-label', 'Baseline and Updated widths');
+  const sync = resizeDivider(handle, {
+    current: () => baselineWidth,
+    limits: () => [20, 80],
+    scale: () => 100 / Math.max(1, block.clientWidth - 8),
+    step: 5,
+    update: value => {
+      baselineWidth = value;
+      byId('diffs').style.setProperty('--baseline-share', value / 100);
+      byId('diffs').querySelectorAll('.split-divider').forEach(divider => divider.setAttribute('aria-valuenow', value));
+    },
+  });
+  sync();
+  return handle;
+}
+
+function setupSidebar() {
+  const workspace = byId('workspace');
+  const sidebar = byId('file-sidebar');
+  const files = byId('changed-files');
+  const divider = byId('sidebar-divider');
+  const overview = byId('files-overview');
+  const toggle = byId('toggle-files');
+  const limits = () => {
+    const style = getComputedStyle(workspace);
+    const innerWidth = workspace.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const minWidth = 216;
+    return [minWidth, Math.max(minWidth, Math.floor(innerWidth * .45))];
+  };
+  function setExpanded(expanded) {
+    workspace.classList.toggle('sidebar-hidden', !expanded);
+    files.hidden = divider.hidden = overview.hidden = !expanded;
+    const label = expanded ? 'Collapse changed files' : 'Expand changed files';
+    toggle.title = label;
+    toggle.setAttribute('aria-label', label);
+    toggle.setAttribute('aria-expanded', String(expanded));
+  }
+  setExpanded(true);
+  const sync = resizeDivider(divider, {
+    current: () => sidebar.offsetWidth,
+    limits,
+    scale: () => 1,
+    step: 16,
+    update: width => workspace.style.setProperty('--sidebar-width', `${width}px`),
+  });
+  const syncWhenVisible = () => { if (!files.hidden && !narrow.matches) sync(); };
+  toggle.addEventListener('click', () => {
+    setExpanded(files.hidden);
+    syncWhenVisible();
+  });
+  window.addEventListener('resize', syncWhenVisible);
+  syncWhenVisible();
+  new ResizeObserver(() => workspace.style.setProperty('--file-list-height', `${sidebar.offsetHeight}px`)).observe(sidebar);
 }
 
 function lineStats(file) {
@@ -59,9 +155,14 @@ function updateProgress() {
 }
 
 function updateReviewActions() {
-  byId('submit-review').disabled = Boolean(editing) || deletingComments.size > 0 || views.some(view => view.savingMark);
+  byId('submit-review').disabled = Boolean(editing) || savingComment || deletingComments.size > 0 || views.some(view => view.savingMark);
   layoutSelect.disabled = Boolean(editing);
-  views.forEach(view => { view.mark.disabled = view.savingMark || editing?.view === view; });
+  views.forEach(view => {
+    view.mark.disabled = view.savingMark || editing?.view === view;
+    view.diff.querySelectorAll('.comment-actions button').forEach(action => {
+      action.disabled = Boolean(editing) || savingComment || deletingComments.has(action.closest('.comment').dataset.commentId);
+    });
+  });
 }
 
 function clearSelection() {
@@ -128,7 +229,12 @@ class FileView {
     this.link = button('file-link');
     const stats = lineStats(file);
     stats.id = `line-stats-${index}`;
-    this.link.append(element('span', 'file-status'), element('span', 'file-path', file.path), stats);
+    const filePath = element('span', 'file-path');
+    const nameStart = file.path.lastIndexOf('/') + 1;
+    if (nameStart) filePath.append(element('span', 'file-directory', file.path.slice(0, nameStart)));
+    filePath.append(element('span', 'file-basename', file.path.slice(nameStart)));
+    this.link.title = file.path;
+    this.link.append(element('span', 'file-status'), filePath, stats);
     this.link.setAttribute('aria-describedby', stats.id);
     this.link.setAttribute('aria-controls', this.body.id);
     this.updateMark();
@@ -204,15 +310,22 @@ class FileView {
   }
 
   async saveMark() {
+    const previous = this.file.reviewed;
+    const wasExpanded = !this.body.hidden;
+    const next = this.mark.checked;
     this.savingMark = true;
+    this.file.reviewed = next;
+    this.updateMark();
+    this.setExpanded(!next);
+    updateProgress();
     updateReviewActions();
     showError(null);
     try {
-      const result = await request('reviewed', {file: String(this.index), reviewed: this.mark.checked});
-      this.file.reviewed = result.reviewed;
-      this.setExpanded(!this.file.reviewed);
-      updateProgress();
+      await request('reviewed', {file: String(this.index), reviewed: next});
     } catch (error) {
+      this.file.reviewed = previous;
+      if (this.body.hidden === next) this.setExpanded(wasExpanded);
+      updateProgress();
       showError(error);
     } finally {
       this.updateMark();
@@ -255,7 +368,7 @@ class FileView {
       const after = element('div', 'diff-pane');
       before.dataset.side = 'old';
       after.dataset.side = 'new';
-      block.append(before, after);
+      block.append(before, splitDivider(block), after);
       if (this.hasCode) {
         before.append(element('div', 'diff-side', sides.old));
         after.append(element('div', 'diff-side', sides.new));
@@ -326,18 +439,20 @@ class FileView {
     for (const comment of comments.filter(item => Number(item.file) === this.index && item.id !== editing?.id)) {
       const target = {...comment, view: this};
       const entry = element('article', 'comment');
+      entry.dataset.commentId = comment.id;
       const header = element('div', 'comment-header');
       const actions = element('div', 'comment-actions');
       const edit = button('comment-edit', 'Edit');
       const remove = button('comment-delete', 'Delete');
-      edit.disabled = remove.disabled = editing !== null || deletingComments.has(comment.id);
+      edit.disabled = remove.disabled = editing !== null || savingComment || deletingComments.has(comment.id);
       edit.setAttribute('aria-label', `Edit comment on ${locationLabel(target)}`);
       remove.setAttribute('aria-label', `Delete comment on ${locationLabel(target)}`);
       edit.addEventListener('click', () => openEditor(target));
       remove.addEventListener('click', () => deleteSavedComment(target, edit, remove));
       entry.addEventListener('mouseenter', () => { if (!editing && !selection) highlight(target); });
       entry.addEventListener('mouseleave', () => { if (!editing) highlight(null); });
-      actions.append(edit, remove);
+      if (comment.pending) actions.append(element('span', 'saving-status', 'Saving…'));
+      else actions.append(edit, remove);
       header.append(element('span', 'comment-location', locationLabel(target)), actions);
       entry.append(header, element('p', 'comment-body', comment.body));
       anchor(comment)?.append(entry);
@@ -372,7 +487,7 @@ function locationLabel(target) {
 
 function selectedCode() {
   const native = window.getSelection();
-  if (editing || !native.rangeCount || native.isCollapsed) return null;
+  if (editing || savingComment || !native.rangeCount || native.isCollapsed) return null;
   const origin = nodeElement(native.anchorNode)?.closest('.diff-cell:not(.blank)');
   const card = origin?.closest('.file-card');
   const view = card && views[Number(card.dataset.index)];
@@ -456,34 +571,37 @@ function updateLayout() {
 
 function focusEditor() {
   editor.scrollIntoView({block: 'nearest', inline: 'nearest'});
-  byId('comment-body').focus({preventScroll: true});
+  commentBody.focus({preventScroll: true});
 }
 
-function openEditor(target) {
+function openEditor(target, body = target.body ?? '') {
+  if (savingComment) return;
   if (editing) {
     focusEditor();
     return;
   }
   editing = target;
+  target.view.setExpanded(true);
   clearSelection();
   highlight(target);
   byId('editor-title').textContent = target.id ? 'Edit comment' : 'Comment on code';
   byId('anchor').textContent = locationLabel(target);
   byId('quote').textContent = target.selected_text;
-  byId('comment-body').value = target.body ?? '';
+  commentBody.value = body;
   byId('delete-comment').hidden = !target.id;
   showError(null, byId('editor-error'));
   updateReviewActions();
-  views.forEach(view => view.renderThreads());
+  target.view.renderThreads();
   editor.hidden = false;
   focusEditor();
 }
 
 function closeEditor() {
+  const view = editing.view;
   editing = null;
   editor.hidden = true;
   highlight(null);
-  views.forEach(view => view.renderThreads());
+  view.renderThreads();
   updateReviewActions();
   updateLayout();
 }
@@ -508,7 +626,12 @@ layoutSelect.addEventListener('change', () => { layoutOverride = layoutSelect.va
 narrow.addEventListener('change', updateLayout);
 byId('cancel-comment').addEventListener('click', closeEditor);
 editor.addEventListener('keydown', event => {
-  const unchanged = byId('comment-body').value === (editing?.body ?? '');
+  if (event.target === commentBody && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault();
+    if (!event.repeat && !savingComment) byId('comment-form').requestSubmit(byId('save-comment'));
+    return;
+  }
+  const unchanged = commentBody.value === (editing?.body ?? '');
   if (event.key === 'Escape' && !savingComment && unchanged) {
     event.preventDefault();
     closeEditor();
@@ -522,7 +645,7 @@ async function deleteComment(target) {
 }
 
 async function deleteSavedComment(target, edit, remove) {
-  if (editing || deletingComments.has(target.id)) return;
+  if (editing || savingComment || deletingComments.has(target.id)) return;
   deletingComments.add(target.id);
   edit.disabled = remove.disabled = true;
   updateReviewActions();
@@ -540,36 +663,70 @@ async function deleteSavedComment(target, edit, remove) {
   }
 }
 
-async function changeComment(remove = false) {
-  if (savingComment) return;
+async function deleteEditingComment() {
+  if (savingComment || !editing) return;
   savingComment = true;
   showError(null, byId('editor-error'));
   const buttons = [...byId('comment-form').querySelectorAll('button')];
   buttons.forEach(button => { button.disabled = true; });
   try {
-    if (remove) {
-      await deleteComment(editing);
-    } else {
-      const {side, start, end, id, view} = editing;
-      const comment = await request('comment', {
-        id, file: String(view.index), selection: {side, start, end}, body: byId('comment-body').value,
-      });
-      const index = comments.findIndex(item => item.id === comment.id);
-      if (index === -1) comments.push(comment);
-      else comments[index] = comment;
-      view.updateCommentCount();
-    }
+    await deleteComment(editing);
     closeEditor();
   } catch (error) {
     showError(error, byId('editor-error'));
   } finally {
     savingComment = false;
     buttons.forEach(button => { button.disabled = false; });
+    updateReviewActions();
   }
 }
 
-byId('comment-form').addEventListener('submit', event => { event.preventDefault(); changeComment(); });
-byId('delete-comment').addEventListener('click', () => changeComment(true));
+function replaceComment(id, comment) {
+  const index = comments.findIndex(item => item.id === id);
+  if (index === -1 && comment) comments.push(comment);
+  else if (index !== -1) comments.splice(index, 1, ...(comment ? [comment] : []));
+}
+
+async function saveComment() {
+  if (savingComment || !editing) return;
+  const target = editing;
+  const {id, view, side, start, end, selected_text} = target;
+  const draft = commentBody.value;
+  const body = draft.trim();
+  if (!body) {
+    showError(new Error('Enter a comment'), byId('editor-error'));
+    return;
+  }
+  const previous = comments.find(item => item.id === id);
+  const pending = id ?? 'pending';
+  const file = String(view.index);
+  savingComment = true;
+  replaceComment(pending, {id: pending, file, side, start, end, selected_text, body, pending: true});
+  view.updateCommentCount();
+  closeEditor();
+  let failure;
+  try {
+    const position = ({row, column}) => ({row, column});
+    const saved = await request('comment', {id, file, selection: {side, start: position(start), end: position(end)}, body});
+    replaceComment(pending, saved);
+  } catch (error) {
+    replaceComment(pending, previous);
+    failure = error;
+  } finally {
+    savingComment = false;
+    view.updateCommentCount();
+    view.renderThreads();
+    updateReviewActions();
+    updateSelection();
+  }
+  if (failure) {
+    openEditor(target, draft);
+    showError(failure, byId('editor-error'));
+  }
+}
+
+byId('comment-form').addEventListener('submit', event => { event.preventDefault(); saveComment(); });
+byId('delete-comment').addEventListener('click', deleteEditingComment);
 
 async function submitReview() {
   const workspace = byId('workspace');
@@ -595,9 +752,10 @@ async function initialize() {
   const result = await request('data');
   comments = result.comments;
   const {repo, base, head, merge_base, patch, checkout_branch} = result.comparison;
-  byId('comparison').textContent = patch ? patch.split('/').pop() :
-    `${repo.split('/').pop()} · ${merge_base ? `merge base with ${base}` : base} → ${head ?? 'working tree'}`;
+  byId('source-name').textContent = (patch ?? repo).split('/').pop();
   if (repo) {
+    byId('comparison').textContent = `${merge_base ? `merge base with ${base}` : base} → ${head ?? 'working tree'}`;
+    byId('comparison').hidden = false;
     byId('checkout-path').textContent = repo;
     byId('checkout-branch').textContent = checkout_branch ? `Branch ${checkout_branch}` : 'Detached HEAD';
     byId('checkout-details').hidden = false;
@@ -620,8 +778,7 @@ async function initialize() {
   }
   const workspace = byId('workspace');
   workspace.hidden = false;
-  new ResizeObserver(([entry]) => workspace.style.setProperty('--file-list-height', `${entry.target.offsetHeight}px`))
-    .observe(byId('file-list').parentElement);
+  setupSidebar();
   byId('empty').hidden = Boolean(views.length);
   updateProgress();
   updateReviewActions();
