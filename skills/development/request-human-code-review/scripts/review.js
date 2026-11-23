@@ -454,7 +454,7 @@ class FileView {
       expand.addEventListener('click', () => this.expandContext(gap, direction));
       row.append(expand);
     }
-    const hiddenComments = comments.filter(comment => Number(comment.file) === this.index &&
+    const hiddenComments = comments.filter(comment => comment.side && Number(comment.file) === this.index &&
       gap.index <= comment.end.row && comment.end.row < gap.index + gap.count).length;
     const lines = `${gap.count.toLocaleString()} unchanged ${gap.count === 1 ? 'line' : 'lines'}`;
     const marker = hiddenComments ? ` · ${hiddenComments} ${hiddenComments === 1 ? 'comment' : 'comments'}` : '';
