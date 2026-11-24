@@ -194,27 +194,28 @@ function lineStats(file) {
 }
 
 async function request(route, data) {
-  const unanswered = detail => new Error(`The review server did not answer (${detail}). Reload the page or restart the review.`);
   let response;
   try {
     response = await fetch(route, data === undefined ? {} : {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
     });
   } catch {
-    throw unanswered('no response');
+    throw new Error('The review server did not answer.');
   }
+  const status = `The review server returned HTTP ${response.status}.`;
   let value;
   try {
     value = await response.json();
   } catch {
-    throw unanswered(`HTTP ${response.status}`);
+    throw new Error(status);
   }
-  if (!response.ok) throw new Error(value?.error || `The review server returned HTTP ${response.status}.`);
+  if (!response.ok) throw new Error(value?.error || status);
   return value;
 }
 
-// The server takes one connection per diff, so the page loads a few at a time.
-const DIFF_LOADS = 6;
+// The server takes one connection per request. Loading a few diffs at a time
+// leaves connections free for the reviewer's own actions.
+const DIFF_LOADS = 4;
 const waitingDiffs = [];
 let loadingDiffs = 0;
 

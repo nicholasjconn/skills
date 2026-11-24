@@ -4,14 +4,14 @@ async (page) => {
   const origin = 'http://code-review.test';
   const assets = 'skills/development/request-human-code-review/scripts';
   const count = 40;
-  const limit = 6;
+  const limit = 4; // DIFF_LOADS in review.js
   const files = Array.from({length: count}, (_, index) => ({
     path: `src/file-${index}.txt`, change: 'M', additions: 1, deletions: 1, reviewed: false,
   }));
   const rows = [
-    {kind: 'hunk', text: '@@ -1 +1 @@'},
-    {kind: 'remove', old: 1, new: null, text: 'before'},
-    {kind: 'add', old: null, new: 1, text: 'after'},
+    {kind: 'hunk', text: '@@ -1 +1 @@', old_range: [1, 1], new_range: [1, 1]},
+    {kind: 'remove', old_line: 1, new_line: null, text: 'before'},
+    {kind: 'add', old_line: null, new_line: 1, text: 'after'},
   ];
   const held = [];
   let inFlight = 0;
@@ -33,36 +33,44 @@ async (page) => {
   });
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const notes = text => page.locator('.diff-note', {hasText: text});
+  const until = async (done, message) => {
+    const deadline = Date.now() + 15000;
+    while (!(await done())) {
+      assert(Date.now() < deadline, message());
+      await page.waitForTimeout(50);
+    }
+  };
+  const viewport = page.viewportSize();
   try {
     // A viewport tall enough to show every file makes the page want all diffs at once.
     await page.setViewportSize({width: 1280, height: 40000});
     await page.goto(`${origin}/`);
-    await notes('Loading diff').first().waitFor();
-    await page.waitForFunction(expected => document.querySelectorAll('.diff-note').length === expected, count);
-    await page.waitForTimeout(500);
-    assert(inFlight === limit, `Expected ${limit} diff requests in flight while ${count} files wait, found ${inFlight}`);
-    while (await notes('Loading diff').count()) {
+    await until(async () => inFlight === limit && await page.locator('.diff-note').count() === count,
+      () => `Expected ${limit} diff requests in flight while ${count} files wait, found ${inFlight}`);
+    await until(async () => {
       held.splice(0).forEach(release => release());
-      await page.waitForTimeout(50);
-    }
+      return await notes('Loading diff').count() === 0;
+    }, () => 'Expected every queued diff to finish loading');
     assert(mostInFlight === limit, `Expected at most ${limit} diff requests at once, found ${mostInFlight}`);
-    assert(await notes('Could not load diff').count() === 0, 'Expected every diff to load');
     assert(await page.locator('.diff-note').count() === 0, 'Expected every loading note to be replaced by its diff');
 
     await page.setViewportSize({width: 1280, height: 720});
-    for (const [kind, detail] of [['refused', 'no response'], ['empty', 'HTTP 502']]) {
+    for (const [kind, expected] of [
+      ['refused', 'The review server did not answer.'],
+      ['empty', 'The review server returned HTTP 502.'],
+    ]) {
       failure = kind;
       await page.goto(`${origin}/`);
       const note = notes('Could not load diff').first();
       await note.waitFor();
       const message = await note.textContent();
-      assert(message.includes(`The review server did not answer (${detail}). Reload the page or restart the review.`),
-        `Expected a ${kind} diff response to explain what to do, found: ${message}`);
+      assert(message === `Could not load diff. ${expected}`, `Unexpected message for a ${kind} diff response: ${message}`);
     }
-    return `PASS: ${count} diffs loaded ${limit} at a time; refused and empty responses explain what to do`;
+    return `PASS: ${count} diffs loaded ${limit} at a time; refused and empty responses are reported`;
   } finally {
     held.splice(0).forEach(release => release());
     await page.goto('about:blank');
     await page.unroute(`${origin}/**`);
+    if (viewport) await page.setViewportSize(viewport);
   }
 }
