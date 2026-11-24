@@ -653,6 +653,11 @@ def share_tailnet(stack, server, origins, prefix, interrupted):
         del origins[urlsplit(private.origin).netloc]
 
 
+class ReviewServer(ThreadingHTTPServer):
+    # A page load opens more than the default backlog of 5 connections at once.
+    request_queue_size = 128
+
+
 def owner_path(state, session):
     key = hashlib.sha256(session.encode()).hexdigest()
     return state / f"{key}.lock"
@@ -743,7 +748,7 @@ def serve_owned(args):
 
     end_status = "interrupted"
     try:
-        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as routes:
+        with ReviewServer(("127.0.0.1", 0), Handler) as server, ExitStack() as routes:
             host = f"127.0.0.1:{server.server_port}"
             local = f"http://{host}"
             origins = {host: local}
