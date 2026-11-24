@@ -127,7 +127,6 @@ button.primary:not(:disabled):hover { background: #12483f; border-color: #12483f
 .line-sign { text-align: center; user-select: none; }
 .source { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 1.6em; padding-right: .55em; }
 .diff .source .err { border: 0; }
-.source:empty::before { content: '\200b'; }
 .source.no-newline::after { content: ' ⏎'; color: var(--muted); user-select: none; }
 .diff[data-selecting="old"] .diff-pane[data-side="new"] .source,
 .diff[data-selecting="new"] .diff-pane[data-side="old"] .source,
@@ -152,6 +151,7 @@ button.primary:not(:disabled):hover { background: #12483f; border-color: #12483f
 .image-status { padding: .45rem .6rem; font-size: .78rem; color: var(--muted); }
 #completion { padding: 2rem clamp(1rem, 4vw, 3rem); }
 #error, #editor-error { color: #8b2828; }
+#review-expiry { padding: .7rem clamp(1rem, 4vw, 3rem); background: #fff6df; color: #503c17; }
 #error { padding: .7rem clamp(1rem, 4vw, 3rem); background: #fcebea; }
 form { display: grid; gap: .65rem; }
 #quote { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; padding: .65rem; max-height: 25vh; overflow: auto; background: #f1f4f2; border-radius: 5px; font: .84rem/1.5 var(--mono); }

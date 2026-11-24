@@ -17,6 +17,8 @@ IMAGE_TYPES = {
 INDEX = re.compile(rb"^index ([0-9a-f]+)\.\.([0-9a-f]+)", re.MULTILINE)
 MAX_HIGHLIGHT_BYTES = 512 * 1024
 MAX_SNAPSHOT_IMAGE_BYTES = 128 * 1024 * 1024
+LFS_POINTER_LIMIT = 1024
+LFS_POINTER = re.compile(rb"version https://git-lfs\.github\.com/spec/v1\n(?:ext-[0-9]+-[^\n ]+ [^\n]+\n)*oid sha256:[0-9a-f]{64}\nsize ([0-9]+)\n")
 
 
 def image_type(path):
@@ -27,6 +29,7 @@ def image_type(path):
 class Blob:
     size: int | None
     content: bytes | None = None
+    lfs_pointer: bool = False
 
 
 @dataclass
@@ -34,6 +37,8 @@ class ImageBudget:
     remaining: int = MAX_SNAPSHOT_IMAGE_BYTES
 
     def retain(self, size, content):
+        if content and len(content) < LFS_POINTER_LIMIT and (pointer := LFS_POINTER.fullmatch(content)):
+            return Blob(int(pointer[1]), lfs_pointer=True)
         if content is None or len(content) > self.remaining:
             return Blob(size)
         self.remaining -= len(content)
@@ -48,6 +53,7 @@ def describe(file):
             "present": path is not None,
             "size": blob.size if blob is not None else None,
             "image": blob is not None and blob.content is not None,
+            "lfs_pointer": blob is not None and blob.lfs_pointer,
         }
     return {"binary": file.binary, "image": bool(image_type(file.old_path) or image_type(file.new_path)), **sides}
 
@@ -92,7 +98,8 @@ def git_blobs(git, repo, file, committed, *, image_budget=None):
         return MAX_BINARY if image_type(path) else 0
 
     def can_load(size, max_content):
-        return 0 < max_content and size <= max_content and (image_budget is None or size <= image_budget.remaining)
+        return (0 < max_content and size <= max_content and
+                (image_budget is None or size <= image_budget.remaining or size < LFS_POINTER_LIMIT))
 
     retain = Blob if image_budget is None else image_budget.retain
 
@@ -112,7 +119,9 @@ def git_blobs(git, repo, file, committed, *, image_budget=None):
         return blobs
     if new.strip(b"0"):
         candidate = repo / file.new_path
-        if stat.S_ISREG(candidate.lstat().st_mode):
+        try:
+            if not stat.S_ISREG(candidate.lstat().st_mode):
+                return blobs
             # Validate the exact bytes Git displayed before using the worktree
             # as the source for the image or its size.
             with candidate.open("rb") as stream:
@@ -127,4 +136,7 @@ def git_blobs(git, repo, file, committed, *, image_budget=None):
                         content.extend(chunk)
                 if digest.hexdigest().encode() == new:
                     blobs["new"] = retain(size, bytes(content) if content is not None else None)
+        except (FileNotFoundError, NotADirectoryError):
+            # The captured diff and baseline remain usable if the checkout changes.
+            pass
     return blobs

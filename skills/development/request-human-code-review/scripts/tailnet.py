@@ -13,9 +13,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+COMMAND_TIMEOUT = 8
+VERIFY_TIMEOUT = 55
+# Budget for the port-collision retry and the configuration calls on both attempts.
+STARTUP_TIMEOUT = 5 * COMMAND_TIMEOUT + 2 * VERIFY_TIMEOUT + 8
+
 
 def configuration(*args):
-    result = subprocess.run(["tailscale", *args, "--json"], text=True, capture_output=True, timeout=8)
+    result = subprocess.run(["tailscale", *args, "--json"], text=True, capture_output=True, timeout=COMMAND_TIMEOUT)
     if result.returncode:
         raise ValueError(f"Tailscale {' '.join(args)} failed: {result.stderr.strip()}")
     return json.loads(result.stdout)
@@ -37,6 +42,9 @@ class Tailnet:
     @property
     def origin(self):
         return f"https://{self.hostname}:{self.port}"
+
+    def port_in_use(self):
+        return self.port in occupied(configuration("serve", "status") or {})
 
     @classmethod
     def load(cls):
@@ -67,11 +75,11 @@ class Tailnet:
                 owner.stdin.close()
                 owner.wait(timeout=10)
 
-    def verify(self, owner, prefix):
-        deadline = time.monotonic() + 55
+    def verify(self, owner, prefix, interrupted):
+        deadline = time.monotonic() + VERIFY_TIMEOUT
         context = ssl.create_default_context()
         last_error = "startup timed out"
-        while owner.poll() is None and time.monotonic() < deadline:
+        while owner.poll() is None and time.monotonic() < deadline and not interrupted.is_set():
             try:
                 with socket.create_connection((self.address, self.port), 3) as link:
                     with context.wrap_socket(link, server_hostname=self.hostname) as secure:
@@ -85,6 +93,8 @@ class Tailnet:
             else:
                 last_error = f"HTTP {response.status} or unexpected response"
             time.sleep(0.2)
+        if interrupted.is_set():
+            raise ValueError("Review startup was interrupted")
         raise ValueError("Tailscale Serve stopped before readiness. See the session log."
                          if owner.poll() is not None else f"Could not verify private HTTPS: {last_error}")
 

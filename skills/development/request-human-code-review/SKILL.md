@@ -19,3 +19,8 @@ Pause when the reviewer requests discussion or a decision is needed.
 
 For any other status, report it and pause. If the status is `pending`, ask the
 user to submit the review. Missing comments do not imply approval.
+If the user asks to recover saved comments, run
+`code_review.py result SESSION --include-unsubmitted` and check the returned
+status. If it is `submitted`, tell the user and handle `comments` as submitted
+feedback using the steps above. Otherwise, report `unsubmitted_comments` as
+drafts and wait for the user to decide how to use them.

@@ -5,11 +5,71 @@ import base64
 import re
 import zlib
 
-HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 DIFF_HEADER = re.compile(rb"^diff --git ", re.MULTILINE)
+MAIL_HEADER = re.compile(rb"^From [0-9a-f]{40}(?:[0-9a-f]{24})? Mon Sep 17 00:00:00 2001\r?$", re.MULTILINE)
+MAIL_STAT = re.compile(
+    rb"^---\r?\n(?: (?:[^\r\n]* \|[^\r\n]*|\.\.\.)\r?\n)*"
+    rb" [0-9]+ files? changed[^\r\n]*\r?\n(?: [^\r\n]*\r?\n)*\r?\n\Z",
+    re.MULTILINE,
+)
+BINARY_HEADER = re.compile(rb"^GIT binary patch\r?$", re.MULTILINE)
 QUOTED = rb'"(?:[^"\\]|\\.)*"'
 BINARY_BLOCK = re.compile(rb"^(literal|delta) (\d+)$")
 MAX_BINARY = 32 * 1024 * 1024
+
+
+def ends_with_hunk(section):
+    # Git can omit the space on a blank context line (diff.suppressBlankEmpty).
+    hunk = None
+    for hunk in HUNK.finditer(section):
+        pass
+    if hunk is None:
+        return False
+    old, new = int(hunk[2] or b"1"), int(hunk[4] or b"1")
+    lines = section[section.index(b"\n", hunk.end()) + 1:].removesuffix(b"\n").split(b"\n")
+    for line in lines:
+        if line.startswith(b"\\ No newline at end of file"):
+            continue
+        marker = line.removesuffix(b"\r")[:1] or b" "
+        if marker not in (b" ", b"+", b"-"):
+            return False
+        old -= marker != b"+"
+        new -= marker != b"-"
+        if old < 0 or new < 0:
+            return False
+    return old == new == 0
+
+
+def mail_patch_start(message):
+    """Find the run of Git file diffs after the commit message and optional stats."""
+    start = previous = None
+    for header in DIFF_HEADER.finditer(message):
+        offset = header.start()
+        if previous is None:
+            start = offset
+        elif message[offset - 3:offset].endswith((b"\n\n", b"\n\r\n")):
+            section = message[previous:offset]
+            if not ends_with_hunk(section) and (MAIL_STAT.search(section) or not BINARY_HEADER.search(section)):
+                # A mail preamble ends with a blank line. Binary blocks do too.
+                start = offset
+        previous = offset
+    return start
+
+
+def patch_mail_body(content):
+    if not MAIL_HEADER.match(content):
+        return content
+    patches = []
+    for message in MAIL_HEADER.split(content)[1:]:
+        # A cover letter carries the series summary but no changed files.
+        headers = re.split(rb"\r?\n\r?\n", message, maxsplit=1)[0]
+        if re.search(rb"^Subject:.*\[.*\b0/[1-9][0-9]*\]", headers, re.MULTILINE):
+            continue
+        start = mail_patch_start(message)
+        if start is not None:
+            patches.append(message[start:])
+    return b"\n".join(patches)
 
 
 def patch_sections(content):
@@ -17,7 +77,7 @@ def patch_sections(content):
     current = []
     paths = False
     old = new = 0
-    lines = content.removesuffix(b"\n").split(b"\n")
+    lines = patch_mail_body(content).removesuffix(b"\n").split(b"\n")
     for index, raw in enumerate(lines):
         line = raw.removesuffix(b"\r")
         if old or new:
@@ -37,6 +97,13 @@ def patch_sections(content):
             if current:
                 yield b"\n".join(current) + b"\n"
             current, paths = [], False
+        elif line.startswith((b"diff --cc ", b"diff --combined ")):
+            raise ValueError(f"Expected a unified diff at patch line {index + 1}")
+        elif line.startswith((b"diff ", b"Index: ")):
+            if current:
+                yield b"\n".join(current) + b"\n"
+            current, paths = [], False
+            continue
         elif line.startswith(b"--- ") and index + 1 < len(lines) and lines[index + 1].startswith(b"+++ "):
             if current and paths:
                 yield b"\n".join(current) + b"\n"
@@ -47,7 +114,7 @@ def patch_sections(content):
         elif match := HUNK.match(line):
             old = int(match[2] or b"1")
             new = int(match[4] or b"1")
-        elif line.startswith((b"@@", b"diff --cc ", b"diff --combined ")):
+        elif line.startswith(b"@@"):
             raise ValueError(f"Expected a unified diff at patch line {index + 1}")
         elif line.startswith(b"-- "):
             yield b"\n".join(current) + b"\n"
@@ -131,7 +198,7 @@ def binary_blocks(patch):
             data = decoder.decompress(encoded, size + 1)
             if not decoder.eof or len(data) != size:
                 raise ValueError("Invalid Git binary patch size")
-        except (IndexError, KeyError, OverflowError, zlib.error) as error:
+        except (IndexError, KeyError, OverflowError, ValueError, zlib.error) as error:
             raise ValueError("Invalid Git binary patch encoding") from error
         blocks.append((kind, size, data))
     return blocks

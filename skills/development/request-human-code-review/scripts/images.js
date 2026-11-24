@@ -17,7 +17,8 @@ function renderImagePreview(parent, index, media, labels) {
     const figure = panel(label);
     const info = media[name];
     if (!info.present || !info.image) {
-      figure.append(element('p', 'image-status', info.present ? 'Image bytes unavailable' : 'Absent in this version'));
+      const status = info.lfs_pointer ? 'Stored as a Git LFS pointer' : info.present ? 'Image bytes unavailable' : 'Absent in this version';
+      figure.append(element('p', 'image-status', status));
       return Promise.resolve(null);
     }
     const image = element('img');
