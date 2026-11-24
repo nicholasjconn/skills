@@ -124,7 +124,8 @@ async (page) => {
     await page.locator('#popup-target').click();
     await saveComment();
     await page.getByRole('button', {name: 'Open comment 1', exact: true}).click();
-    const popup = page.locator('.steward-review-popup:not(.sr-enter)');
+    const popup = page.locator('.steward-review-popup:visible');
+    await popup.evaluate(node => Promise.all(node.getAnimations().map(animation => animation.finished)));
     const before = await popup.boundingBox();
     if (!before) throw new Error('Popup did not open');
     await page.evaluate(() => {

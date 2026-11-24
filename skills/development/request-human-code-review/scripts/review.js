@@ -26,7 +26,13 @@ const collapsedFolders = new WeakSet();
 let foldersToggledWhileFiltering = null;
 let reviewActionsTrigger = null;
 const nativeReviewPopover = typeof fileReviewActions.showPopover === 'function';
-if (nativeReviewPopover) fileReviewActions.setAttribute('popover', 'manual');
+if (nativeReviewPopover) {
+  fileReviewActions.setAttribute('popover', 'manual');
+  fileReviewActions.hidden = false;
+  fileReviewActions.addEventListener('toggle', () => {
+    if (!fileReviewActionsOpen()) dismissFileReviewActions();
+  });
+}
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -218,38 +224,52 @@ function reviewMarkAvailable() {
   return !editing && !savingComment && !views.some(view => view.savingMark);
 }
 
+function fileMarkAvailable(view) {
+  return !savingComment && !view.savingMark && editing?.view !== view;
+}
+
+function commentActionAvailable(view, id) {
+  return !editing && !savingComment && !view.savingMark && !deletingComments.has(id);
+}
+
+function fileReviewActionsOpen() {
+  return nativeReviewPopover ? fileReviewActions.matches(':popover-open') : !fileReviewActions.hidden;
+}
+
 function dismissFileReviewActions() {
-  if (fileReviewActions.hidden) return;
+  const open = fileReviewActionsOpen();
   const trigger = reviewActionsTrigger;
+  if (!open && !trigger) return;
   reviewActionsTrigger = null;
-  fileReviewActions.hidden = true;
-  if (nativeReviewPopover) fileReviewActions.hidePopover();
-  trigger.setAttribute('aria-expanded', 'false');
+  trigger?.setAttribute('aria-expanded', 'false');
+  if (nativeReviewPopover) {
+    if (open) fileReviewActions.hidePopover();
+  } else {
+    fileReviewActions.hidden = true;
+  }
   return trigger;
 }
 
-document.addEventListener('pointerdown', event => {
+function dismissReviewActionsOutside(event) {
   if (!fileReviewActions.contains(event.target) && !reviewActionsTrigger?.contains(event.target)) {
     dismissFileReviewActions();
   }
-}, true);
+}
+
+document.addEventListener('pointerdown', dismissReviewActionsOutside, true);
 document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || fileReviewActions.hidden) return;
+  if (event.key !== 'Escape' || !fileReviewActionsOpen()) return;
   event.preventDefault();
   event.stopPropagation();
   dismissFileReviewActions()?.focus({preventScroll: true});
 }, true);
-document.addEventListener('focusin', event => {
-  if (!fileReviewActions.contains(event.target) && !reviewActionsTrigger?.contains(event.target)) {
-    dismissFileReviewActions();
-  }
-});
+document.addEventListener('focusin', dismissReviewActionsOutside);
 window.addEventListener('scroll', dismissFileReviewActions, {passive: true});
 byId('file-list').addEventListener('scroll', dismissFileReviewActions, {passive: true});
 window.addEventListener('resize', dismissFileReviewActions);
 
 function openFileReviewActions(event, trigger, view, folder) {
-  const toggled = event.type === 'click' && reviewActionsTrigger === trigger;
+  const toggled = event.type === 'click' && reviewActionsTrigger === trigger && fileReviewActionsOpen();
   dismissFileReviewActions();
   if (toggled) return;
   reviewActionsTrigger = trigger;
@@ -281,8 +301,8 @@ function openFileReviewActions(event, trigger, view, folder) {
   trigger.focus({preventScroll: true});
   fileReviewActions.style.left = '8px';
   fileReviewActions.style.top = '8px';
-  fileReviewActions.hidden = false;
-  if (nativeReviewPopover) fileReviewActions.showPopover();
+  if (nativeReviewPopover) fileReviewActions.showPopover({source: trigger});
+  else fileReviewActions.hidden = false;
   trigger.setAttribute('aria-expanded', 'true');
   const anchor = trigger.getBoundingClientRect();
   const atPointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
@@ -414,7 +434,7 @@ function updateBulkControls() {
   const count = selecting ? selectedForReview().length : 0;
   const collapsedCount = count - visibleCount;
   const submit = byId('mark-selected');
-  submit.disabled = busy || Boolean(editing) || count === 0;
+  submit.disabled = !reviewMarkAvailable() || count === 0;
   const label = count ? `Mark ${count} reviewed` : 'Mark selected reviewed';
   submit.textContent = collapsedCount ? `${label} (${collapsedCount} in collapsed folders)` : label;
   byId('bulk-filter').disabled = busy;
@@ -437,6 +457,7 @@ byId('select-visible').addEventListener('change', event => {
   updateBulkControls();
 });
 byId('mark-selected').addEventListener('click', () => {
+  if (!reviewMarkAvailable()) return;
   const selected = selectedForReview();
   if (selected.length) saveReviewMarks(selected, true);
 });
@@ -445,19 +466,35 @@ function updateReviewActions() {
   byId('submit-review').disabled = Boolean(editing) || savingComment || deletingComments.size > 0 || views.some(view => view.savingMark);
   layoutSelect.disabled = Boolean(editing);
   views.forEach(view => {
-    view.mark.disabled = view.savingMark || editing?.view === view;
-    view.commentOnFile.disabled = Boolean(editing) || savingComment || view.savingMark;
-    view.addComment.disabled = selection?.view !== view || view.savingMark;
+    view.mark.disabled = !fileMarkAvailable(view);
+    view.commentOnFile.disabled = !commentActionAvailable(view);
+    view.addComment.disabled = selection?.view !== view || !commentActionAvailable(view);
     view.body.querySelectorAll('.comment-actions button').forEach(action => {
-      action.disabled = Boolean(editing) || savingComment || view.savingMark ||
-        deletingComments.has(action.closest('.comment').dataset.commentId);
+      action.disabled = !commentActionAvailable(view, action.closest('.comment').dataset.commentId);
     });
   });
   updateBulkControls();
 }
 
+function collapseFolderDiffs(folder, targets) {
+  const focusInsideFolder = folder.lastElementChild.contains(document.activeElement);
+  for (const view of targets) view.setExpanded(false);
+  changeFolderExpansion(folder, false);
+  if (focusInsideFolder) {
+    folder.firstElementChild.firstElementChild.focus({preventScroll: true});
+  }
+}
+
 async function saveReviewMarks(targets, reviewed, {scrollTo = null, folder = null} = {}) {
+  if (!targets.every(fileMarkAvailable)) return;
   const changed = targets.filter(view => view.file.reviewed !== reviewed);
+  if (!changed.length) {
+    if (folder) {
+      collapseFolderDiffs(folder, targets);
+      updateBulkControls();
+    }
+    return;
+  }
   const before = changed.map(view => ({view, reviewed: view.file.reviewed, expanded: !view.body.hidden}));
   const focused = scrollTo?.mark === document.activeElement;
   for (const view of targets) view.savingMark = true;
@@ -474,16 +511,9 @@ async function saveReviewMarks(targets, reviewed, {scrollTo = null, folder = nul
   updateReviewActions();
   showError(null);
   try {
-    if (changed.length) await request('reviewed', {files: changed.map(view => String(view.index)), reviewed});
+    await request('reviewed', {files: changed.map(view => String(view.index)), reviewed});
     if (reviewed) for (const view of changed) view.selectFile.checked = false;
-    if (folder) {
-      const focusInsideFolder = folder.lastElementChild.contains(document.activeElement);
-      for (const view of targets) view.setExpanded(false);
-      changeFolderExpansion(folder, false);
-      if (focusInsideFolder) {
-        folder.firstElementChild.firstElementChild.focus({preventScroll: true});
-      }
-    }
+    if (folder) collapseFolderDiffs(folder, targets);
   } catch (error) {
     for (const previous of before) {
       const {view} = previous;
@@ -825,11 +855,11 @@ class FileView {
       const actions = element('div', 'comment-actions');
       const edit = button('comment-edit', 'Edit');
       const remove = button('comment-delete', 'Delete');
-      edit.disabled = remove.disabled = editing !== null || savingComment || deletingComments.has(comment.id);
+      edit.disabled = remove.disabled = !commentActionAvailable(this, comment.id);
       edit.setAttribute('aria-label', target.side ? `Edit comment on ${locationLabel(target)}` : 'Edit file comment');
       remove.setAttribute('aria-label', target.side ? `Delete comment on ${locationLabel(target)}` : 'Delete file comment');
       edit.addEventListener('click', () => openEditor(target));
-      remove.addEventListener('click', () => deleteSavedComment(target, edit, remove));
+      remove.addEventListener('click', () => deleteSavedComment(target));
       entry.addEventListener('mouseenter', () => { if (!editing && !selection) highlight(target); });
       entry.addEventListener('mouseleave', () => { if (!editing) highlight(null); });
       if (comment.pending) actions.append(element('span', 'saving-status', 'Saving…'));
@@ -920,7 +950,7 @@ function updateSelection() {
     if (dragging?.view !== previous) delete previous.diff.dataset.selecting;
   }
   if (selection) {
-    selection.view.addComment.disabled = selection.view.savingMark;
+    selection.view.addComment.disabled = !commentActionAvailable(selection.view);
     selection.view.diff.dataset.selecting = layout === 'split' ? selection.side : 'both';
   }
 }
@@ -1006,7 +1036,7 @@ function focusEditor() {
 }
 
 function openEditor(target, body = target.body ?? '') {
-  if (savingComment || target.view.savingMark) return;
+  if (savingComment || target.view.savingMark || deletingComments.has(target.id)) return;
   if (editing) {
     focusEditor();
     return;
@@ -1079,10 +1109,9 @@ async function deleteComment(target) {
   target.view.updateCommentCount();
 }
 
-async function deleteSavedComment(target, edit, remove) {
-  if (editing || savingComment || deletingComments.has(target.id)) return;
+async function deleteSavedComment(target) {
+  if (!commentActionAvailable(target.view, target.id)) return;
   deletingComments.add(target.id);
-  edit.disabled = remove.disabled = true;
   updateReviewActions();
   showError(null);
   try {
@@ -1101,6 +1130,7 @@ async function deleteSavedComment(target, edit, remove) {
 async function deleteEditingComment() {
   if (savingComment || !editing) return;
   savingComment = true;
+  updateReviewActions();
   showError(null, byId('editor-error'));
   const buttons = [...byId('comment-form').querySelectorAll('button')];
   buttons.forEach(button => { button.disabled = true; });

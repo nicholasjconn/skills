@@ -27,3 +27,7 @@ class InlineHighlights(unittest.TestCase):
         rows = self.changed_rows("0, " * 160 + "old", "0, " * 160 + "new")
         self.assertEqual([row["text"][-3:] for row in rows], ["old", "new"])
         self.assertTrue(all("inline_changes" not in row for row in rows))
+
+    def test_tied_alignment_highlights_replaced_punctuation_in_place(self):
+        rows = self.changed_rows("----", "--+-")
+        self.assertEqual([row["inline_changes"] for row in rows], [[(2, 3)], [(2, 3)]])

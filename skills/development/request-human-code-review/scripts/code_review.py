@@ -111,18 +111,19 @@ def mark_inline_changes(rows):
             if max(len(left), len(right)) > MAX_INLINE_TOKENS or work > remaining_work:
                 continue
             match = SequenceMatcher(None, left, right, autojunk=False)
-            if match.quick_ratio() < .5:
+            upper_bound = match.quick_ratio()
+            if upper_bound < .5:
                 continue
             remaining_work -= work
-            similarity = match.ratio()
             # Repeated runs can make the longest contiguous match align a line
-            # with a shifted copy. Prefer in-place replacements if more tokens agree.
+            # with a shifted copy. Prefer in-place replacements when at least as many tokens agree.
             aligned = 0.0
             if len(left) == len(right):
                 aligned = sum(a == b for a, b in zip(left, right)) / len(left)
+            similarity = aligned if aligned >= upper_bound else match.ratio()
             if max(aligned, similarity) < .5:
                 continue
-            if aligned > similarity:
+            if aligned >= similarity:
                 spans = []
                 for equal, positions in groupby(range(len(left)), key=lambda i: left[i] == right[i]):
                     if not equal:
