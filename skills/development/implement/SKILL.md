@@ -1,19 +1,17 @@
 ---
 name: implement
 description: >-
-  Implement substantive code changes with optional planning, delegation, and
-  independent review.
+  Implement a large, substantive code change directly or through a planned
+  cross-agent workflow, adding plan or code review only when warranted.
 ---
 
 # implement
 
 ## Inputs
 
-Use the task or spec as `<input>`. Before a delegated stage, verify the supplied
-role target and the dispatch capabilities that stage needs. Report any gaps.
-Use `/dispatch-agent` with the supplied target. Give each delegate the full
-requirements for its assignment and relevant context, inline or in files it can
-read from its checkout.
+Use the task or spec as `<input>`. For a delegated stage, use `/dispatch-agent`
+with the supplied target for that role. Report missing targets or dispatch
+capabilities when the selected stage needs them.
 
 ## Decide Implementation Approach
 
@@ -29,39 +27,37 @@ Decide separately:
   independent plan review?
 - Would a separate implementer add enough value to justify the handoff?
 - Does the implementation's material risk or complexity justify independent
-  code review?
+  code review, whether implementation is direct or planned?
 
 A written plan can guide direct implementation.
 
 ## Planning
 
-If writing a plan, include implementation context and how to verify each
-requirement.
+If writing a plan, include the context needed to execute it and a checklist for
+verification.
 
-If independent plan review is required, dispatch each `plan_reviewers` target
-once, concurrently. Ask for findings only, comparing the plan against
-`<input>`. Update the plan with accepted findings before implementation.
+If independent plan review is required, dispatch all `plan_reviewers`
+concurrently with self-contained prompts to review the plan against `<input>`
+without editing files. Address valid in-scope findings. Review the plan once.
 
 ## Implementation
 
-### Direct
+If working directly, implement `<input>`, run targeted checks, and continue to
+Finish.
 
-Implement `<input>` using any plan. Run targeted checks and resolve gaps before
-continuing to Finish.
+If delegating implementation, dispatch `implementer` to complete `<input>`,
+follow any plan, and run targeted checks before returning. Tell it to implement
+directly without invoking this skill or dispatching another implementer.
 
-### Delegated
-
-Dispatch `implementer` with the full `<input>`, resolved decisions, and any
-current plan. Ask it to complete the task and run targeted checks before
-returning. Tell it to implement directly without invoking this skill or
-delegating again.
-
-Check completion against `<input>` and any plan. If gaps remain, resume the
-`implementer` once with `dispatch_continue`, listing the unmet requirements.
-If that leaves gaps, make one fresh dispatch with the original requirements,
-resolved decisions, any current plan, the implementation state, and the
-remaining work. Repeat the direct-work instruction and give a different
-approach if the continuation stalled. Resolve any remaining gaps directly.
+Check completion against `<input>` and any plan. If the implementation
+is incomplete, call `dispatch_continue` once with the `implementer` session
+handle and a prompt listing the unmet requirements and asking it to complete
+them before returning. If implementation remains incomplete after that
+continuation, use a fresh dispatch with any plan, the current implementation
+state, and the remaining work. Repeat the instruction not to invoke the
+`implement` skill or dispatch another implementer in the
+fresh prompt. If the continuation did not make meaningful progress, detail a
+different approach in that prompt.
 
 ## Finish
 
@@ -73,8 +69,8 @@ approach if the continuation stalled. Resolve any remaining gaps directly.
    the implementation against `<input>` and any plan without editing
    files. Evaluate each finding and fix those that are valid within `<input>`'s
    scope. Check findings related to explicit requirements against `<input>`
-   before rejecting them. If substantial fixes justify another review, run at
-   most one follow-up review.
+   before rejecting them. If the fixes are substantial, perform one fresh final
+   review.
 
 3. Check completion against `<input>` and any plan. Resolve
    gaps until it passes. Passing tests are supporting evidence, not proof of
