@@ -666,7 +666,7 @@ def share_tailnet(stack, server, origins, prefix, interrupted):
 
 
 class ReviewServer(ThreadingHTTPServer):
-    # The page requests every diff at once; the default backlog of 5 refuses the rest.
+    # A page load opens more than the default backlog of 5 connections at once.
     request_queue_size = 128
 
 

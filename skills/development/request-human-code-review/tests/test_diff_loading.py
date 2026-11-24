@@ -52,8 +52,8 @@ class DiffLoading(unittest.TestCase):
         outcomes = [None] * files
 
         def load(index):
-            together.wait()
             try:
+                together.wait(timeout=60)
                 with urllib.request.urlopen(f"{review['url']}file/{index}", timeout=30) as response:
                     outcomes[index] = bool(json.load(response)["rows"])
             except Exception as error:
