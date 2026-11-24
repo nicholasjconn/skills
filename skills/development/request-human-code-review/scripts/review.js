@@ -197,7 +197,12 @@ async function request(route, data) {
   const response = await fetch(route, data === undefined ? {} : {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
   });
-  const value = await response.json();
+  let value;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(`The review server did not answer (HTTP ${response.status}). Reload the page or restart the review.`);
+  }
   if (!response.ok) throw new Error(value.error);
   return value;
 }

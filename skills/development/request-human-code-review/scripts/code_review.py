@@ -520,6 +520,9 @@ class Review:
         self.session = args.session
         self.expires_at = None
         self.scope, comparison, self.files = snapshot(args)
+        # Build every diff response before the URL is shared, so a diff that cannot
+        # be served fails startup instead of the reviewer's page.
+        self.diffs = [json.dumps({"rows": file.rendered, "media": describe(file)}).encode() for file in self.files]
         self.assets = {name: ("text/javascript", (ASSETS / name).read_bytes())
                        for name in ("review.js", "images.js")}
         self.assets[""] = "text/html", (ASSETS / "review.html").read_bytes()
@@ -540,7 +543,7 @@ class Review:
             index, *asset = route.removeprefix("file/").split("/")
             file = self.file(index)
             if not asset:
-                return {"rows": file.rendered, "media": describe(file)}
+                return "application/json", self.diffs[int(index)]
             if len(asset) == 4 and asset[0] == "context":
                 return {"rows": file.context_page(int(asset[1]), int(asset[2]), asset[3])}
             if len(asset) == 2 and asset[0] == "image" and asset[1] in ("old", "new"):
@@ -653,6 +656,11 @@ def share_tailnet(stack, server, origins, prefix, interrupted):
         del origins[urlsplit(private.origin).netloc]
 
 
+class ReviewServer(ThreadingHTTPServer):
+    # The page requests every diff at once; the default backlog of 5 refuses the rest.
+    request_queue_size = 128
+
+
 def owner_path(state, session):
     key = hashlib.sha256(session.encode()).hexdigest()
     return state / f"{key}.lock"
@@ -743,7 +751,7 @@ def serve_owned(args):
 
     end_status = "interrupted"
     try:
-        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as routes:
+        with ReviewServer(("127.0.0.1", 0), Handler) as server, ExitStack() as routes:
             host = f"127.0.0.1:{server.server_port}"
             local = f"http://{host}"
             origins = {host: local}
