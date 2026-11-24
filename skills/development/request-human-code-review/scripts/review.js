@@ -4,6 +4,8 @@ const byId = id => document.getElementById(id);
 const editor = byId('editor');
 const commentBody = byId('comment-body');
 const layoutSelect = byId('diff-layout');
+const masthead = document.querySelector('.masthead');
+const fileReviewActions = byId('file-review-actions');
 const narrow = matchMedia('(max-width: 780px)');
 const changes = {A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied', T: 'Type changed', '?': 'Untracked'};
 const sides = {old: 'Baseline', new: 'Updated'};
@@ -19,6 +21,8 @@ let pressedSelection = null;
 let editing = null;
 let savingComment = false;
 let baselineWidth = 50;
+let collapsedFoldersBeforeFilter = null;
+let reviewActionsTrigger = null;
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -31,6 +35,34 @@ function button(className, text) {
   const node = element('button', className, text);
   node.type = 'button';
   return node;
+}
+
+function markChangedText(source, changes) {
+  const walker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  let offset = 0;
+  let next = 0;
+  for (const node of nodes) {
+    const start = offset;
+    offset += node.length;
+    if (next === changes.length) break;
+    if (!node.length || changes[next][0] >= offset) continue;
+    const text = document.createDocumentFragment();
+    let cursor = 0;
+    while (next < changes.length && changes[next][0] < offset) {
+      const [from, to] = changes[next];
+      const first = Math.max(0, from - start);
+      const last = Math.min(node.length, to - start);
+      if (cursor < first) text.append(node.data.slice(cursor, first));
+      text.append(element('span', 'intraline-change', node.data.slice(first, last)));
+      cursor = last;
+      if (to > offset) break;
+      next++;
+    }
+    if (cursor < node.length) text.append(node.data.slice(cursor));
+    node.replaceWith(text);
+  }
 }
 
 function resizeDivider(handle, {current, limits, update, scale, step, preview}) {
@@ -105,7 +137,6 @@ function setupSidebar() {
   const files = byId('changed-files');
   const bulk = byId('bulk-tools');
   const divider = byId('sidebar-divider');
-  const overview = byId('files-overview');
   const toggle = byId('toggle-files');
   const limits = () => {
     const style = getComputedStyle(workspace);
@@ -115,7 +146,7 @@ function setupSidebar() {
   };
   function setExpanded(expanded) {
     workspace.classList.toggle('sidebar-hidden', !expanded);
-    files.hidden = divider.hidden = overview.hidden = !expanded;
+    files.hidden = divider.hidden = !expanded;
     bulk.hidden = !expanded || !views.length;
     const label = expanded ? 'Collapse changed files' : 'Expand changed files';
     toggle.title = label;
@@ -139,7 +170,6 @@ function setupSidebar() {
   });
   window.addEventListener('resize', syncWhenVisible);
   syncWhenVisible();
-  new ResizeObserver(() => workspace.style.setProperty('--file-list-height', `${sidebar.offsetHeight}px`)).observe(sidebar);
 }
 
 function lineStats(file) {
@@ -170,29 +200,197 @@ function updateProgress() {
   byId('progress').textContent = `${views.filter(view => view.file.reviewed).length} / ${views.length} reviewed`;
 }
 
-function bulkCandidates() {
-  return views.filter(view => !view.listItem.hidden && !view.file.reviewed);
+function commentCountLabel(count) {
+  return `${count.toLocaleString()} ${count === 1 ? 'comment' : 'comments'}`;
 }
 
-function updateBulkControls() {
-  const selecting = !byId('bulk-options').hidden;
-  const query = selecting ? byId('bulk-filter').value.trim().toLowerCase().replace(/\/\*$/, '/') : '';
-  const busy = views.some(view => view.savingMark);
+function updateReviewCommentTotal() {
+  const total = byId('review-comment-total');
+  const label = commentCountLabel(comments.length);
+  if (total.textContent !== label) total.textContent = label;
+}
+
+function reviewMarkAvailable() {
+  return !editing && !savingComment && !views.some(view => view.savingMark);
+}
+
+function dismissFileReviewActions() {
+  if (fileReviewActions.matches(':popover-open')) fileReviewActions.hidePopover();
+}
+
+fileReviewActions.addEventListener('beforetoggle', event => {
+  reviewActionsTrigger?.setAttribute('aria-expanded', String(event.newState === 'open'));
+});
+window.addEventListener('scroll', dismissFileReviewActions, {passive: true});
+byId('file-list').addEventListener('scroll', dismissFileReviewActions, {passive: true});
+window.addEventListener('resize', dismissFileReviewActions);
+
+function openFileReviewActions(event, trigger, view, folder) {
+  if (fileReviewActions.matches(':popover-open')) {
+    fileReviewActions.hidePopover();
+    if (event.type === 'click' && reviewActionsTrigger === trigger) return;
+  }
+  reviewActionsTrigger?.removeAttribute('popovertarget');
+  trigger.setAttribute('popovertarget', fileReviewActions.id);
+  reviewActionsTrigger = trigger;
+  const disclosure = folder?.firstElementChild.firstElementChild;
+  const path = view ? view.file.path : disclosure.title;
+  const title = element('p', 'review-actions-path', path);
+  title.title = path;
+  fileReviewActions.replaceChildren(title);
+  function addAction(label, action, disabled = false) {
+    const control = button('', label);
+    control.disabled = disabled || !reviewMarkAvailable();
+    control.addEventListener('click', () => {
+      fileReviewActions.hidePopover();
+      if (reviewMarkAvailable()) action();
+    });
+    fileReviewActions.append(control);
+  }
+  if (view) {
+    addAction(view.file.reviewed ? 'File already reviewed' : 'Mark file reviewed',
+      () => saveReviewMarks([view], true), view.file.reviewed);
+  } else {
+    const targets = views.filter(item => folder.contains(item.listItem));
+    const pending = targets.filter(item => !item.file.reviewed);
+    const name = disclosure.firstElementChild.textContent;
+    const count = `${pending.length.toLocaleString()} ${pending.length === 1 ? 'file' : 'files'}`;
+    const label = pending.length ? `Mark ${name}/ reviewed (${count})` : `Collapse ${name}/ diffs`;
+    addAction(label, async () => {
+      if (pending.length) {
+        if (!await saveReviewMarks(targets, true)) return;
+      } else {
+        for (const target of targets) target.setExpanded(false);
+      }
+      setFolderExpanded(folder, false);
+      collapsedFoldersBeforeFilter?.add(folder);
+      disclosure.focus({preventScroll: true});
+      updateBulkControls();
+    });
+  }
+  trigger.focus({preventScroll: true});
+  fileReviewActions.style.left = '8px';
+  fileReviewActions.style.top = '8px';
+  fileReviewActions.showPopover({source: trigger});
+  const anchor = trigger.getBoundingClientRect();
+  const atPointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
+  const x = atPointer ? event.clientX : anchor.right - fileReviewActions.offsetWidth;
+  const below = anchor.bottom + 4;
+  const anchoredY = below + fileReviewActions.offsetHeight <= innerHeight - 8
+    ? below : anchor.top - fileReviewActions.offsetHeight - 4;
+  const y = atPointer ? event.clientY : anchoredY;
+  fileReviewActions.style.left = `${Math.max(8, Math.min(x, innerWidth - fileReviewActions.offsetWidth - 8))}px`;
+  fileReviewActions.style.top = `${Math.max(8, Math.min(y, innerHeight - fileReviewActions.offsetHeight - 8))}px`;
+  (fileReviewActions.querySelector('button:enabled') ?? fileReviewActions).focus({preventScroll: true});
+}
+
+function fileReviewTrigger(row, path, view, folder) {
+  const trigger = button('row-review-actions', '⋯');
+  const label = `Review actions for ${path}`;
+  trigger.title = label;
+  trigger.setAttribute('aria-label', label);
+  trigger.setAttribute('aria-controls', fileReviewActions.id);
+  trigger.setAttribute('aria-expanded', 'false');
+  const open = event => openFileReviewActions(event, trigger, view, folder);
+  trigger.addEventListener('click', event => {
+    event.preventDefault();
+    open(event);
+  });
+  row.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    open(event);
+  });
+  return trigger;
+}
+
+function setFolderExpanded(folder, expanded) {
+  folder.lastElementChild.hidden = !expanded;
+  folder.firstElementChild.firstElementChild.setAttribute('aria-expanded', String(expanded));
+}
+
+function renderFileList() {
+  const root = byId('file-list');
+  const directories = new Map();
+  for (const view of views) {
+    const segments = view.file.path.split('/');
+    segments.pop();
+    let parent = root;
+    let path = '';
+    for (const name of segments) {
+      path += `${name}/`;
+      if (!directories.has(path)) {
+        const folder = element('li', 'file-folder');
+        const row = element('div', 'folder-row');
+        const label = button('folder-label');
+        label.title = path;
+        const reviewed = element('span', 'folder-reviewed', '✓');
+        reviewed.setAttribute('role', 'img');
+        reviewed.setAttribute('aria-label', 'All changed files reviewed');
+        label.append(element('span', '', name || '/'), reviewed);
+        const children = element('ul', 'folder-files');
+        children.id = `folder-files-${directories.size}`;
+        label.setAttribute('aria-controls', children.id);
+        label.setAttribute('aria-expanded', 'true');
+        label.addEventListener('click', () => {
+          setFolderExpanded(folder, children.hidden);
+          if (!byId('bulk-options').hidden) updateBulkControls();
+        });
+        row.append(label, fileReviewTrigger(label, path, null, folder));
+        folder.append(row, children);
+        parent.append(folder);
+        directories.set(path, children);
+      }
+      parent = directories.get(path);
+    }
+    view.listItem.append(fileReviewTrigger(view.link, view.file.path, view));
+    parent.append(view.listItem);
+  }
+}
+
+function updateFileFilter() {
+  const query = byId('bulk-filter').value.trim().toLowerCase().replace(/\/\*$/, '/');
+  const folders = [...byId('file-list').querySelectorAll('.file-folder')];
+  if (query) collapsedFoldersBeforeFilter ??= new Set(folders.filter(folder => folder.lastElementChild.hidden));
   for (const view of views) {
     const path = view.file.path.toLowerCase();
     const matches = query.endsWith('/') ? path.startsWith(query) : path.includes(query);
     view.listItem.hidden = !matches;
+  }
+  // Visit children first so each folder can inherit their visibility.
+  for (const folder of folders.reverse()) {
+    folder.hidden = [...folder.lastElementChild.children].every(child => child.hidden);
+    if (query && !folder.hidden) setFolderExpanded(folder, true);
+    if (!query && collapsedFoldersBeforeFilter) setFolderExpanded(folder, !collapsedFoldersBeforeFilter.has(folder));
+  }
+  if (!query) collapsedFoldersBeforeFilter = null;
+  byId('no-matching-files').hidden = !query || views.some(view => !view.listItem.hidden);
+  updateBulkControls();
+}
+
+function visibleBulkCandidates() {
+  return views.filter(view => !view.file.reviewed && !view.listItem.hidden &&
+    !view.listItem.closest('.folder-files[hidden]'));
+}
+
+function selectedForReview() {
+  return views.filter(view => !view.file.reviewed && view.selectFile.checked);
+}
+
+function updateBulkControls() {
+  const selecting = !byId('bulk-options').hidden;
+  const busy = views.some(view => view.savingMark);
+  for (const view of views) {
     view.selectFile.hidden = !selecting;
     view.selectFile.disabled = !selecting || busy || view.file.reviewed;
-    if (!matches || !selecting) view.selectFile.checked = false;
+    if (view.listItem.hidden || !selecting) view.selectFile.checked = false;
   }
-  byId('no-matching-files').hidden = !query || views.some(view => !view.listItem.hidden);
-  const candidates = bulkCandidates();
-  const count = candidates.filter(view => view.selectFile.checked).length;
+  const candidates = selecting ? visibleBulkCandidates() : [];
+  const visibleCount = candidates.filter(view => view.selectFile.checked).length;
   const selectVisible = byId('select-visible');
   selectVisible.disabled = busy || !candidates.length;
-  selectVisible.checked = count > 0 && count === candidates.length;
-  selectVisible.indeterminate = count > 0 && count < candidates.length;
+  selectVisible.checked = visibleCount > 0 && visibleCount === candidates.length;
+  selectVisible.indeterminate = visibleCount > 0 && visibleCount < candidates.length;
+  const count = selecting ? selectedForReview().length : 0;
   const submit = byId('mark-selected');
   submit.disabled = busy || Boolean(editing) || count === 0;
   submit.textContent = count ? `Mark ${count} reviewed` : 'Mark selected reviewed';
@@ -208,15 +406,15 @@ byId('toggle-bulk').addEventListener('click', () => {
   toggle.textContent = options.hidden ? 'Select files' : 'Done selecting';
   if (options.hidden) byId('bulk-filter').value = '';
   else byId('bulk-filter').focus();
-  updateBulkControls();
+  updateFileFilter();
 });
-byId('bulk-filter').addEventListener('input', updateBulkControls);
+byId('bulk-filter').addEventListener('input', updateFileFilter);
 byId('select-visible').addEventListener('change', event => {
-  for (const view of bulkCandidates()) view.selectFile.checked = event.target.checked;
+  for (const view of visibleBulkCandidates()) view.selectFile.checked = event.target.checked;
   updateBulkControls();
 });
 byId('mark-selected').addEventListener('click', () => {
-  const selected = bulkCandidates().filter(view => view.selectFile.checked);
+  const selected = selectedForReview();
   if (selected.length) saveReviewMarks(selected, true);
 });
 
@@ -252,6 +450,7 @@ async function saveReviewMarks(targets, reviewed, scrollTo = null) {
   try {
     await request('reviewed', {files: targets.map(view => String(view.index)), reviewed});
     if (reviewed) for (const view of targets) view.selectFile.checked = false;
+    return true;
   } catch (error) {
     for (const previous of before) {
       const {view} = previous;
@@ -260,6 +459,7 @@ async function saveReviewMarks(targets, reviewed, scrollTo = null) {
     }
     updateProgress();
     showError(error);
+    return false;
   } finally {
     for (const view of targets) {
       view.updateMark();
@@ -340,16 +540,13 @@ class FileView {
     this.selectFile.hidden = true;
     this.selectFile.setAttribute('aria-label', `Select ${file.path}`);
     this.selectFile.addEventListener('change', updateBulkControls);
-    this.listItem = element('li');
+    this.listItem = element('li', 'file-list-item');
     this.listItem.append(this.selectFile, this.link);
     const stats = lineStats(file);
     stats.id = `line-stats-${index}`;
-    const filePath = element('span', 'file-path');
-    const nameStart = file.path.lastIndexOf('/') + 1;
-    if (nameStart) filePath.append(element('span', 'file-directory', file.path.slice(0, nameStart)));
-    filePath.append(element('span', 'file-basename', file.path.slice(nameStart)));
+    const basename = element('span', 'file-basename', file.path.slice(file.path.lastIndexOf('/') + 1));
     this.link.title = file.path;
-    this.link.append(element('span', 'file-status'), filePath, stats);
+    this.link.append(element('span', 'file-status'), basename, stats);
     this.link.setAttribute('aria-describedby', stats.id);
     this.link.setAttribute('aria-controls', this.body.id);
     this.updateMark();
@@ -414,6 +611,7 @@ class FileView {
 
   updateMark() {
     this.mark.checked = this.file.reviewed;
+    this.listItem.classList.toggle('is-reviewed', this.file.reviewed);
     this.link.firstChild.textContent = this.file.reviewed ? '✓' : this.file.change;
     this.link.firstChild.title = this.file.reviewed ? 'Reviewed' : changes[this.file.change];
     this.link.setAttribute('aria-label', `${this.file.path}, ${this.file.reviewed ? 'reviewed' : 'needs review'}`);
@@ -421,7 +619,7 @@ class FileView {
 
   updateCommentCount() {
     const count = comments.filter(comment => Number(comment.file) === this.index).length;
-    this.commentCount.textContent = `${count} ${count === 1 ? 'comment' : 'comments'}`;
+    this.commentCount.textContent = commentCountLabel(count);
   }
 
   cell({row, index}, side, line, unified = false) {
@@ -431,6 +629,7 @@ class FileView {
     const markup = row[`${side === 'both' ? 'new' : side}_html`];
     if (markup !== undefined) code.innerHTML = markup;
     if (code.textContent !== row.text) code.textContent = row.text;
+    if (row.inline_changes) markChangedText(code, row.inline_changes);
     if (!row.text) code.textContent = '\n';
     if (row.no_newline) {
       code.classList.add('no-newline');
@@ -738,9 +937,28 @@ function updateLayout() {
   views.forEach(view => { if (view.data) view.render(); });
 }
 
+function revealCommentEditor() {
+  if (!editing) return;
+  const viewport = window.visualViewport;
+  const offset = viewport?.offsetTop ?? 0;
+  const viewportBottom = offset + (viewport?.height ?? innerHeight);
+  // Keep the last diff scrollable above the keyboard at the end of the page.
+  const covered = viewport?.scale === 1 ? Math.max(0, innerHeight - viewportBottom) : 0;
+  document.body.style.setProperty('--editor-bottom-inset', `${covered}px`);
+  if (document.activeElement !== commentBody) return;
+  const fileHeadingHeight = narrow.matches ? 0 : editing.view.panel.firstElementChild.offsetHeight;
+  const top = Math.max(offset, masthead.getBoundingClientRect().bottom + fileHeadingHeight) + 8;
+  const bottom = viewportBottom - 8;
+  const form = editor.getBoundingClientRect();
+  const field = form.height <= bottom - top ? form : commentBody.getBoundingClientRect();
+  if (field.top < top) window.scrollBy(0, field.top - top);
+  else if (field.bottom > bottom) window.scrollBy(0, Math.min(field.bottom - bottom, field.top - top));
+}
+
 function focusEditor() {
-  editor.scrollIntoView({block: 'nearest', inline: 'nearest'});
   commentBody.focus({preventScroll: true});
+  revealCommentEditor();
+  requestAnimationFrame(revealCommentEditor);
 }
 
 function openEditor(target, body = target.body ?? '') {
@@ -770,6 +988,7 @@ function closeEditor() {
   const view = editing.view;
   editing = null;
   editor.hidden = true;
+  document.body.style.removeProperty('--editor-bottom-inset');
   highlight(null);
   view.renderThreads();
   updateReviewActions();
@@ -794,6 +1013,8 @@ document.addEventListener('pointercancel', endDrag, true);
 document.addEventListener('selectionchange', updateSelection);
 layoutSelect.addEventListener('change', () => { layoutOverride = layoutSelect.value; updateLayout(); });
 narrow.addEventListener('change', updateLayout);
+window.visualViewport?.addEventListener('resize', revealCommentEditor);
+window.visualViewport?.addEventListener('scroll', revealCommentEditor);
 byId('cancel-comment').addEventListener('click', closeEditor);
 editor.addEventListener('keydown', event => {
   if (event.target === commentBody && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -810,7 +1031,7 @@ editor.addEventListener('keydown', event => {
 
 async function deleteComment(target) {
   await request('delete', {id: target.id});
-  comments = comments.filter(comment => comment.id !== target.id);
+  replaceComment(target.id, null);
   target.view.updateCommentCount();
 }
 
@@ -855,6 +1076,7 @@ function replaceComment(id, comment) {
   const index = comments.findIndex(item => item.id === id);
   if (index === -1 && comment) comments.push(comment);
   else if (index !== -1) comments.splice(index, 1, ...(comment ? [comment] : []));
+  updateReviewCommentTotal();
 }
 
 async function saveComment() {
@@ -939,17 +1161,32 @@ function showExpiryNotice(expiresAt) {
   }, Math.max(0, remaining));
 }
 
+function revisionLabel(value) {
+  const label = element('span', 'revision');
+  if (/^(?:[\da-f]{40}|[\da-f]{64})$/i.test(value)) {
+    label.title = value;
+    label.append(value.slice(0, 8), element('span', 'revision-tail', value.slice(8)));
+  } else label.textContent = value;
+  return label;
+}
+
 async function initialize() {
   const result = await request('data');
   comments = result.comments;
+  updateReviewCommentTotal();
   const {repo, base, head, merge_base, patch, checkout_branch} = result.comparison;
   byId('source-name').textContent = (patch ?? repo).split('/').pop();
   if (repo) {
-    byId('comparison').textContent = `${merge_base ? `merge base with ${base}` : base} → ${head ?? 'working tree'}`;
-    byId('comparison').hidden = false;
-    byId('checkout-path').textContent = repo;
-    byId('checkout-branch').textContent = checkout_branch ? `Branch ${checkout_branch}` : 'Detached HEAD';
-    byId('checkout-details').hidden = false;
+    const comparison = byId('comparison');
+    comparison.append(merge_base ? 'merge base with ' : '', revisionLabel(base), ' → ', revisionLabel(head ?? 'working tree'));
+    comparison.hidden = false;
+    const path = byId('checkout-path');
+    path.textContent = repo;
+    path.hidden = false;
+    const branch = byId('checkout-branch');
+    branch.textContent = checkout_branch ?? 'Detached HEAD';
+    branch.title = checkout_branch ? `Branch ${checkout_branch}` : 'Detached HEAD';
+    branch.hidden = false;
   }
   const totals = {additions: 0, deletions: 0};
   for (const file of result.files) {
@@ -970,12 +1207,15 @@ async function initialize() {
   for (const [index, file] of result.files.entries()) {
     const view = new FileView(file, index);
     views.push(view);
-    byId('file-list').append(view.listItem);
     byId('diffs').append(view.panel);
     observer.observe(view.panel);
   }
+  renderFileList();
   const workspace = byId('workspace');
   workspace.hidden = false;
+  const updateMasthead = () => document.documentElement.style.setProperty('--masthead-height', `${masthead.offsetHeight}px`);
+  updateMasthead();
+  new ResizeObserver(updateMasthead).observe(masthead);
   setupSidebar();
   byId('empty').hidden = Boolean(views.length);
   updateProgress();

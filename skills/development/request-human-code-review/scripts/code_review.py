@@ -17,9 +17,10 @@ import time
 from contextlib import ExitStack, closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from functools import cache, cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from itertools import islice
+from itertools import accumulate, groupby, islice
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -39,6 +40,8 @@ GIT_DIFF = (
     "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ",
 )
 BINARY_NOTE = re.compile(rb"^(GIT binary patch|Binary files .* differ)\r?$", re.MULTILINE)
+LINE_TOKENS = re.compile(r"\w+|\s+|[^\w\s]")
+MAX_INLINE_LINE = 4096
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 
@@ -85,6 +88,36 @@ def markup_lines(path, source):
     except ClassNotFound:
         return []
     return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+
+
+def mark_inline_changes(rows):
+    """Mark token changes in the same replacement lines shown together in split view."""
+    for changed, block in groupby(rows, key=lambda row: row["kind"] in ("add", "remove")):
+        if not changed:
+            continue
+        removed, added = [], []
+        for row in block:
+            (removed if row["kind"] == "remove" else added).append(row)
+        for old, new in zip(removed, added):
+            before, after = old["text"], new["text"]
+            if not before or not after or before == after or max(len(before), len(after)) > MAX_INLINE_LINE:
+                continue
+            left, right = LINE_TOKENS.findall(before), LINE_TOKENS.findall(after)
+            match = SequenceMatcher(None, left, right)
+            if match.quick_ratio() < .5 or match.ratio() < .5:
+                continue
+            left_spans, right_spans = [], []
+            for operation, a, b, c, d in match.get_opcodes():
+                if operation != "equal":
+                    if a < b:
+                        left_spans.append((a, b))
+                    if c < d:
+                        right_spans.append((c, d))
+            for row, tokens, spans in ((old, left, left_spans), (new, right, right_spans)):
+                if spans:
+                    # DOM text offsets count UTF-16 units, including surrogate pairs.
+                    offsets = list(accumulate((len(token.encode("utf-16-le")) // 2 for token in tokens), initial=0))
+                    row["inline_changes"] = [(offsets[start], offsets[end]) for start, end in spans]
 
 
 @dataclass
@@ -171,6 +204,7 @@ class FileDiff:
     @cached_property
     def rendered(self):
         rows = [dict(row) for row in self.rows]
+        mark_inline_changes(rows)
         hunks = list(split_hunks(rows))
         sources = {}
         if self.repo and hunks:

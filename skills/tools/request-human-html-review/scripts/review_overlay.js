@@ -82,10 +82,10 @@ function createHtmlReview(options) {
 @keyframes steward-review-status { from { opacity: 0; transform: translate(-50%,-3px); } to { opacity: 1; transform: translate(-50%,0); } }
 @keyframes steward-review-popup-in { from { opacity: 0; transform: translateY(-5px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes steward-review-pin-in { from { opacity: 0; transform: translate(-50%,-50%) scale(.55); } to { opacity: 1; transform: translate(-50%,-50%) scale(1); } }
-@media (max-width: 520px) { #steward-review-root .sr-send-label { display: none; } #steward-review-root .sr-send { width: 38px; padding: 0; } .steward-review-popup .sr-hint { display: none; } }
+@media (max-width: 520px) { #steward-review-root .sr-send-label { display: none; } #steward-review-root .sr-send { width: 38px; padding: 0; } .steward-review-popup .sr-hint { display: none; } .steward-review-popup textarea { font-size: 16px; } }
 :host, :host(:popover-open) { position: fixed !important; inset: unset !important; top: 0 !important; left: 0 !important; display: block; width: 0 !important; height: 0 !important; min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important; margin: 0 !important; padding: 0 !important; border: none !important; overflow: visible !important; background: transparent !important; color: inherit !important; pointer-events: none; z-index: 2147483647; }
 :host::backdrop, .steward-review-popup::backdrop, .steward-review-info::backdrop { display: none; }
-.steward-review-popup, .steward-review-popup:popover-open { position: fixed !important; margin: 0 !important; width: min(350px, calc(100vw - 24px)) !important; height: fit-content !important; overflow: visible !important; }
+.steward-review-popup, .steward-review-popup:popover-open { position: fixed !important; margin: 0 !important; width: min(350px, calc(100vw - 24px)) !important; height: fit-content !important; overflow: auto !important; overscroll-behavior: contain; }
 .steward-review-info, .steward-review-info:popover-open { position: fixed !important; margin: 0 !important; width: max-content !important; height: fit-content !important; overflow: visible !important; }
 @media (prefers-reduced-motion: reduce) { #steward-review-root, .steward-review-pin, .steward-review-popup, .steward-review-info, .steward-review-pin.sr-enter, .steward-review-popup.sr-enter, .steward-review-info.sr-enter, #steward-review-root .sr-status { animation: none; transition: none; } }
 `;
@@ -469,19 +469,20 @@ function createHtmlReview(options) {
     }
   };
   const showOverlayLayer = () => showAsPopover(overlayLayer);
-  const viewportClipRect = (padding = 12) => ({
-    left: padding,
-    top: padding,
-    right: window.innerWidth - padding,
-    bottom: window.innerHeight - padding
-  });
-  // Overlay chrome is viewport UI. Never shrink it to a host dialog or other
-  // overflow box; a tiny modal must not clip or squeeze the editor.
-  const visibleClipRect = () => viewportClipRect();
   const placeFixedElement = (node, clientX, clientY, origin = containingBlockOrigin()) => {
-    const clip = visibleClipRect();
+    // The keyboard can shrink the visible area while the page layout stays the same.
+    const viewport = node === popup ? window.visualViewport : null;
+    const left = viewport?.offsetLeft ?? 0;
+    const top = viewport?.offsetTop ?? 0;
+    const clip = {
+      left: left + 12,
+      top: top + 12,
+      right: left + (viewport?.width ?? window.innerWidth) - 12,
+      bottom: top + (viewport?.height ?? window.innerHeight) - 12
+    };
     const clipWidth = Math.max(0, clip.right - clip.left);
     if (clipWidth > 0) node.style.maxWidth = `${Math.floor(clipWidth)}px`;
+    if (node === popup) node.style.maxHeight = `${Math.max(0, Math.floor(clip.bottom - clip.top))}px`;
     const width = node.offsetWidth;
     const height = node.offsetHeight;
     const minX = clip.left;
@@ -1484,6 +1485,13 @@ function createHtmlReview(options) {
     closeInfo();
     applyOverlayPlacement(copyRect(root), copyRect(popup));
   });
+  const fitPopupToViewport = () => {
+    if (!active || !popup) return;
+    const {left, top} = popup.getBoundingClientRect();
+    placeFixedElement(popup, left, top);
+  };
+  window.visualViewport?.addEventListener('resize', fitPopupToViewport);
+  window.visualViewport?.addEventListener('scroll', fitPopupToViewport);
   // Route changes can leave the DOM untouched. Refresh explicitly rather than
   // relying on mutations, scroll, or resize to update page-scoped annotations.
   window.addEventListener('popstate', scheduleCommentRefresh);
