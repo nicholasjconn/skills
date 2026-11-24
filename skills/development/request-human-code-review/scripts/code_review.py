@@ -2,20 +2,22 @@
 """Open a code diff snapshot for interactive browser review."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
 import select
+import signal
 import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import closing, nullcontext
+from contextlib import ExitStack, closing
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from functools import cached_property
+from datetime import datetime, timedelta, timezone
+from functools import cache, cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from itertools import islice
 from pathlib import Path
@@ -24,10 +26,11 @@ from urllib.parse import urlsplit
 sys.dont_write_bytecode = True
 from media import ImageBudget, describe, git_blobs, image_type, patch_blobs
 from patch_input import DIFF_HEADER, HUNK, file_paths, patch_sections
-from tailnet import Tailnet
+from tailnet import STARTUP_TIMEOUT as TAILNET_STARTUP_TIMEOUT, Tailnet
 
 ASSETS = Path(__file__).resolve().parent
 LIFETIME = 12 * 3600
+SNAPSHOT_TIMEOUT = 45
 CONTEXT_PAGE = 20
 GIT_DIFF = (
     "--patch", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
@@ -39,11 +42,21 @@ BINARY_NOTE = re.compile(rb"^(GIT binary patch|Binary files .* differ)\r?$", re.
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 
+@cache
+def git_local_variables():
+    local = set(subprocess.check_output(["git", "rev-parse", "--local-env-vars"], text=True).split())
+    local.update(("GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES"))
+    return local
+
+
 def git(repo, *args, allowed=(0,), input_bytes=None):
+    local = git_local_variables()
+    environment = {name: value for name, value in os.environ.items() if name not in local}
+    environment["LC_ALL"] = "C"
     process = subprocess.run(
         ["git", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false", "-C", repo, *args], input=input_bytes,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        env={**os.environ, "LC_ALL": "C"},
+        env=environment,
     )
     if process.returncode not in allowed:
         error = process.stderr.decode(errors="replace").strip()
@@ -65,6 +78,8 @@ def markup_lines(path, source):
     from pygments.lexers import get_lexer_for_filename
     from pygments.util import ClassNotFound
 
+    # Git splits lines on LF. Keep embedded carriage returns on their original line.
+    source = source.replace("\r", " ")
     try:
         lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
     except ClassNotFound:
@@ -119,7 +134,8 @@ class FileDiff:
     def rows(self):
         rows = []
         for patch in self.patches:
-            in_hunk = False
+            old_left = new_left = 0
+            patch_start = len(rows)
             for line in patch.split(b"\n"):
                 if line.startswith(b"diff --git "):
                     continue
@@ -128,11 +144,11 @@ class FileDiff:
                 match = HUNK.match(line)
                 if match:
                     old, new = int(match[1]), int(match[3])
-                    in_hunk = True
+                    old_left, new_left = int(match[2] or 1), int(match[4] or 1)
                     rows.append({"kind": "hunk", "text": display(line.removesuffix(b"\r")),
                                  "old_range": display(match[0].split(b" ")[1]),
                                  "new_range": display(match[0].split(b" ")[2])})
-                elif in_hunk and line[:1] in (b"+", b"-", b" "):
+                elif (old_left or new_left) and line[:1] in (b"+", b"-", b" "):
                     indicator = line[:1]
                     rows.append({
                         "kind": {b"+": "add", b"-": "remove", b" ": "context"}[indicator],
@@ -142,11 +158,13 @@ class FileDiff:
                     })
                     old += indicator != b"+"
                     new += indicator != b"-"
-                elif in_hunk and line.startswith(b"\\ No newline at end of file") and "old_line" in rows[-1]:
+                    old_left -= indicator != b"+"
+                    new_left -= indicator != b"-"
+                elif len(rows) > patch_start and line.startswith(b"\\ No newline at end of file") and "old_line" in rows[-1]:
                     rows[-1]["no_newline"] = True
                 elif line and not line.startswith((b"index ", b"--- ", b"+++ ", b"similarity index ")):
                     rows.append({"kind": "note", "text": display(line)})
-        if not rows:
+        if not rows and not self.binary:
             rows.append({"kind": "note", "text": "No textual changes"})
         return rows
 
@@ -168,7 +186,7 @@ class FileDiff:
             html_key = f"{side}_html"
             blob = sources.get(side)
             if blob is not None and blob.content is not None:
-                source = display(blob.content).replace("\r\n", "\n").replace("\r", "\n")
+                source = display(blob.content).replace("\r\n", "\n")
                 source_lines = source.split("\n")
                 highlighted = markup_lines(path, source)
                 if len(highlighted) == len(source_lines):
@@ -392,13 +410,13 @@ def annotation(file, target):
     side_line = f"{side}_line"
 
     def coordinates(position):
-        row, column = position["row"], position["column"]
+        row, column = position.get("row"), position.get("column")
         if type(row) is not int or type(column) is not int or row < 0:
             raise ValueError("Invalid selection coordinates")
         return row, column
 
-    first, last = coordinates(target["start"]), coordinates(target["end"])
-    if first >= last:
+    first, last = coordinates(target.get("start") or {}), coordinates(target.get("end") or {})
+    if first > last:
         raise ValueError("Select some code before commenting")
     rows = list(file.selected_rows(first[0], last[0] + 1))
 
@@ -413,6 +431,8 @@ def annotation(file, target):
     if not rows:
         raise ValueError("Invalid selection coordinates")
     start, end = endpoint(first, rows[0]), endpoint(last, rows[-1])
+    if first == last and rows[0]["text"]:
+        raise ValueError("Select some code before commenting")
     contents = []
     for row in rows:
         if row.get(side_line) is not None:
@@ -440,6 +460,7 @@ class Review:
 
         self.state = args.state_dir
         self.session = args.session
+        self.expires_at = None
         self.scope, comparison, self.files = snapshot(args)
         self.assets = {name: ("text/javascript", (ASSETS / name).read_bytes())
                        for name in ("review.js", "images.js")}
@@ -475,7 +496,7 @@ class Review:
         status, payload = self.load(db)
         if status != "pending":
             raise ValueError("This review has ended")
-        return {"comparison": payload["comparison"], "files": self.file_statuses(db),
+        return {"comparison": payload["comparison"], "expires_at": self.expires_at, "files": self.file_statuses(db),
                 "comments": list(payload["comments"].values())}
 
     def file(self, index):
@@ -491,14 +512,16 @@ class Review:
         ]
 
     def post(self, db, route, data):
+        if not isinstance(data, dict):
+            raise ValueError("Expected a JSON object")
         status, payload = self.load(db)
         if status != "pending":
             raise ValueError("This review has ended")
         if route == "reviewed":
-            flag = data["reviewed"]
+            flag = data.get("reviewed")
             if type(flag) is not bool:
                 raise ValueError("Expected a reviewed checkbox value")
-            indices = data["files"] if "files" in data else [data["file"]]
+            indices = data["files"] if "files" in data else [data.get("file")]
             if not isinstance(indices, list) or not indices or len(indices) > len(self.files):
                 raise ValueError("Select one or more files to mark")
             files = [self.file(index) for index in indices]
@@ -510,16 +533,19 @@ class Review:
             return {"reviewed": flag}
         comments = payload["comments"]
         if route == "comment":
-            body = data["body"].strip()
+            body = data.get("body")
+            body = body.strip() if isinstance(body, str) else ""
             if not body or len(body) > 12000:
                 raise ValueError("Enter a comment of up to 12,000 characters")
             if data.get("id"):
                 comment = comments[data["id"]]
                 comment.update(body=body, updated_at=stamp())
             else:
-                index = data["file"]
+                index = data.get("file")
                 file = self.file(index)
                 key = secrets.token_hex(12)
+                if "selection" not in data:
+                    raise ValueError("Specify an inline selection or a file comment")
                 selection = data["selection"]
                 anchor = {"scope": "file"} if selection is None else annotation(file, selection)
                 comment = {"id": key, "file": index, **file.metadata(), "body": body,
@@ -528,6 +554,8 @@ class Review:
             self.save(db, status, payload)
             return comment
         if route == "delete":
+            if not isinstance(data.get("id"), str):
+                raise ValueError("Specify a comment to delete")
             comments.pop(data["id"], None)
             self.save(db, status, payload)
             return {}
@@ -544,11 +572,47 @@ class Review:
         return {"status": status}
 
 
-def serve(args):
+def share_tailnet(stack, server, origins, prefix, interrupted):
     from concurrent.futures import ThreadPoolExecutor
+
+    for attempt in range(2):
+        private = Tailnet.load()
+        origins[urlsplit(private.origin).netloc] = private.origin
+        with ExitStack() as startup:
+            owner = startup.enter_context(private.start(server.server_port))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                ready = executor.submit(private.verify, owner, prefix, interrupted)
+                while not ready.done():
+                    server.handle_request()
+                try:
+                    ready.result()
+                except ValueError:
+                    if attempt or interrupted.is_set() or owner.poll() is None or not private.port_in_use():
+                        raise
+                else:
+                    stack.enter_context(startup.pop_all())
+                    return private.origin, owner
+        del origins[urlsplit(private.origin).netloc]
+
+
+def owner_path(state, session):
+    key = hashlib.sha256(session.encode()).hexdigest()
+    return state / f"{key}.lock"
+
+
+def serve(args):
+    # A kernel lock identifies the worker without depending on PID reuse or uptime.
+    with owner_path(args.state_dir, args.session).open("xb") as ownership:
+        fcntl.flock(ownership, fcntl.LOCK_EX)
+        serve_owned(args)
+
+
+def serve_owned(args):
     from threading import Event, Lock
 
-    private = Tailnet.load() if args.tailscale else None
+    interrupted = Event()
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, lambda *_: interrupted.set())
     review = Review(args)
     lock = Lock()
     completed = Event()
@@ -604,6 +668,10 @@ def serve(args):
                 print(f"Review storage failed: {error}", file=sys.stderr, flush=True)
                 self.send(500, {"error": "Could not save review state. Retry or inspect the session log."})
                 return
+            except (OSError, subprocess.SubprocessError) as error:
+                print(f"Review data unavailable: {error}", file=sys.stderr, flush=True)
+                self.send(500, {"error": "Review data unavailable. See the session log."})
+                return
             try:
                 self.send(200, response)
             finally:
@@ -615,32 +683,31 @@ def serve(args):
         def log_message(self, _format, *_args):
             pass
 
-    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
-        host = f"127.0.0.1:{server.server_port}"
-        local = f"http://{host}"
-        origins = {host: local}
-        public = private.origin if private else local
-        server.timeout = 0.5
-        if private:
-            origins[urlsplit(public).netloc] = public
-        with private.start(server.server_port) if private else nullcontext() as sharing:
-            if private:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    ready = executor.submit(private.verify, sharing, prefix)
-                    while not ready.done():
-                        server.handle_request()
-                    ready.result()
+    end_status = "interrupted"
+    try:
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server, ExitStack() as routes:
+            host = f"127.0.0.1:{server.server_port}"
+            local = f"http://{host}"
+            origins = {host: local}
+            server.timeout = 0.5
+            public, sharing = share_tailnet(routes, server, origins, prefix, interrupted) if args.tailscale else (local, None)
+            if interrupted.is_set():
+                return
+            review.expires_at = (datetime.now(timezone.utc) + timedelta(seconds=LIFETIME)).isoformat(timespec="seconds")
             print(json.dumps({"url": f"{public}{prefix}", "session": args.session, "files": len(review.files)}), flush=True)
             deadline = time.monotonic() + LIFETIME
-            while not completed.is_set() and time.monotonic() < deadline and (not sharing or sharing.poll() is None):
+            while (not completed.is_set() and not interrupted.is_set() and time.monotonic() < deadline
+                   and (not sharing or sharing.poll() is None)):
                 server.handle_request()
-            stopped = sharing and sharing.poll() is not None and not completed.is_set()
-            with lock, closing(connect(review.state)) as db, db:
-                status, payload = review.load(db)
-                if status == "pending":
-                    review.finish(db, "interrupted" if stopped else "expired", payload)
-            if stopped:
-                raise ValueError("Tailscale Serve stopped before the review finished")
+            if not completed.is_set() and not interrupted.is_set():
+                if sharing and sharing.poll() is not None:
+                    raise ValueError("Tailscale Serve stopped before the review finished")
+                end_status = "expired"
+    finally:
+        with lock, closing(connect(review.state)) as db, db:
+            status, payload = review.load(db)
+            if status == "pending":
+                review.finish(db, end_status, payload)
 
 
 def start(args):
@@ -651,7 +718,7 @@ def start(args):
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     session = secrets.token_hex(16)
     log_path = args.state_dir / f"{session}.log"
-    command = [sys.executable, __file__, "--state-dir", str(args.state_dir), "_serve", "--session", session]
+    command = [sys.executable, __file__, "--state-dir", str(args.state_dir), "_serve"]
     if args.patch:
         command.extend(("--patch", str(args.patch)))
     else:
@@ -663,16 +730,28 @@ def start(args):
     if args.tailscale:
         command.append("--tailscale")
     with log_path.open("xb") as log:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=log, start_new_session=True)
+    with process.stdin as handoff:
+        try:
+            handoff.write(f"{session}\n".encode())
+            handoff.flush()
+        except BrokenPipeError:
+            pass
+    timeout = SNAPSHOT_TIMEOUT + (TAILNET_STARTUP_TIMEOUT if args.tailscale else 0)
     with process.stdout as output:
-        if select.select([output], [], [], 75 if args.tailscale else 45)[0]:
+        if select.select([output], [], [], timeout)[0]:
             line = output.readline()
             if line:
                 print(line.decode().strip())
                 return
         else:
             process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
             raise ValueError(f"Review startup timed out. See {log_path}")
     raise ValueError(f"Could not start the review. {log_path.read_text().strip()} (log: {log_path})")
 
@@ -680,16 +759,30 @@ def start(args):
 def result(args):
     if not (args.state_dir / "review.sqlite3").is_file():
         raise ValueError(f"No review state found in {args.state_dir}")
-    with closing(connect(args.state_dir)) as db:
-        row = db.execute("SELECT status, payload FROM sessions WHERE id = ?", (args.session,)).fetchone()
-    if row is None:
-        raise ValueError(f"Unknown review session {args.session}")
-    status, raw = row
+    query = "SELECT status, payload FROM sessions WHERE id = ?"
+    with closing(connect(args.state_dir)) as db, db:
+        row = db.execute(query, (args.session,)).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown review session {args.session}")
+        status, raw = row
+        if status == "pending" and (path := owner_path(args.state_dir, args.session)).is_file():
+            with path.open("rb") as ownership:
+                try:
+                    fcntl.flock(ownership, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass
+                else:
+                    status, raw = db.execute(query, (args.session,)).fetchone()
+                    if status == "pending":
+                        status = "interrupted"
+                        db.execute("UPDATE sessions SET status = ? WHERE id = ?", (status, args.session))
     payload = json.loads(raw)
     if status == "submitted":
         payload["comments"] = list(payload["comments"].values())
     else:
-        del payload["comments"]
+        stored = payload.pop("comments")
+        if args.include_unsubmitted:
+            payload["unsubmitted_comments"] = list(stored.values())
     print(json.dumps({"status": status, **payload}, indent=2))
 
 
@@ -710,18 +803,23 @@ def main():
         command.add_argument("--head", help="Compare this Git revision instead of the working tree")
         command.add_argument("--merge-base", action="store_true", help="Compare from the merge base of --base and --head")
         command.add_argument("--tailscale", action="store_true", help="Share privately on the tailnet over HTTPS using Tailscale Serve")
-    worker.add_argument("--session", required=True)
+    worker.add_argument("--session")
     read = commands.add_parser("result", help="Print the review status and submitted comments as JSON")
     read.add_argument("session", help="Session ID returned by start")
+    read.add_argument("--include-unsubmitted", action="store_true", help="Return saved comments separately when a review was not submitted")
     args = parser.parse_args()
     args.state_dir = args.state_dir.resolve()
     try:
+        if args.command == "_serve" and args.session is None:
+            args.session = sys.stdin.readline().strip()
+            if not re.fullmatch(r"[0-9a-f]{32}", args.session):
+                raise ValueError("Invalid review worker session")
         {"start": start, "_serve": serve, "result": result}[args.command](args)
     except ModuleNotFoundError as error:
         if error.name == "pygments":
             parser.exit(1, "code_review.py: Python package Pygments is required for syntax highlighting.\n")
         raise
-    except (OSError, subprocess.TimeoutExpired, ValueError, sqlite3.Error) as error:
+    except (OSError, subprocess.SubprocessError, ValueError, sqlite3.Error) as error:
         parser.exit(1, f"code_review.py: {error}\n")
 
 

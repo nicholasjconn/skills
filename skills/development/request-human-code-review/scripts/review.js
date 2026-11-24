@@ -332,7 +332,7 @@ class FileView {
     this.panel.append(header, this.body);
     this.panel.dataset.index = index;
     this.panel.setAttribute('aria-labelledby', this.toggle.id);
-    this.setExpanded(!file.reviewed);
+    this.setExpanded(!file.reviewed, false);
 
     this.link = button('file-link');
     this.selectFile = element('input', 'select-file');
@@ -379,13 +379,13 @@ class FileView {
     });
   }
 
-  setExpanded(expanded) {
+  setExpanded(expanded, load = true) {
     if (!expanded && editing?.view === this) return;
     if (!expanded && (selection?.view === this || selectionFeedback?.view === this)) clearSelection();
     this.body.hidden = !expanded;
     this.toggle.setAttribute('aria-expanded', String(expanded));
     this.addComment.hidden = !expanded || !this.hasCode;
-    if (expanded) this.load();
+    if (expanded && load) this.load();
   }
 
   async load() {
@@ -401,7 +401,7 @@ class FileView {
         this.change.textContent += ` · ${media.binary ? 'Binary · ' : ''}${bytes(media.old)} → ${bytes(media.new)}`;
         renderImagePreview(this.media, this.index, media, sides);
       }
-      this.diff.hidden = media.binary && !this.hasCode;
+      this.diff.hidden = media.binary && rows.length === 0;
       this.addComment.hidden = this.body.hidden || !this.hasCode;
       this.render();
     } catch (error) {
@@ -431,6 +431,7 @@ class FileView {
     const markup = row[`${side === 'both' ? 'new' : side}_html`];
     if (markup !== undefined) code.innerHTML = markup;
     if (code.textContent !== row.text) code.textContent = row.text;
+    if (!row.text) code.textContent = '\n';
     if (row.no_newline) {
       code.classList.add('no-newline');
       code.title = 'No newline at end of file';
@@ -653,7 +654,7 @@ function selectedCode() {
   const parts = view.sources.filter(entry => (!split || entry.side === origin.dataset.side) && range.intersectsNode(entry.code)).map(entry => {
     const {code, row} = entry;
     const from = code.contains(range.startContainer) ? offsetInside(code, range.startContainer, range.startOffset) : 0;
-    const to = code.contains(range.endContainer) ? offsetInside(code, range.endContainer, range.endOffset) : row.text.length;
+    const to = code.contains(range.endContainer) ? offsetInside(code, range.endContainer, range.endOffset) : code.textContent.length;
     return {...entry, from, to};
   });
   const first = parts.findIndex(part => part.from < part.to);
@@ -666,8 +667,10 @@ function selectedCode() {
     return {view, message: 'Expand the hidden lines to comment on this selection.'};
   }
   const side = [...changedSides][0] ?? 'new';
-  const start = {...parts[first].row, row: parts[first].index, column: parts[first].from + 1};
-  const end = {...parts[last].row, row: parts[last].index, column: parts[last].to + 1};
+  const startPart = parts[first];
+  const endPart = parts[last];
+  const start = {...startPart.row, row: startPart.index, column: Math.min(startPart.from, startPart.row.text.length) + 1};
+  const end = {...endPart.row, row: endPart.index, column: Math.min(endPart.to, endPart.row.text.length) + 1};
   return {view, side, start, end, selected_text: selected.map(part => part.row.text.slice(part.from, part.to)).join('\n')};
 }
 
@@ -711,6 +714,7 @@ function highlight(target) {
   const start = sourcePoint(target, target.start);
   const end = sourcePoint(target, target.end);
   if (!start || !end) return;
+  if (target.start.row === target.end.row && target.start.column === target.end.column) end[1] = 1;
   const range = document.createRange();
   range.setStart(...start);
   range.setEnd(...end);
@@ -751,7 +755,7 @@ function openEditor(target, body = target.body ?? '') {
   highlight(target);
   byId('editor-title').textContent = target.id ? 'Edit comment' : target.side ? 'Comment on code' : 'Comment on file';
   byId('anchor').textContent = target.side ? locationLabel(target) : target.view.file.path;
-  byId('quote').hidden = !target.side;
+  byId('quote').hidden = !target.selected_text;
   byId('quote').textContent = target.selected_text ?? '';
   commentBody.value = body;
   byId('delete-comment').hidden = !target.id;
@@ -903,6 +907,7 @@ async function submitReview() {
   try {
     await request('submit', {});
     workspace.hidden = true;
+    byId('review-expiry').hidden = true;
     byId('review-actions').hidden = true;
     byId('completion').hidden = false;
     byId('completion').textContent = 'Review submitted. You can close this tab.';
@@ -914,6 +919,25 @@ async function submitReview() {
 }
 
 byId('submit-review').addEventListener('click', submitReview);
+
+function showExpiryNotice(expiresAt) {
+  const date = new Date(expiresAt);
+  const remaining = date.getTime() - Date.now();
+  const notice = byId('review-expiry');
+  if (!expiresAt || !Number.isFinite(remaining)) return;
+  setTimeout(() => {
+    if (byId('workspace').hidden) return;
+    const time = date.toLocaleTimeString(undefined, {hour: 'numeric', minute: '2-digit'});
+    notice.textContent = `Review closes at ${time}. Submit before then to send your comments.`;
+    notice.hidden = false;
+  }, Math.max(0, remaining - 15 * 60_000));
+  setTimeout(() => {
+    if (!byId('workspace').hidden) {
+      notice.textContent = 'This review expired. Saved comments can be recovered.';
+      notice.hidden = false;
+    }
+  }, Math.max(0, remaining));
+}
 
 async function initialize() {
   const result = await request('data');
@@ -935,11 +959,20 @@ async function initialize() {
   byId('review-totals').append(lineStats(totals));
   layoutSelect.value = layout;
   byId('layout-control').hidden = result.files.length === 0;
+  const observer = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const view = views[Number(entry.target.dataset.index)];
+      if (!view.body.hidden) view.load();
+      observer.unobserve(entry.target);
+    }
+  }, {rootMargin: '240px 0px'});
   for (const [index, file] of result.files.entries()) {
     const view = new FileView(file, index);
     views.push(view);
     byId('file-list').append(view.listItem);
     byId('diffs').append(view.panel);
+    observer.observe(view.panel);
   }
   const workspace = byId('workspace');
   workspace.hidden = false;
@@ -947,6 +980,7 @@ async function initialize() {
   byId('empty').hidden = Boolean(views.length);
   updateProgress();
   updateReviewActions();
+  showExpiryNotice(result.expires_at);
 }
 
 initialize().catch(error => showError(error));
