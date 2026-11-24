@@ -25,6 +25,7 @@ let editorRevealFrame = null;
 const collapsedFolders = new WeakSet();
 let foldersToggledWhileFiltering = null;
 let reviewActionsTrigger = null;
+let reviewActionsHasNativeInvoker = false;
 const nativeReviewPopover = typeof fileReviewActions.showPopover === 'function';
 if (nativeReviewPopover) {
   fileReviewActions.setAttribute('popover', 'manual');
@@ -264,6 +265,11 @@ document.addEventListener('keydown', event => {
   dismissFileReviewActions()?.focus({preventScroll: true});
 }, true);
 document.addEventListener('focusin', dismissReviewActionsOutside);
+fileReviewActions.addEventListener('keydown', event => {
+  if (event.key !== 'Tab' || reviewActionsHasNativeInvoker) return;
+  dismissFileReviewActions()?.focus({preventScroll: true});
+  if (event.shiftKey) event.preventDefault();
+});
 window.addEventListener('scroll', dismissFileReviewActions, {passive: true});
 byId('file-list').addEventListener('scroll', dismissFileReviewActions, {passive: true});
 window.addEventListener('resize', dismissFileReviewActions);
@@ -301,8 +307,17 @@ function openFileReviewActions(event, trigger, view, folder) {
   trigger.focus({preventScroll: true});
   fileReviewActions.style.left = '8px';
   fileReviewActions.style.top = '8px';
-  if (nativeReviewPopover) fileReviewActions.showPopover({source: trigger});
-  else fileReviewActions.hidden = false;
+  if (nativeReviewPopover) {
+    fileReviewActions.showPopover({
+      // Browsers with the original Popover API ignore this option.
+      get source() {
+        reviewActionsHasNativeInvoker = true;
+        return trigger;
+      },
+    });
+  } else {
+    fileReviewActions.hidden = false;
+  }
   trigger.setAttribute('aria-expanded', 'true');
   const anchor = trigger.getBoundingClientRect();
   const atPointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
@@ -463,6 +478,7 @@ byId('mark-selected').addEventListener('click', () => {
 });
 
 function updateReviewActions() {
+  if (fileReviewActionsOpen()) dismissFileReviewActions()?.focus({preventScroll: true});
   byId('submit-review').disabled = Boolean(editing) || savingComment || deletingComments.size > 0 || views.some(view => view.savingMark);
   layoutSelect.disabled = Boolean(editing);
   views.forEach(view => {

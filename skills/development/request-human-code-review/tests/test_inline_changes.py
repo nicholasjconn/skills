@@ -31,3 +31,10 @@ class InlineHighlights(unittest.TestCase):
     def test_tied_alignment_highlights_replaced_punctuation_in_place(self):
         rows = self.changed_rows("----", "--+-")
         self.assertEqual([row["inline_changes"] for row in rows], [[(2, 3)], [(2, 3)]])
+
+    def test_tied_alignment_preserves_shifted_arguments(self):
+        before = "f(firstArgument, secondArgument, thirdArgument)"
+        after = "f(secondArgument, thirdArgument, firstArgument)"
+        rows = self.changed_rows(before, after)
+        marked = [[row["text"][start:end] for start, end in row["inline_changes"]] for row in rows]
+        self.assertEqual(marked, [["firstArgument, "], [", firstArgument"]])

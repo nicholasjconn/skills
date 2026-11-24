@@ -16,7 +16,7 @@ async (page) => {
   const files = [...paths, outside].map((path, index) => ({
     path, change: 'M', additions: 0, deletions: 0, reviewed: index === 2,
   }));
-  await page.route(`${origin}/**`, async route => {
+  const serveReview = async route => {
     const path = route.request().url().slice(origin.length + 1);
     if (path === 'data') {
       return route.fulfill({json: {comparison: {patch: 'fixture.patch'}, comments: [existingComment], files}});
@@ -44,7 +44,8 @@ async (page) => {
         : route.fulfill({status: 500, json: {error: 'Could not save comment'}});
     }
     return route.fulfill({path: `${assets}/${path || 'review.html'}`});
-  });
+  };
+  await page.route(`${origin}/**`, serveReview);
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const folder = path => page.locator(`.folder-label[title="${path}"]`);
   const diffToggle = path => page.getByRole('button', {name: path, exact: true});
@@ -111,9 +112,14 @@ async (page) => {
     await page.getByText('Could not save comment', {exact: true}).waitFor();
     assert(await editor.inputValue() === draft, 'A failed comment save lost the draft');
     await saveComment();
+    await folderTrigger.click();
+    assert(await markFolder.isDisabled(), 'Menu marks should stay disabled until the retry settles');
     finishComment(true);
     await page.getByRole('article').filter({hasText: 'Preserve these words and spacing.'})
       .getByRole('button', {name: 'Edit file comment'}).waitFor();
+    assert(!await menu.isVisible(), 'The menu stayed open with stale actions after a save');
+    assert(await folderTrigger.evaluate(control => document.activeElement === control),
+      'Settling a save did not restore focus to the menu trigger');
     assert(commentPosts.length === 2 && commentPosts.every(comment => comment.body === draft.trim()),
       'Retry changed the comment payload');
     assert(posts.length === 0, 'A mark was written while the comment was saving');
@@ -171,20 +177,35 @@ async (page) => {
     await menu.getByRole('button', {name: 'Collapse a/shared/ diffs (3 files)'}).click();
     assert(posts.length === 2, 'Collapsing an already reviewed folder wrote to storage');
 
-    await page.addInitScript(() =>
-      Object.defineProperty(HTMLElement.prototype, 'showPopover', {value: undefined}));
-    await page.reload();
-    await folderTrigger.press('Enter');
-    await markFolder.waitFor();
-    assert(await menu.getAttribute('popover') === null, 'Fallback uses the native popover');
-    await page.keyboard.press('Escape');
-    await menu.waitFor({state: 'hidden'});
-    assert(await folderTrigger.evaluate(control => document.activeElement === control),
-      'Escape did not restore focus to the fallback trigger');
-    await folderTrigger.click();
-    await markFolder.waitFor();
-    await page.getByRole('heading', {name: 'Code review', exact: true}).click();
-    await menu.waitFor({state: 'hidden'});
+    const fallback = await page.context().newPage();
+    try {
+      await fallback.route(`${origin}/**`, serveReview);
+      await fallback.addInitScript(() =>
+        Object.defineProperty(HTMLElement.prototype, 'showPopover', {value: undefined}));
+      await fallback.goto(origin);
+      const trigger = fallback.getByRole('button', {name: `Review actions for ${folderPath}`, exact: true});
+      const actions = fallback.getByRole('group', {name: 'Review actions'});
+      const mark = actions.getByRole('button', {name: 'Mark a/shared/ reviewed (3 files)'});
+      await trigger.press('Enter');
+      await mark.waitFor();
+      assert(await actions.getAttribute('popover') === null, 'Fallback uses the native popover');
+      await fallback.keyboard.press('Tab');
+      const next = fallback.getByRole('button', {name: `${paths[0]}, needs review`, exact: true});
+      assert(await next.evaluate(control => document.activeElement === control),
+        'Tab from the fallback menu should continue at the following file');
+      await trigger.press('Enter');
+      await mark.waitFor();
+      await fallback.keyboard.press('Escape');
+      await actions.waitFor({state: 'hidden'});
+      assert(await trigger.evaluate(control => document.activeElement === control),
+        'Escape did not restore focus to the fallback trigger');
+      await trigger.click();
+      await mark.waitFor();
+      await fallback.getByRole('heading', {name: 'Code review', exact: true}).click();
+      await actions.waitFor({state: 'hidden'});
+    } finally {
+      await fallback.close();
+    }
     return 'PASS: failed comment retry, mark and thread controls, folder selection and save, native and fallback menus';
   } finally {
     finishSave?.(false);
