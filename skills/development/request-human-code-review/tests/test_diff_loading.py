@@ -70,7 +70,7 @@ class DiffLoading(unittest.TestCase):
         worker = subprocess.run([sys.executable, "-B", "-c", broken, str(SCRIPT.parent), *self.state, "_serve",
                                  "--repo", str(self.repo), "--session", SESSION],
                                 capture_output=True, text=True, timeout=30)
-        self.assertEqual(worker.stdout, "")
+        self.assertEqual(worker.stdout.strip(), "")
         self.assertNotEqual(worker.returncode, 0)
         self.assertIn("diff cannot be built", worker.stderr)
 

@@ -522,7 +522,10 @@ class Review:
         self.scope, comparison, self.files = snapshot(args)
         # Build every diff response before the URL is shared, so a diff that cannot
         # be served fails startup instead of the reviewer's page.
-        self.diffs = [json.dumps({"rows": file.rendered, "media": describe(file)}).encode() for file in self.files]
+        self.diffs = []
+        for file in self.files:
+            self.diffs.append(json.dumps({"rows": file.rendered, "media": describe(file)}).encode())
+            print(flush=True)  # Progress for start(), whose deadline bounds a stall, not the whole build.
         self.assets = {name: ("text/javascript", (ASSETS / name).read_bytes())
                        for name in ("review.js", "images.js")}
         self.assets[""] = "text/html", (ASSETS / "review.html").read_bytes()
@@ -796,8 +799,9 @@ def start(args):
     if args.tailscale:
         command.append("--tailscale")
     with log_path.open("xb") as log:
+        # Unbuffered, so select() sees every line the worker has written.
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=log, start_new_session=True)
+                                   stderr=log, start_new_session=True, bufsize=0)
     with process.stdin as handoff:
         try:
             handoff.write(f"{session}\n".encode())
@@ -806,11 +810,14 @@ def start(args):
             pass
     timeout = SNAPSHOT_TIMEOUT + (TAILNET_STARTUP_TIMEOUT if args.tailscale else 0)
     with process.stdout as output:
-        if select.select([output], [], [], timeout)[0]:
+        # The worker writes a blank line for each diff it builds, then the review URL.
+        while select.select([output], [], [], timeout)[0]:
             line = output.readline()
-            if line:
+            if line.strip():
                 print(line.decode().strip())
                 return
+            if not line:
+                break
         else:
             process.terminate()
             try:
