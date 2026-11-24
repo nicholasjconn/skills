@@ -43,7 +43,9 @@ Image drafts require a Steward checkout with attachment-preserving
   examples, code, anecdotes, metrics, dates, personal stories, implementation
   details, or certainty.
 - Preserve Nick's voice-bearing phrases unless clarity, length, factuality, or
-  professional-boundary risk requires a change.
+  professional-boundary risk requires a change. Preserve stance, certainty,
+  first-person framing, and reasoning order; do not turn exploration into a plan
+  or commitment.
 - Treat Nick's latest revision instructions as authoritative over stale
   reviewer preferences when the draft still preserves source facts, fact-check
   limits, and X validity.
@@ -177,6 +179,10 @@ review page showing the exact pending text, weighted count, readiness, and
 ordered images. Include live, annotatable HTML alongside each HTML-backed image.
 Follow that skill's targeting and validation rules. Comments do not approve
 the language or any public action.
+
+After addressing submitted comments, rebuild the complete post package and
+open a fresh review with a new output path. Continue until Nick says the review
+is complete or asks not to reopen it.
 
 ### 5. Record language approval
 
