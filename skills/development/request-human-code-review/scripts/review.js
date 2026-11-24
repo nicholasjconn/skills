@@ -21,8 +21,12 @@ let pressedSelection = null;
 let editing = null;
 let savingComment = false;
 let baselineWidth = 50;
-let collapsedFoldersBeforeFilter = null;
+let editorRevealFrame = null;
+const collapsedFolders = new WeakSet();
+let foldersToggledWhileFiltering = null;
 let reviewActionsTrigger = null;
+const nativeReviewPopover = typeof fileReviewActions.showPopover === 'function';
+if (nativeReviewPopover) fileReviewActions.setAttribute('popover', 'manual');
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -200,13 +204,13 @@ function updateProgress() {
   byId('progress').textContent = `${views.filter(view => view.file.reviewed).length} / ${views.length} reviewed`;
 }
 
-function commentCountLabel(count) {
-  return `${count.toLocaleString()} ${count === 1 ? 'comment' : 'comments'}`;
+function countLabel(count, singular) {
+  return `${count.toLocaleString()} ${singular}${count === 1 ? '' : 's'}`;
 }
 
 function updateReviewCommentTotal() {
   const total = byId('review-comment-total');
-  const label = commentCountLabel(comments.length);
+  const label = countLabel(comments.length, 'comment');
   if (total.textContent !== label) total.textContent = label;
 }
 
@@ -215,23 +219,39 @@ function reviewMarkAvailable() {
 }
 
 function dismissFileReviewActions() {
-  if (fileReviewActions.matches(':popover-open')) fileReviewActions.hidePopover();
+  if (fileReviewActions.hidden) return;
+  const trigger = reviewActionsTrigger;
+  reviewActionsTrigger = null;
+  fileReviewActions.hidden = true;
+  if (nativeReviewPopover) fileReviewActions.hidePopover();
+  trigger.setAttribute('aria-expanded', 'false');
+  return trigger;
 }
 
-fileReviewActions.addEventListener('beforetoggle', event => {
-  reviewActionsTrigger?.setAttribute('aria-expanded', String(event.newState === 'open'));
+document.addEventListener('pointerdown', event => {
+  if (!fileReviewActions.contains(event.target) && !reviewActionsTrigger?.contains(event.target)) {
+    dismissFileReviewActions();
+  }
+}, true);
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || fileReviewActions.hidden) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dismissFileReviewActions()?.focus({preventScroll: true});
+}, true);
+document.addEventListener('focusin', event => {
+  if (!fileReviewActions.contains(event.target) && !reviewActionsTrigger?.contains(event.target)) {
+    dismissFileReviewActions();
+  }
 });
 window.addEventListener('scroll', dismissFileReviewActions, {passive: true});
 byId('file-list').addEventListener('scroll', dismissFileReviewActions, {passive: true});
 window.addEventListener('resize', dismissFileReviewActions);
 
 function openFileReviewActions(event, trigger, view, folder) {
-  if (fileReviewActions.matches(':popover-open')) {
-    fileReviewActions.hidePopover();
-    if (event.type === 'click' && reviewActionsTrigger === trigger) return;
-  }
-  reviewActionsTrigger?.removeAttribute('popovertarget');
-  trigger.setAttribute('popovertarget', fileReviewActions.id);
+  const toggled = event.type === 'click' && reviewActionsTrigger === trigger;
+  dismissFileReviewActions();
+  if (toggled) return;
   reviewActionsTrigger = trigger;
   const disclosure = folder?.firstElementChild.firstElementChild;
   const path = view ? view.file.path : disclosure.title;
@@ -242,7 +262,7 @@ function openFileReviewActions(event, trigger, view, folder) {
     const control = button('', label);
     control.disabled = disabled || !reviewMarkAvailable();
     control.addEventListener('click', () => {
-      fileReviewActions.hidePopover();
+      dismissFileReviewActions()?.focus({preventScroll: true});
       if (reviewMarkAvailable()) action();
     });
     fileReviewActions.append(control);
@@ -252,26 +272,18 @@ function openFileReviewActions(event, trigger, view, folder) {
       () => saveReviewMarks([view], true), view.file.reviewed);
   } else {
     const targets = views.filter(item => folder.contains(item.listItem));
-    const pending = targets.filter(item => !item.file.reviewed);
-    const name = disclosure.firstElementChild.textContent;
-    const count = `${pending.length.toLocaleString()} ${pending.length === 1 ? 'file' : 'files'}`;
-    const label = pending.length ? `Mark ${name}/ reviewed (${count})` : `Collapse ${name}/ diffs`;
-    addAction(label, async () => {
-      if (pending.length) {
-        if (!await saveReviewMarks(targets, true)) return;
-      } else {
-        for (const target of targets) target.setExpanded(false);
-      }
-      setFolderExpanded(folder, false);
-      collapsedFoldersBeforeFilter?.add(folder);
-      disclosure.focus({preventScroll: true});
-      updateBulkControls();
-    });
+    const count = countLabel(targets.length, 'file');
+    const label = targets.every(item => item.file.reviewed)
+      ? `Collapse ${path} diffs (${count})`
+      : `Mark ${path} reviewed (${count})`;
+    addAction(label, () => saveReviewMarks(targets, true, {folder}));
   }
   trigger.focus({preventScroll: true});
   fileReviewActions.style.left = '8px';
   fileReviewActions.style.top = '8px';
-  fileReviewActions.showPopover({source: trigger});
+  fileReviewActions.hidden = false;
+  if (nativeReviewPopover) fileReviewActions.showPopover();
+  trigger.setAttribute('aria-expanded', 'true');
   const anchor = trigger.getBoundingClientRect();
   const atPointer = event.type === 'contextmenu' && (event.clientX || event.clientY);
   const x = atPointer ? event.clientX : anchor.right - fileReviewActions.offsetWidth;
@@ -304,8 +316,17 @@ function fileReviewTrigger(row, path, view, folder) {
 }
 
 function setFolderExpanded(folder, expanded) {
-  folder.lastElementChild.hidden = !expanded;
+  const children = folder.lastElementChild;
+  if (children.hidden === !expanded) return;
+  children.hidden = !expanded;
   folder.firstElementChild.firstElementChild.setAttribute('aria-expanded', String(expanded));
+}
+
+function changeFolderExpansion(folder, expanded) {
+  if (expanded) collapsedFolders.delete(folder);
+  else collapsedFolders.add(folder);
+  foldersToggledWhileFiltering?.add(folder);
+  setFolderExpanded(folder, expanded);
 }
 
 function renderFileList() {
@@ -332,7 +353,7 @@ function renderFileList() {
         label.setAttribute('aria-controls', children.id);
         label.setAttribute('aria-expanded', 'true');
         label.addEventListener('click', () => {
-          setFolderExpanded(folder, children.hidden);
+          changeFolderExpansion(folder, children.hidden);
           if (!byId('bulk-options').hidden) updateBulkControls();
         });
         row.append(label, fileReviewTrigger(label, path, null, folder));
@@ -350,7 +371,8 @@ function renderFileList() {
 function updateFileFilter() {
   const query = byId('bulk-filter').value.trim().toLowerCase().replace(/\/\*$/, '/');
   const folders = [...byId('file-list').querySelectorAll('.file-folder')];
-  if (query) collapsedFoldersBeforeFilter ??= new Set(folders.filter(folder => folder.lastElementChild.hidden));
+  if (query) foldersToggledWhileFiltering ??= new WeakSet();
+  else foldersToggledWhileFiltering = null;
   for (const view of views) {
     const path = view.file.path.toLowerCase();
     const matches = query.endsWith('/') ? path.startsWith(query) : path.includes(query);
@@ -359,10 +381,9 @@ function updateFileFilter() {
   // Visit children first so each folder can inherit their visibility.
   for (const folder of folders.reverse()) {
     folder.hidden = [...folder.lastElementChild.children].every(child => child.hidden);
-    if (query && !folder.hidden) setFolderExpanded(folder, true);
-    if (!query && collapsedFoldersBeforeFilter) setFolderExpanded(folder, !collapsedFoldersBeforeFilter.has(folder));
+    const autoExpand = Boolean(query) && !foldersToggledWhileFiltering.has(folder);
+    setFolderExpanded(folder, autoExpand || !collapsedFolders.has(folder));
   }
-  if (!query) collapsedFoldersBeforeFilter = null;
   byId('no-matching-files').hidden = !query || views.some(view => !view.listItem.hidden);
   updateBulkControls();
 }
@@ -391,9 +412,11 @@ function updateBulkControls() {
   selectVisible.checked = visibleCount > 0 && visibleCount === candidates.length;
   selectVisible.indeterminate = visibleCount > 0 && visibleCount < candidates.length;
   const count = selecting ? selectedForReview().length : 0;
+  const collapsedCount = count - visibleCount;
   const submit = byId('mark-selected');
   submit.disabled = busy || Boolean(editing) || count === 0;
-  submit.textContent = count ? `Mark ${count} reviewed` : 'Mark selected reviewed';
+  const label = count ? `Mark ${count} reviewed` : 'Mark selected reviewed';
+  submit.textContent = collapsedCount ? `${label} (${collapsedCount} in collapsed folders)` : label;
   byId('bulk-filter').disabled = busy;
   byId('toggle-bulk').disabled = busy;
 }
@@ -424,23 +447,26 @@ function updateReviewActions() {
   views.forEach(view => {
     view.mark.disabled = view.savingMark || editing?.view === view;
     view.commentOnFile.disabled = Boolean(editing) || savingComment || view.savingMark;
+    view.addComment.disabled = selection?.view !== view || view.savingMark;
     view.body.querySelectorAll('.comment-actions button').forEach(action => {
-      action.disabled = Boolean(editing) || savingComment || deletingComments.has(action.closest('.comment').dataset.commentId);
+      action.disabled = Boolean(editing) || savingComment || view.savingMark ||
+        deletingComments.has(action.closest('.comment').dataset.commentId);
     });
   });
   updateBulkControls();
 }
 
-async function saveReviewMarks(targets, reviewed, scrollTo = null) {
-  const before = targets.map(view => ({view, reviewed: view.file.reviewed, expanded: !view.body.hidden}));
+async function saveReviewMarks(targets, reviewed, {scrollTo = null, folder = null} = {}) {
+  const changed = targets.filter(view => view.file.reviewed !== reviewed);
+  const before = changed.map(view => ({view, reviewed: view.file.reviewed, expanded: !view.body.hidden}));
   const focused = scrollTo?.mark === document.activeElement;
-  for (const {view} of before) {
-    view.savingMark = true;
+  for (const view of targets) view.savingMark = true;
+  for (const view of changed) {
     view.file.reviewed = reviewed;
     view.updateMark();
-    view.setExpanded(!reviewed);
+    if (!folder) view.setExpanded(!reviewed);
   }
-  if (scrollTo && reviewed && before[0].expanded && scrollTo.body.hidden) {
+  if (scrollTo && reviewed && before[0]?.expanded && scrollTo.body.hidden) {
     scrollTo.panel.scrollIntoView({block: 'start'});
   }
   if (focused && reviewed) scrollTo.toggle.focus({preventScroll: true});
@@ -448,18 +474,24 @@ async function saveReviewMarks(targets, reviewed, scrollTo = null) {
   updateReviewActions();
   showError(null);
   try {
-    await request('reviewed', {files: targets.map(view => String(view.index)), reviewed});
-    if (reviewed) for (const view of targets) view.selectFile.checked = false;
-    return true;
+    if (changed.length) await request('reviewed', {files: changed.map(view => String(view.index)), reviewed});
+    if (reviewed) for (const view of changed) view.selectFile.checked = false;
+    if (folder) {
+      const focusInsideFolder = folder.lastElementChild.contains(document.activeElement);
+      for (const view of targets) view.setExpanded(false);
+      changeFolderExpansion(folder, false);
+      if (focusInsideFolder) {
+        folder.firstElementChild.firstElementChild.focus({preventScroll: true});
+      }
+    }
   } catch (error) {
     for (const previous of before) {
       const {view} = previous;
       view.file.reviewed = previous.reviewed;
-      if (view.body.hidden === reviewed) view.setExpanded(previous.expanded);
+      if (!folder && view.body.hidden === reviewed) view.setExpanded(previous.expanded);
     }
     updateProgress();
     showError(error);
-    return false;
   } finally {
     for (const view of targets) {
       view.updateMark();
@@ -556,7 +588,7 @@ class FileView {
       this.toggle.focus({preventScroll: true});
     });
     this.toggle.addEventListener('click', () => this.setExpanded(this.body.hidden));
-    this.mark.addEventListener('change', () => saveReviewMarks([this], this.mark.checked, this));
+    this.mark.addEventListener('change', () => saveReviewMarks([this], this.mark.checked, {scrollTo: this}));
     this.diff.addEventListener('pointerdown', event => {
       const cell = event.target.closest('.diff-cell:not(.blank)');
       dragging = cell && event.button === 0 ? {view: this, side: cell.dataset.side} : null;
@@ -619,7 +651,7 @@ class FileView {
 
   updateCommentCount() {
     const count = comments.filter(comment => Number(comment.file) === this.index).length;
-    this.commentCount.textContent = commentCountLabel(count);
+    this.commentCount.textContent = countLabel(count, 'comment');
   }
 
   cell({row, index}, side, line, unified = false) {
@@ -657,7 +689,7 @@ class FileView {
     const hiddenComments = comments.filter(comment => comment.side && Number(comment.file) === this.index &&
       gap.index <= comment.end.row && comment.end.row < gap.index + gap.count).length;
     const lines = `${gap.count.toLocaleString()} unchanged ${gap.count === 1 ? 'line' : 'lines'}`;
-    const marker = hiddenComments ? ` · ${hiddenComments} ${hiddenComments === 1 ? 'comment' : 'comments'}` : '';
+    const marker = hiddenComments ? ` · ${countLabel(hiddenComments, 'comment')}` : '';
     row.append(element('span', 'hidden-context', lines + marker));
     return row;
   }
@@ -888,7 +920,7 @@ function updateSelection() {
     if (dragging?.view !== previous) delete previous.diff.dataset.selecting;
   }
   if (selection) {
-    selection.view.addComment.disabled = false;
+    selection.view.addComment.disabled = selection.view.savingMark;
     selection.view.diff.dataset.selecting = layout === 'split' ? selection.side : 'both';
   }
 }
@@ -941,28 +973,40 @@ function revealCommentEditor() {
   if (!editing) return;
   const viewport = window.visualViewport;
   const offset = viewport?.offsetTop ?? 0;
-  const viewportBottom = offset + (viewport?.height ?? innerHeight);
-  // Keep the last diff scrollable above the keyboard at the end of the page.
-  const covered = viewport?.scale === 1 ? Math.max(0, innerHeight - viewportBottom) : 0;
-  document.body.style.setProperty('--editor-bottom-inset', `${covered}px`);
+  const height = viewport?.height ?? innerHeight;
+  // Reserve scroll room for the keyboard independently of visual viewport pans.
+  const covered = viewport?.scale === 1 ? Math.max(0, innerHeight - height) : 0;
+  const inset = covered ? `${covered}px` : '';
+  const style = document.body.style;
+  if (style.getPropertyValue('--editor-bottom-inset') !== inset) {
+    style.setProperty('--editor-bottom-inset', inset);
+  }
   if (document.activeElement !== commentBody) return;
+  // Both the editor rect and these visible bounds are layout-viewport relative.
   const fileHeadingHeight = narrow.matches ? 0 : editing.view.panel.firstElementChild.offsetHeight;
   const top = Math.max(offset, masthead.getBoundingClientRect().bottom + fileHeadingHeight) + 8;
-  const bottom = viewportBottom - 8;
+  const bottom = offset + height - 8;
   const form = editor.getBoundingClientRect();
   const field = form.height <= bottom - top ? form : commentBody.getBoundingClientRect();
   if (field.top < top) window.scrollBy(0, field.top - top);
   else if (field.bottom > bottom) window.scrollBy(0, Math.min(field.bottom - bottom, field.top - top));
 }
 
+function scheduleEditorReveal() {
+  if (!editing || editorRevealFrame !== null) return;
+  editorRevealFrame = requestAnimationFrame(() => {
+    editorRevealFrame = null;
+    revealCommentEditor();
+  });
+}
+
 function focusEditor() {
   commentBody.focus({preventScroll: true});
-  revealCommentEditor();
-  requestAnimationFrame(revealCommentEditor);
+  scheduleEditorReveal();
 }
 
 function openEditor(target, body = target.body ?? '') {
-  if (savingComment) return;
+  if (savingComment || target.view.savingMark) return;
   if (editing) {
     focusEditor();
     return;
@@ -1013,8 +1057,8 @@ document.addEventListener('pointercancel', endDrag, true);
 document.addEventListener('selectionchange', updateSelection);
 layoutSelect.addEventListener('change', () => { layoutOverride = layoutSelect.value; updateLayout(); });
 narrow.addEventListener('change', updateLayout);
-window.visualViewport?.addEventListener('resize', revealCommentEditor);
-window.visualViewport?.addEventListener('scroll', revealCommentEditor);
+window.visualViewport?.addEventListener('resize', scheduleEditorReveal);
+commentBody.addEventListener('focus', scheduleEditorReveal);
 byId('cancel-comment').addEventListener('click', closeEditor);
 editor.addEventListener('keydown', event => {
   if (event.target === commentBody && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {

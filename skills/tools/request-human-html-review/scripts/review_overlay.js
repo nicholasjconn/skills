@@ -159,6 +159,7 @@ function createHtmlReview(options) {
   let hovered = null;
   const hoverStyleRoots = new WeakSet();
   let popup = null;
+  let popupPosition = null;
   let infoPanel = null;
   let draft = null;
   let draftSaveTimer = null;
@@ -471,6 +472,7 @@ function createHtmlReview(options) {
   const showOverlayLayer = () => showAsPopover(overlayLayer);
   const placeFixedElement = (node, clientX, clientY, origin = containingBlockOrigin()) => {
     // The keyboard can shrink the visible area while the page layout stays the same.
+    // Client coordinates and the visual viewport offsets share the layout origin.
     const viewport = node === popup ? window.visualViewport : null;
     const left = viewport?.offsetLeft ?? 0;
     const top = viewport?.offsetTop ?? 0;
@@ -489,16 +491,17 @@ function createHtmlReview(options) {
     const minY = clip.top;
     const maxX = Math.max(minX, clip.right - width);
     const maxY = Math.max(minY, clip.bottom - height);
-    const desiredX = clamp(clientX, minX, maxX);
-    const desiredY = clamp(clientY, minY, maxY);
-    restoreFixedPosition(node, {left: desiredX, top: desiredY}, origin);
+    const position = {left: clamp(clientX, minX, maxX), top: clamp(clientY, minY, maxY)};
+    restoreFixedPosition(node, position, origin);
+    return position;
   };
+  const placePopup = (origin) => placeFixedElement(popup, popupPosition.left, popupPosition.top, origin);
   // A modal dialog makes every node outside it inert. The overlay has to be a
   // descendant to stay clickable, but that is only a hit-testing hook: geometry
   // stays viewport-fixed and must not follow the host dialog's size.
   // Moving an open popover hides it, and CSS enter animations restart on
   // reparent — preserve screen position and do not replay those animations.
-  const applyOverlayPlacement = (toolbarRect, popupRect, infoRect) => {
+  const applyOverlayPlacement = (toolbarRect, infoRect) => {
     showOverlayLayer();
     const origin = containingBlockOrigin();
     if (toolbarRect) placeFixedElement(root, toolbarRect.left, toolbarRect.top, origin);
@@ -509,7 +512,7 @@ function createHtmlReview(options) {
     }
     if (popup) {
       showAsPopover(popup);
-      if (popupRect) placeFixedElement(popup, popupRect.left, popupRect.top, origin);
+      placePopup(origin);
     }
     refreshComments();
   };
@@ -524,11 +527,10 @@ function createHtmlReview(options) {
       return;
     }
     const toolbarRect = copyRect(root);
-    const popupRect = copyRect(popup);
     const infoRect = copyRect(infoPanel);
     hideAsPopover(overlayLayer);
     host.appendChild(overlayLayer);
-    applyOverlayPlacement(toolbarRect, popupRect, infoRect);
+    applyOverlayPlacement(toolbarRect, infoRect);
   };
   let overlayHostSyncFrame = null;
   const scheduleOverlayHostSync = () => {
@@ -948,6 +950,7 @@ function createHtmlReview(options) {
       popup.remove();
     }
     popup = null;
+    popupPosition = null;
     draft = null;
     queueDraftSave();
   };
@@ -1077,6 +1080,7 @@ function createHtmlReview(options) {
     closeInfo();
     closePopup();
     popup = document.createElement('div');
+    popupPosition = {left: clientX + 14, top: clientY + 14};
     popup.className = 'steward-review-ui steward-review-popup';
     popup.setAttribute('popover', 'manual');
     const number = item ? comments.indexOf(item) + 1 : null;
@@ -1110,8 +1114,7 @@ function createHtmlReview(options) {
       page_url: currentPageUrl(), page_title: document.title,
       created_at: new Date().toISOString()
     };
-    const placePopup = (nextX, nextY) => placeFixedElement(popup, nextX, nextY);
-    placePopup(clientX + 14, clientY + 14);
+    placePopup();
     playEnter(popup);
     if (!item && target?.range) {
       draft.provisionalId = `draft-${draft.id}`;
@@ -1142,7 +1145,9 @@ function createHtmlReview(options) {
       const rect = popup.getBoundingClientRect();
       const offsetX = event.clientX - rect.left;
       const offsetY = event.clientY - rect.top;
-      const move = (moveEvent) => placePopup(moveEvent.clientX - offsetX, moveEvent.clientY - offsetY);
+      const move = (moveEvent) => {
+        popupPosition = placeFixedElement(popup, moveEvent.clientX - offsetX, moveEvent.clientY - offsetY);
+      };
       const end = () => {
         dragHandle.removeEventListener('pointermove', move);
         dragHandle.removeEventListener('pointerup', end);
@@ -1480,18 +1485,29 @@ function createHtmlReview(options) {
   bindAnnotationListeners(document);
   discoverFrames(document);
   refreshComments();
-  window.addEventListener('resize', () => {
-    if (!active) return;
-    closeInfo();
-    applyOverlayPlacement(copyRect(root), copyRect(popup));
-  });
-  const fitPopupToViewport = () => {
-    if (!active || !popup) return;
-    const {left, top} = popup.getBoundingClientRect();
-    placeFixedElement(popup, left, top);
+  let viewportPlacementFrame = null;
+  let layoutResized = false;
+  const scheduleViewportPlacement = () => {
+    if (viewportPlacementFrame !== null) return;
+    viewportPlacementFrame = requestAnimationFrame(() => {
+      viewportPlacementFrame = null;
+      const updateLayout = layoutResized;
+      layoutResized = false;
+      if (!active) return;
+      if (updateLayout) {
+        closeInfo();
+        applyOverlayPlacement(copyRect(root));
+      } else if (popup) {
+        placePopup();
+      }
+    });
   };
-  window.visualViewport?.addEventListener('resize', fitPopupToViewport);
-  window.visualViewport?.addEventListener('scroll', fitPopupToViewport);
+  window.addEventListener('resize', () => {
+    layoutResized = true;
+    scheduleViewportPlacement();
+  });
+  window.visualViewport?.addEventListener('resize', scheduleViewportPlacement);
+  window.visualViewport?.addEventListener('scroll', scheduleViewportPlacement);
   // Route changes can leave the DOM untouched. Refresh explicitly rather than
   // relying on mutations, scroll, or resize to update page-scoped annotations.
   window.addEventListener('popstate', scheduleCommentRefresh);
@@ -1570,7 +1586,7 @@ function createHtmlReview(options) {
       active = true;
       overlayLayer.style.setProperty('display', 'block', 'important');
       syncOverlayHost();
-      applyOverlayPlacement(copyRect(root), copyRect(popup));
+      applyOverlayPlacement(copyRect(root));
     },
     // The host must durably archive/clear its draft before clearing the UI.
     clearComments() {

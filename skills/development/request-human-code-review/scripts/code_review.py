@@ -42,6 +42,9 @@ GIT_DIFF = (
 BINARY_NOTE = re.compile(rb"^(GIT binary patch|Binary files .* differ)\r?$", re.MULTILINE)
 LINE_TOKENS = re.compile(r"\w+|\s+|[^\w\s]")
 MAX_INLINE_LINE = 4096
+# Bound the cost of matching repeated tokens per comparison and per file.
+MAX_INLINE_TOKENS = 400
+MAX_INLINE_TOKEN_WORK = 4_000_000
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 
@@ -92,6 +95,7 @@ def markup_lines(path, source):
 
 def mark_inline_changes(rows):
     """Mark token changes in the same replacement lines shown together in split view."""
+    remaining_work = MAX_INLINE_TOKEN_WORK
     for changed, block in groupby(rows, key=lambda row: row["kind"] in ("add", "remove")):
         if not changed:
             continue
@@ -103,16 +107,32 @@ def mark_inline_changes(rows):
             if not before or not after or before == after or max(len(before), len(after)) > MAX_INLINE_LINE:
                 continue
             left, right = LINE_TOKENS.findall(before), LINE_TOKENS.findall(after)
-            match = SequenceMatcher(None, left, right)
-            if match.quick_ratio() < .5 or match.ratio() < .5:
+            work = len(left) * len(right)
+            if max(len(left), len(right)) > MAX_INLINE_TOKENS or work > remaining_work:
                 continue
-            left_spans, right_spans = [], []
-            for operation, a, b, c, d in match.get_opcodes():
-                if operation != "equal":
-                    if a < b:
-                        left_spans.append((a, b))
-                    if c < d:
-                        right_spans.append((c, d))
+            match = SequenceMatcher(None, left, right, autojunk=False)
+            if match.quick_ratio() < .5:
+                continue
+            remaining_work -= work
+            similarity = match.ratio()
+            # Repeated runs can make the longest contiguous match align a line
+            # with a shifted copy. Prefer in-place replacements if more tokens agree.
+            aligned = 0.0
+            if len(left) == len(right):
+                aligned = sum(a == b for a, b in zip(left, right)) / len(left)
+            if max(aligned, similarity) < .5:
+                continue
+            if aligned > similarity:
+                spans = []
+                for equal, positions in groupby(range(len(left)), key=lambda i: left[i] == right[i]):
+                    if not equal:
+                        run = list(positions)
+                        spans.append((run[0], run[-1] + 1))
+                left_spans = right_spans = spans
+            else:
+                edits = [edit for edit in match.get_opcodes() if edit[0] != "equal"]
+                left_spans = [(a, b) for _, a, b, _, _ in edits if a < b]
+                right_spans = [(c, d) for _, _, _, c, d in edits if c < d]
             for row, tokens, spans in ((old, left, left_spans), (new, right, right_spans)):
                 if spans:
                     # DOM text offsets count UTF-16 units, including surrogate pairs.
