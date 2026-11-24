@@ -194,17 +194,40 @@ function lineStats(file) {
 }
 
 async function request(route, data) {
-  const response = await fetch(route, data === undefined ? {} : {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
-  });
+  const unanswered = detail => new Error(`The review server did not answer (${detail}). Reload the page or restart the review.`);
+  let response;
+  try {
+    response = await fetch(route, data === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
+    });
+  } catch {
+    throw unanswered('no response');
+  }
   let value;
   try {
     value = await response.json();
   } catch {
-    throw new Error(`The review server did not answer (HTTP ${response.status}). Reload the page or restart the review.`);
+    throw unanswered(`HTTP ${response.status}`);
   }
-  if (!response.ok) throw new Error(value.error);
+  if (!response.ok) throw new Error(value?.error || `The review server returned HTTP ${response.status}.`);
   return value;
+}
+
+// The server takes one connection per diff, so the page loads a few at a time.
+const DIFF_LOADS = 6;
+const waitingDiffs = [];
+let loadingDiffs = 0;
+
+async function loadDiff(index) {
+  if (loadingDiffs < DIFF_LOADS) loadingDiffs += 1;
+  else await new Promise(resolve => waitingDiffs.push(resolve));
+  try {
+    return await request(`file/${index}`);
+  } finally {
+    const next = waitingDiffs.shift();
+    if (next) next();
+    else loadingDiffs -= 1;
+  }
 }
 
 function showError(error, node = byId('error')) {
@@ -673,7 +696,7 @@ class FileView {
     this.loading = true;
     this.diff.replaceChildren(element('div', 'diff-note', 'Loading diff…'));
     try {
-      this.data = await request(`file/${this.index}`);
+      this.data = await loadDiff(this.index);
       const {rows, media} = this.data;
       this.hasCode = rows.some(row => row.kind === 'hunk');
       if (media.binary || media.image) {

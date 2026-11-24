@@ -31,7 +31,8 @@ from tailnet import STARTUP_TIMEOUT as TAILNET_STARTUP_TIMEOUT, Tailnet
 
 ASSETS = Path(__file__).resolve().parent
 LIFETIME = 12 * 3600
-SNAPSHOT_TIMEOUT = 45
+# Covers the snapshot and building every diff, which both finish before the URL is shared.
+STARTUP_TIMEOUT = 600
 CONTEXT_PAGE = 20
 GIT_DIFF = (
     "--patch", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
@@ -224,6 +225,10 @@ class FileDiff:
         if not rows and not self.binary:
             rows.append({"kind": "note", "text": "No textual changes"})
         return rows
+
+    @cached_property
+    def response(self):
+        return json.dumps({"rows": self.rendered, "media": describe(self)}).encode()
 
     @cached_property
     def rendered(self):
@@ -522,10 +527,11 @@ class Review:
         self.scope, comparison, self.files = snapshot(args)
         # Build every diff response before the URL is shared, so a diff that cannot
         # be served fails startup instead of the reviewer's page.
-        self.diffs = []
         for file in self.files:
-            self.diffs.append(json.dumps({"rows": file.rendered, "media": describe(file)}).encode())
-            print(flush=True)  # Progress for start(), whose deadline bounds a stall, not the whole build.
+            try:
+                file.response
+            except Exception as error:
+                raise ValueError(f"Could not build the diff for {file.path}: {error}") from error
         self.assets = {name: ("text/javascript", (ASSETS / name).read_bytes())
                        for name in ("review.js", "images.js")}
         self.assets[""] = "text/html", (ASSETS / "review.html").read_bytes()
@@ -546,7 +552,7 @@ class Review:
             index, *asset = route.removeprefix("file/").split("/")
             file = self.file(index)
             if not asset:
-                return "application/json", self.diffs[int(index)]
+                return "application/json", file.response
             if len(asset) == 4 and asset[0] == "context":
                 return {"rows": file.context_page(int(asset[1]), int(asset[2]), asset[3])}
             if len(asset) == 2 and asset[0] == "image" and asset[1] in ("old", "new"):
@@ -680,9 +686,10 @@ def serve_owned(args):
     from threading import Event, Lock
 
     interrupted = Event()
+    # Building the review can take a while; until it exists, a signal ends the worker at once.
+    review = Review(args)
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, lambda *_: interrupted.set())
-    review = Review(args)
     lock = Lock()
     completed = Event()
     prefix = f"/{review.session}/"
@@ -799,25 +806,21 @@ def start(args):
     if args.tailscale:
         command.append("--tailscale")
     with log_path.open("xb") as log:
-        # Unbuffered, so select() sees every line the worker has written.
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=log, start_new_session=True, bufsize=0)
+                                   stderr=log, start_new_session=True)
     with process.stdin as handoff:
         try:
             handoff.write(f"{session}\n".encode())
             handoff.flush()
         except BrokenPipeError:
             pass
-    timeout = SNAPSHOT_TIMEOUT + (TAILNET_STARTUP_TIMEOUT if args.tailscale else 0)
+    timeout = STARTUP_TIMEOUT + (TAILNET_STARTUP_TIMEOUT if args.tailscale else 0)
     with process.stdout as output:
-        # The worker writes a blank line for each diff it builds, then the review URL.
-        while select.select([output], [], [], timeout)[0]:
+        if select.select([output], [], [], timeout)[0]:
             line = output.readline()
-            if line.strip():
+            if line:
                 print(line.decode().strip())
                 return
-            if not line:
-                break
         else:
             process.terminate()
             try:
