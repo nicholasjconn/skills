@@ -111,7 +111,7 @@ documentation:
   code-execution from live help only when a simpler command cannot express the
   behavior.
 - Use replay or recording artifacts only when they provide needed evidence.
-  Clean up large artifacts.
+  Clean up large artifacts unless repository rules say otherwise.
 
 ## Guardrails
 
