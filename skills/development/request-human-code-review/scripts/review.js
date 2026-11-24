@@ -202,19 +202,19 @@ async function request(route, data) {
   } catch {
     throw new Error('The review server did not answer.');
   }
-  const status = `The review server returned HTTP ${response.status}.`;
   let value;
   try {
     value = await response.json();
   } catch {
-    throw new Error(status);
+    throw new Error(`The review server sent an unreadable response (HTTP ${response.status}).`);
   }
-  if (!response.ok) throw new Error(value?.error || status);
+  if (!response.ok) throw new Error(value?.error || `The review server returned HTTP ${response.status}.`);
   return value;
 }
 
-// The server takes one connection per request. Loading a few diffs at a time
-// leaves connections free for the reviewer's own actions.
+// Behind an HTTP/2 proxy the browser does not limit simultaneous requests, and each
+// one becomes a connection to the server. Four also stays under the browser's own
+// HTTP/1.1 limit of six, which leaves room for the reviewer's actions.
 const DIFF_LOADS = 4;
 const waitingDiffs = [];
 let loadingDiffs = 0;

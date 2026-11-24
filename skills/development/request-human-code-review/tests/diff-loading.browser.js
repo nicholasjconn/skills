@@ -9,9 +9,9 @@ async (page) => {
     path: `src/file-${index}.txt`, change: 'M', additions: 1, deletions: 1, reviewed: false,
   }));
   const rows = [
-    {kind: 'hunk', text: '@@ -1 +1 @@', old_range: [1, 1], new_range: [1, 1]},
-    {kind: 'remove', old_line: 1, new_line: null, text: 'before'},
-    {kind: 'add', old_line: null, new_line: 1, text: 'after'},
+    {kind: 'hunk', index: 0, text: '@@ -1 +1 @@', old_range: '-1', new_range: '+1'},
+    {kind: 'remove', index: 1, old_line: 1, new_line: null, text: 'before'},
+    {kind: 'add', index: 2, old_line: null, new_line: 1, text: 'after'},
   ];
   const held = [];
   let inFlight = 0;
@@ -47,6 +47,9 @@ async (page) => {
     await page.goto(`${origin}/`);
     await until(async () => inFlight === limit && await page.locator('.diff-note').count() === count,
       () => `Expected ${limit} diff requests in flight while ${count} files wait, found ${inFlight}`);
+    // Nothing has been released, so a page without the limit would start more requests now.
+    await page.waitForTimeout(500);
+    assert(inFlight === limit, `Expected the page to hold at ${limit} diff requests, found ${inFlight}`);
     await until(async () => {
       held.splice(0).forEach(release => release());
       return await notes('Loading diff').count() === 0;
@@ -57,7 +60,7 @@ async (page) => {
     await page.setViewportSize({width: 1280, height: 720});
     for (const [kind, expected] of [
       ['refused', 'The review server did not answer.'],
-      ['empty', 'The review server returned HTTP 502.'],
+      ['empty', 'The review server sent an unreadable response (HTTP 502).'],
     ]) {
       failure = kind;
       await page.goto(`${origin}/`);
