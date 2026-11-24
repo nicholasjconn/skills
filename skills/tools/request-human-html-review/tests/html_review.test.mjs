@@ -288,6 +288,16 @@ test('filesystem failures leave cancellation available and idle reviews still ti
   assert.deepEqual(await idle.completion, { action: 'timeout', comments: [] })
 })
 
+test('CLI runs when launched directly or through a symlinked skill directory', t => {
+  const linkedSkill = join(temporaryDirectory(t), 'linked-skill')
+  symlinkSync(fileURLToPath(new URL('..', import.meta.url)), linkedSkill)
+  for (const launchPath of [script, join(linkedSkill, 'scripts', 'html_review.mjs')]) {
+    const result = spawnSync(process.execPath, [launchPath, '--help'], { encoding: 'utf8', timeout: 5000 })
+    assert.equal(result.status, 0, launchPath)
+    assert.match(result.stdout, /^Usage: node html_review\.mjs/, launchPath)
+  }
+})
+
 test('invalid async input leaves a diagnostic log', t => {
   const output = join(temporaryDirectory(t), 'feedback.json')
   const result = spawnSync(process.execPath, [script, 'http://example.com/page', '--async', '--output', output], { encoding: 'utf8', timeout: 5000 })

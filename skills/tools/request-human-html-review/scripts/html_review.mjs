@@ -898,4 +898,9 @@ async function main() {
   }
 }
 
-if (resolve(process.argv[1] || '') === resolve(SCRIPT_PATH)) process.exitCode = await main()
+// Compare real paths: client skill directories are often symlinks to the
+// canonical copy, and a lexical mismatch would silently skip main().
+function invokedDirectly() {
+  try { return realpathSync(process.argv[1] || '') === realpathSync(SCRIPT_PATH) } catch { return false }
+}
+if (invokedDirectly()) process.exitCode = await main()
