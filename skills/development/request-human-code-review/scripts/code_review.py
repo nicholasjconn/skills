@@ -17,9 +17,10 @@ import time
 from contextlib import ExitStack, closing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from functools import cache, cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from itertools import islice
+from itertools import accumulate, groupby, islice
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -39,6 +40,11 @@ GIT_DIFF = (
     "--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= ",
 )
 BINARY_NOTE = re.compile(rb"^(GIT binary patch|Binary files .* differ)\r?$", re.MULTILINE)
+LINE_TOKENS = re.compile(r"\w+|\s+|[^\w\s]")
+MAX_INLINE_LINE = 4096
+# Bound the cost of matching repeated tokens per comparison and per file.
+MAX_INLINE_TOKENS = 400
+MAX_INLINE_TOKEN_WORK = 4_000_000
 CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 
@@ -85,6 +91,57 @@ def markup_lines(path, source):
     except ClassNotFound:
         return []
     return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+
+
+def mark_inline_changes(rows):
+    """Mark token changes in the same replacement lines shown together in split view."""
+    remaining_work = MAX_INLINE_TOKEN_WORK
+    for changed, block in groupby(rows, key=lambda row: row["kind"] in ("add", "remove")):
+        if not changed:
+            continue
+        removed, added = [], []
+        for row in block:
+            (removed if row["kind"] == "remove" else added).append(row)
+        for old, new in zip(removed, added):
+            before, after = old["text"], new["text"]
+            if not before or not after or before == after or max(len(before), len(after)) > MAX_INLINE_LINE:
+                continue
+            left, right = LINE_TOKENS.findall(before), LINE_TOKENS.findall(after)
+            work = len(left) * len(right)
+            if max(len(left), len(right)) > MAX_INLINE_TOKENS or work > remaining_work:
+                continue
+            match = SequenceMatcher(None, left, right, autojunk=False)
+            if match.quick_ratio() < .5:
+                continue
+            remaining_work -= work
+            # Repeated runs can make the longest contiguous match align a line
+            # with a shifted copy. Keep a single replacement in place, and let
+            # the matcher preserve shifts when other alignments tie.
+            aligned = 0.0
+            single_replacement = False
+            if len(left) == len(right):
+                matching_tokens = sum(a == b for a, b in zip(left, right))
+                aligned = matching_tokens / len(left)
+                single_replacement = matching_tokens == len(left) - 1
+            similarity = aligned if single_replacement else match.ratio()
+            if max(aligned, similarity) < .5:
+                continue
+            if single_replacement or aligned > similarity:
+                spans = []
+                for equal, positions in groupby(range(len(left)), key=lambda i: left[i] == right[i]):
+                    if not equal:
+                        run = list(positions)
+                        spans.append((run[0], run[-1] + 1))
+                left_spans = right_spans = spans
+            else:
+                edits = [edit for edit in match.get_opcodes() if edit[0] != "equal"]
+                left_spans = [(a, b) for _, a, b, _, _ in edits if a < b]
+                right_spans = [(c, d) for _, _, _, c, d in edits if c < d]
+            for row, tokens, spans in ((old, left, left_spans), (new, right, right_spans)):
+                if spans:
+                    # DOM text offsets count UTF-16 units, including surrogate pairs.
+                    offsets = list(accumulate((len(token.encode("utf-16-le")) // 2 for token in tokens), initial=0))
+                    row["inline_changes"] = [(offsets[start], offsets[end]) for start, end in spans]
 
 
 @dataclass
@@ -171,6 +228,7 @@ class FileDiff:
     @cached_property
     def rendered(self):
         rows = [dict(row) for row in self.rows]
+        mark_inline_changes(rows)
         hunks = list(split_hunks(rows))
         sources = {}
         if self.repo and hunks:

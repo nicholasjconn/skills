@@ -111,5 +111,59 @@ async (page) => {
     reviewApi.clearComments();
     document.querySelector('#percentage-fixture').remove();
   });
-  return 'PASS: three native text selections, two numeric strokes with moving pins, and four percentage strokes with painted bounds';
+
+  // Keyboard resize and pan should clip the popup without losing where it was opened.
+  const originalViewport = page.viewportSize();
+  try {
+    await page.setViewportSize({width: 900, height: 700});
+    await page.evaluate(() => {
+      document.body.insertAdjacentHTML('beforeend',
+        '<button id="popup-target" style="position:fixed;left:240px;top:440px">Popup target</button>');
+    });
+    await page.locator('.sr-add').click();
+    await page.locator('#popup-target').click();
+    await saveComment();
+    await page.getByRole('button', {name: 'Open comment 1', exact: true}).click();
+    const popup = page.locator('.steward-review-popup:visible');
+    await popup.evaluate(node => Promise.all(node.getAnimations().map(animation => animation.finished)));
+    const before = await popup.boundingBox();
+    if (!before) throw new Error('Popup did not open');
+    await page.evaluate(() => {
+      Object.defineProperties(visualViewport, {
+        offsetLeft: {configurable: true, value: 300},
+        offsetTop: {configurable: true, value: 35},
+        width: {configurable: true, value: 500},
+        height: {configurable: true, value: 310},
+      });
+      visualViewport.dispatchEvent(new Event('resize'));
+      visualViewport.dispatchEvent(new Event('scroll'));
+      window.dispatchEvent(new Event('resize'));
+    });
+    await popup.evaluate(node => new Promise(resolve => requestAnimationFrame(() => {
+      const rect = node.getBoundingClientRect();
+      resolve(rect.toJSON());
+    }))).then(rect => {
+      if (rect.left < 311 || rect.right > 789 || rect.top < 46 || rect.bottom > 334) {
+        throw new Error(`Popup outside the panned viewport: ${JSON.stringify(rect)}`);
+      }
+    });
+    await page.evaluate(() => {
+      for (const name of ['offsetLeft', 'offsetTop', 'width', 'height']) delete visualViewport[name];
+      visualViewport.dispatchEvent(new Event('resize'));
+    });
+    const restored = await popup.evaluate(node => new Promise(resolve =>
+      requestAnimationFrame(() => resolve(node.getBoundingClientRect().toJSON()))));
+    if (Math.abs(restored.left - before.x) > 1 || Math.abs(restored.top - before.y) > 1) {
+      throw new Error('Popup did not return to its opening position');
+    }
+    await page.getByRole('button', {name: 'Close comment'}).click();
+  } finally {
+    await page.evaluate(() => {
+      for (const name of ['offsetLeft', 'offsetTop', 'width', 'height']) delete visualViewport[name];
+      document.querySelector('#popup-target')?.remove();
+      reviewApi.clearComments();
+    });
+    if (originalViewport) await page.setViewportSize(originalViewport);
+  }
+  return 'PASS: text and stroke selection, moving pins, and popup placement across keyboard resize and pan';
 }
