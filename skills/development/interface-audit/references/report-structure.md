@@ -1,6 +1,6 @@
 # Interface Audit Report Structure
 
-Write `.agent-layer/tmp/interface-audit.<run-id>.md`, using
+Write `interface-audit.<run-id>.md`, using
 `YYYYMMDD-HHMMSS-<short-rand>` for the run id.
 
 ## Required sections

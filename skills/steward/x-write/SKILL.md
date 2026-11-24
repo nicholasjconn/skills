@@ -76,10 +76,9 @@ explicitly names it. If he supplied no source material, ask for the rough idea
 first.
 
 Select only the content Nick wants transformed, excluding instructions about
-how to handle it, and preserve it as supplied. Write it to a unique file under
-`.agent-layer/tmp/x-write-inputs/`, set its mode to `0600`, and pass that path
-through `--input-file`; never interpolate raw source into a shell command. Pass
-Nick's shaping instructions through `--instructions`.
+how to handle it, and preserve it as supplied. Write it to a unique local file
+with mode `0600` and pass its path through `--input-file`. Keep raw source out of
+shell commands. Pass Nick's shaping instructions through `--instructions`.
 
 ```bash
 ./steward x write create-run --content-type post --input-file <source-file>
@@ -105,7 +104,8 @@ claims about the source.
 Invoke the `fact-check` skill when factual or current claims, exact attribution,
 or risky source claims matter. Nick's own results are not exempt. Give it the
 raw input, agreed targets, reply-target context, supplied links, files, and
-snippets, and a report path under the run directory.
+snippets. Put its report beside the `run_context.json` file reported by
+`create-run`.
 
 Write the result into `run_context.json` with this shape, leaving `status` as
 `not_requested` only when no fact-check was needed:
@@ -125,7 +125,7 @@ Write the result into `run_context.json` with this shape, leaving `status` as
       }
     ]
   },
-  "report_path": ".agent-layer/tmp/x-write/<run_id>/fact-check.md"
+  "report_path": "<storage-root>/x-write/<run_id>/fact-check.md"
 }
 ```
 

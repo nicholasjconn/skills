@@ -22,13 +22,12 @@ Use the Tavily CLI as Agent Layer's web retrieval path. Route the request to the
 - Do not install Tavily from this skill. Do not run `curl | bash`, package managers, or login commands unless the user explicitly asks for setup help.
 - Do not use Tavily MCP or Fetch MCP as a fallback.
 - Do not use `tvly crawl` in the default Agent Layer workflow.
-- When saving output or scratch data, write under `.agent-layer/tmp/`.
 - Run command-specific help if flags matter: `tvly <command> --help` or `tvly research <subcommand> --help`.
 
 ## Required artifacts
 
 - No artifact is required for quick lookups.
-- If saving intermediate retrieval output, use `.agent-layer/tmp/tavily-web.<run-id>.<type>.json` or `.agent-layer/tmp/tavily-web.<run-id>.<type>.md`.
+- If saving intermediate retrieval output, use `tavily-web.<run-id>.<type>.json` or `tavily-web.<run-id>.<type>.md`.
 - Final answers that depend on web retrieval must name or cite the source URLs used.
 
 ## Human checkpoints
@@ -80,7 +79,7 @@ Use `tvly research` when:
 
 - The selected Tavily command path matches the user's retrieval intent.
 - The answer names or cites source URLs when it depends on web retrieval.
-- Any saved retrieval artifacts are under `.agent-layer/tmp/` using the `tavily-web.<run-id>.<type>` naming pattern.
+- Any saved retrieval artifacts use the `tavily-web.<run-id>.<type>` naming pattern.
 - Missing CLI, authentication, inaccessible pages, timeouts, or incomplete coverage are reported explicitly.
 
 ## Final handoff

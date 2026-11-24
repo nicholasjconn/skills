@@ -46,7 +46,7 @@ Unless the user narrows the scope, include the entire current working tree.
    bash <skill_dir>/scripts/watch-pr-events.sh \
      --repo <owner/name> \
      --pr <pr-number> \
-     --log-file .agent-layer/tmp/ship-pr-events-<pr-number>.jsonl \
+     --log-file <event-log-path> \
      --interval-seconds 60 \
      --review-deadline-seconds 600
    ```
