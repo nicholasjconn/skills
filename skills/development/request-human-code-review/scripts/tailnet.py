@@ -15,7 +15,8 @@ from pathlib import Path
 
 COMMAND_TIMEOUT = 8
 VERIFY_TIMEOUT = 55
-STARTUP_TIMEOUT = 5 * COMMAND_TIMEOUT + VERIFY_TIMEOUT + 8
+# Budget for the port-collision retry and the configuration calls on both attempts.
+STARTUP_TIMEOUT = 5 * COMMAND_TIMEOUT + 2 * VERIFY_TIMEOUT + 8
 
 
 def configuration(*args):

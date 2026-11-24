@@ -5,13 +5,56 @@ import base64
 import re
 import zlib
 
-HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+HUNK = re.compile(rb"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 DIFF_HEADER = re.compile(rb"^diff --git ", re.MULTILINE)
 MAIL_HEADER = re.compile(rb"^From [0-9a-f]{40}(?:[0-9a-f]{24})? Mon Sep 17 00:00:00 2001\r?$", re.MULTILINE)
-MAIL_STAT = re.compile(rb"^---\r?\n(?: [^\r\n]* \|[^\r\n]*\r?\n)* [0-9]+ files? changed[^\r\n]*\r?$", re.MULTILINE)
+MAIL_STAT = re.compile(
+    rb"^---\r?\n(?: (?:[^\r\n]* \|[^\r\n]*|\.\.\.)\r?\n)*"
+    rb" [0-9]+ files? changed[^\r\n]*\r?\n(?: [^\r\n]*\r?\n)*\r?\n\Z",
+    re.MULTILINE,
+)
+BINARY_HEADER = re.compile(rb"^GIT binary patch\r?$", re.MULTILINE)
 QUOTED = rb'"(?:[^"\\]|\\.)*"'
 BINARY_BLOCK = re.compile(rb"^(literal|delta) (\d+)$")
 MAX_BINARY = 32 * 1024 * 1024
+
+
+def ends_with_hunk(section):
+    # Git can omit the space on a blank context line (diff.suppressBlankEmpty).
+    hunk = None
+    for hunk in HUNK.finditer(section):
+        pass
+    if hunk is None:
+        return False
+    old, new = int(hunk[2] or b"1"), int(hunk[4] or b"1")
+    lines = section[section.index(b"\n", hunk.end()) + 1:].removesuffix(b"\n").split(b"\n")
+    for line in lines:
+        if line.startswith(b"\\ No newline at end of file"):
+            continue
+        marker = line.removesuffix(b"\r")[:1] or b" "
+        if marker not in (b" ", b"+", b"-"):
+            return False
+        old -= marker != b"+"
+        new -= marker != b"-"
+        if old < 0 or new < 0:
+            return False
+    return old == new == 0
+
+
+def mail_patch_start(message):
+    """Find the run of Git file diffs after the commit message and optional stats."""
+    start = previous = None
+    for header in DIFF_HEADER.finditer(message):
+        offset = header.start()
+        if previous is None:
+            start = offset
+        elif message[offset - 3:offset].endswith((b"\n\n", b"\n\r\n")):
+            section = message[previous:offset]
+            if not ends_with_hunk(section) and (MAIL_STAT.search(section) or not BINARY_HEADER.search(section)):
+                # A mail preamble ends with a blank line. Binary blocks do too.
+                start = offset
+        previous = offset
+    return start
 
 
 def patch_mail_body(content):
@@ -23,11 +66,9 @@ def patch_mail_body(content):
         headers = re.split(rb"\r?\n\r?\n", message, maxsplit=1)[0]
         if re.search(rb"^Subject:.*\[.*\b0/[1-9][0-9]*\]", headers, re.MULTILINE):
             continue
-        stats = list(MAIL_STAT.finditer(message))
-        # The format-patch diffstat delimits the real patch from examples in the log.
-        start = DIFF_HEADER.search(message, stats[-1].end() if stats else 0)
-        if start:
-            patches.append(message[start.start():])
+        start = mail_patch_start(message)
+        if start is not None:
+            patches.append(message[start:])
     return b"\n".join(patches)
 
 
