@@ -16,12 +16,13 @@ async (page) => {
   const held = [];
   let inFlight = 0;
   let mostInFlight = 0;
-  let refuse = false;
+  let failure = null;
   await page.route(`${origin}/**`, async route => {
     const path = route.request().url().slice(origin.length + 1);
     if (path === 'data') return route.fulfill({json: {comparison: {patch: 'fixture.patch'}, comments: [], files}});
     if (path.startsWith('file/')) {
-      if (refuse) return route.abort('connectionrefused');
+      if (failure === 'refused') return route.abort('connectionrefused');
+      if (failure === 'empty') return route.fulfill({status: 502, body: ''});
       inFlight += 1;
       mostInFlight = Math.max(mostInFlight, inFlight);
       await new Promise(resolve => held.push(resolve));
@@ -48,15 +49,17 @@ async (page) => {
     assert(await notes('Could not load diff').count() === 0, 'Expected every diff to load');
     assert(await page.locator('.diff-note').count() === 0, 'Expected every loading note to be replaced by its diff');
 
-    refuse = true;
     await page.setViewportSize({width: 1280, height: 720});
-    await page.goto(`${origin}/`);
-    const failure = notes('Could not load diff').first();
-    await failure.waitFor();
-    const message = await failure.textContent();
-    assert(message.includes('The review server did not answer (no response). Reload the page or restart the review.'),
-      `Expected a refused diff request to explain what to do, found: ${message}`);
-    return `PASS: ${count} diffs loaded ${limit} at a time; a refused request explains what to do`;
+    for (const [kind, detail] of [['refused', 'no response'], ['empty', 'HTTP 502']]) {
+      failure = kind;
+      await page.goto(`${origin}/`);
+      const note = notes('Could not load diff').first();
+      await note.waitFor();
+      const message = await note.textContent();
+      assert(message.includes(`The review server did not answer (${detail}). Reload the page or restart the review.`),
+        `Expected a ${kind} diff response to explain what to do, found: ${message}`);
+    }
+    return `PASS: ${count} diffs loaded ${limit} at a time; refused and empty responses explain what to do`;
   } finally {
     held.splice(0).forEach(release => release());
     await page.goto('about:blank');
