@@ -41,12 +41,8 @@ the exact claims or material to check.
 
 ## Required Artifact
 
-Write one Markdown report to the user-specified path. If no path is supplied,
-write:
-
-```text
-.agent-layer/tmp/fact-check.<run-id>.report.md
-```
+Write one Markdown report to the user-specified path if supplied. Otherwise,
+name it `fact-check.<run-id>.report.md`.
 
 Create the parent directory if needed and create the report before evidence
 gathering so partial progress is recoverable.

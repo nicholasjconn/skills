@@ -3,12 +3,9 @@ name: audit-documentation
 description: >-
   Audit Markdown docs for static accuracy and cross-document consistency
   against the repo, fixing what is safe. Excludes memory files by default.
-compatibility: Requires access to project documentation and source. .agent-layer/tmp is a project scratch convention, not a requirement for the al executable.
 ---
 
 # audit-documentation
-
-Prerequisites: Requires access to project documentation and source. .agent-layer/tmp is a project scratch convention, not a requirement for the al executable.
 
 Audit Markdown against repository evidence; fix safe inaccuracies.
 

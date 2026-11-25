@@ -3,12 +3,9 @@ name: audit-tests
 description: >-
   Audit the existing test suite once for redundancy, misleading coverage,
   organization, and material behavioral gaps, directly fixing safe findings.
-compatibility: Requires the project test tools and access to source and tests. .agent-layer/tmp is a project scratch convention, not a requirement for al.
 ---
 
 # audit-tests
-
-Prerequisites: Requires the project test tools and access to source and tests. .agent-layer/tmp is a project scratch convention, not a requirement for al.
 
 Audit tests and fix clear negative-value or mechanical problems.
 
@@ -19,7 +16,7 @@ Audit tests and fix clear negative-value or mechanical problems.
 - Derive tiers from repository configuration. If ambiguous, audit concrete
   tests without tiers and report the limitation.
 
-Write `.agent-layer/tmp/audit-tests.<run-id>.report.md`, using
+Name the report `audit-tests.<run-id>.report.md`, using
 `YYYYMMDD-HHMMSS-<short-rand>` for `run-id`.
 
 ## Contract

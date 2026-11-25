@@ -27,8 +27,7 @@ Review merged GitHub PRs and post machine-readable retrospective comments.
 
 ## Output
 
-Set `run-id` to `YYYYMMDD-HHMMSS-<short-rand>` and write these files under
-`.agent-layer/tmp/`:
+Use `YYYYMMDD-HHMMSS-<short-rand>` for `run-id` in the output filenames.
 
 - `pr-retrospective.<run-id>.scores.jsonl` - one line per scored PR with `pr`,
   `url`, `scores`, `summary`, and `comment_file`.

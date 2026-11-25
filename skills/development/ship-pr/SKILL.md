@@ -42,11 +42,13 @@ Unless the user narrows the scope, include the entire current working tree.
    authoritative state first, including after a transient transport failure.
    Stop the watcher when the PR merges or the workflow ends.
 
+   Include the watcher log path when handing off PR monitoring.
+
    ```bash
    bash <skill_dir>/scripts/watch-pr-events.sh \
      --repo <owner/name> \
      --pr <pr-number> \
-     --log-file .agent-layer/tmp/ship-pr-events-<pr-number>.jsonl \
+     --log-file <event-log-path> \
      --interval-seconds 60 \
      --review-deadline-seconds 600
    ```
