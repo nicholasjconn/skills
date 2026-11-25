@@ -36,9 +36,11 @@ from tailnet import Tailnet
 ASSETS = Path(__file__).resolve().parent
 LIFETIME = 12 * 3600
 # The page holds every diff, so a file's diff and the whole review are both limited.
+# Lines are limited as well as bytes because each line costs memory and page size however short it is.
 MAX_FILE_DIFF = 500 * 1024
 MAX_REVIEW_FILES = 300
 MAX_REVIEW_DIFF = 3 * 1024 * 1024
+MAX_REVIEW_LINES = 100_000
 # Highlighting a file costs about as much as 4,000 characters of its text before the first line.
 # A worker process is worth starting for each 200,000 characters of such work.
 HIGHLIGHT_FILE_COST = 4_000
@@ -431,11 +433,14 @@ def split_hunks(rows):
 
 def check_size(files):
     """Refuse a comparison too large for one page, with the numbers the caller needs to narrow it."""
-    shown = sum(file.diff_size for file in files if not file.too_large)
-    if len(files) > MAX_REVIEW_FILES or shown > MAX_REVIEW_DIFF:
+    shown = [file for file in files if not file.too_large]
+    size = sum(file.diff_size for file in shown)
+    lines = sum(patch.count(b"\n") for file in shown if not file.binary for patch in file.patches)
+    if len(files) > MAX_REVIEW_FILES or size > MAX_REVIEW_DIFF or lines > MAX_REVIEW_LINES:
         raise ValueError(
-            f"This comparison is too large to review at once: {len(files)} changed files (limit {MAX_REVIEW_FILES}) "
-            f"and {shown / 2**20:.1f} MiB of diff (limit {MAX_REVIEW_DIFF // 2**20} MiB). "
+            f"This comparison is too large to review at once: {len(files)} changed files (limit {MAX_REVIEW_FILES}), "
+            f"{size / 2**20:.1f} MiB of diff (limit {MAX_REVIEW_DIFF // 2**20} MiB) "
+            f"and {lines:,} diff lines (limit {MAX_REVIEW_LINES:,}). "
             "Review a smaller range with --base and --head, or part of it with --patch.")
 
 

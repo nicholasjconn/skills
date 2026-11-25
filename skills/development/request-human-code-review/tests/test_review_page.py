@@ -177,7 +177,16 @@ class ReviewPage(unittest.TestCase):
         started = self.tool("start", "--repo", str(self.repo))
 
         self.assertNotEqual(started.returncode, 0)
-        self.assertRegex(started.stderr, r"8 changed files \(limit 300\) and 3\.\d MiB of diff \(limit 3 MiB\)")
+        self.assertRegex(started.stderr, r"8 changed files \(limit 300\), 3\.\d MiB of diff \(limit 3 MiB\)")
+
+    def test_start_refuses_a_comparison_with_too_many_lines_in_little_diff(self):
+        for number in range(3):
+            (self.repo / f"file_{number}.txt").write_text("\n" * 40000)
+
+        started = self.tool("start", "--repo", str(self.repo))
+
+        self.assertNotEqual(started.returncode, 0)
+        self.assertRegex(started.stderr, r"0\.2 MiB of diff \(limit 3 MiB\) and 120,0\d\d diff lines \(limit 100,000\)")
 
     def test_a_server_killed_while_building_leaves_no_process_behind(self):
         for number in range(40):
