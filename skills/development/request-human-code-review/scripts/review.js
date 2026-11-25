@@ -194,11 +194,21 @@ function lineStats(file) {
 }
 
 async function request(route, data) {
-  const response = await fetch(route, data === undefined ? {} : {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
-  });
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error);
+  let response;
+  try {
+    response = await fetch(route, data === undefined ? {} : {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data),
+    });
+  } catch {
+    throw new Error('The review server did not answer.');
+  }
+  let value;
+  try {
+    value = await response.json();
+  } catch {
+    throw new Error(`The review server sent an unreadable response (HTTP ${response.status}).`);
+  }
+  if (!response.ok) throw new Error(value?.error || `The review server returned HTTP ${response.status}.`);
   return value;
 }
 
