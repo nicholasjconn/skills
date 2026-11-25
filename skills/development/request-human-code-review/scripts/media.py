@@ -80,7 +80,8 @@ def patch_blobs(file, image_budget):
     return {side: image_budget.retain(blob.size, blob.content) for side, blob in candidates.items()}
 
 
-def git_blobs(git, repo, file, committed, *, image_budget=None):
+def git_objects(file, committed):
+    """Yield (side, path, object ID, in worktree) for each side whose bytes Git displayed."""
     old = file.baseline_blob
     new = file.head_blob
     for patch in file.patches:
@@ -91,52 +92,79 @@ def git_blobs(git, repo, file, committed, *, image_budget=None):
                 new = match[2]
     if not new.strip(b"0") and not any(INDEX.search(patch) for patch in file.patches):
         new = old  # only rename or mode metadata changed
+    if file.old_path and old and file.old_mode != b"160000":
+        yield "old", file.old_path, old, False
+    if file.new_path and file.new_mode != b"160000":
+        if new and (committed or new == old):
+            yield "new", file.new_path, new, False
+        elif new.strip(b"0"):
+            yield "new", file.new_path, new, True
 
-    def limit(path):
-        if image_budget is None:
-            return MAX_HIGHLIGHT_BYTES
-        return MAX_BINARY if image_type(path) else 0
 
-    def can_load(size, max_content):
-        return (0 < max_content and size <= max_content and
-                (image_budget is None or size <= image_budget.remaining or size < LFS_POINTER_LIMIT))
+def object_sizes(git, repo, ids):
+    if not ids:
+        return {}
+    lines = git(repo, "cat-file", "--batch-check", input_bytes=b"".join(item + b"\n" for item in ids)).splitlines()
+    sizes = {}
+    for object_id, line in zip(ids, lines):
+        size = line.rpartition(b" ")[2]
+        if size.isdigit():  # otherwise the object is missing
+            sizes[object_id] = int(size)
+    return sizes
 
-    retain = Blob if image_budget is None else image_budget.retain
 
-    def object_blob(object_id, max_content):
-        size = int(git(repo, "cat-file", "-s", object_id.decode()))
-        content = git(repo, "cat-file", "blob", object_id.decode()) if can_load(size, max_content) else None
-        return retain(size, content)
+def worktree_content(path, object_id, keep, need_size):
+    """Return (size, content or None) when the checkout still holds the bytes Git displayed."""
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            return None
+        with path.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            content = bytearray() if keep(size) else None
+            if content is None and not need_size:
+                return None
+            digest = hashlib.new("sha256" if len(object_id) == 64 else "sha1", f"blob {size}\0".encode())
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                if content is not None:
+                    content.extend(chunk)
+    except (FileNotFoundError, NotADirectoryError):
+        # The captured diff and baseline remain usable if the checkout changes.
+        return None
+    if digest.hexdigest().encode() != object_id:
+        return None
+    return size, bytes(content) if content is not None else None
 
-    blobs = {}
-    if file.old_path and old and (file.binary or limit(file.old_path)) and file.old_mode != b"160000":
-        blobs["old"] = object_blob(old, limit(file.old_path))
-    if not file.new_path or not (file.binary or limit(file.new_path)) or file.new_mode == b"160000":
-        return blobs
-    max_content = limit(file.new_path)
-    if new and (committed or new == old):
-        blobs["new"] = object_blob(new, max_content)
-        return blobs
-    if new.strip(b"0"):
-        candidate = repo / file.new_path
-        try:
-            if not stat.S_ISREG(candidate.lstat().st_mode):
-                return blobs
-            # Validate the exact bytes Git displayed before using the worktree
-            # as the source for the image or its size.
-            with candidate.open("rb") as stream:
-                size = os.fstat(stream.fileno()).st_size
-                if image_budget is None and size > max_content:
-                    return blobs
-                digest = hashlib.new("sha256" if len(new) == 64 else "sha1", f"blob {size}\0".encode())
-                content = bytearray() if can_load(size, max_content) else None
-                while chunk := stream.read(1024 * 1024):
-                    digest.update(chunk)
-                    if content is not None:
-                        content.extend(chunk)
-                if digest.hexdigest().encode() == new:
-                    blobs["new"] = retain(size, bytes(content) if content is not None else None)
-        except (FileNotFoundError, NotADirectoryError):
-            # The captured diff and baseline remain usable if the checkout changes.
-            pass
-    return blobs
+
+def load_blobs(git, read_object, repo, files, committed):
+    """Give each file its text to highlight (file.sources) and its binary sizes and image bytes (file.blobs).
+
+    Two Git processes serve the whole review: one reports every object's size, and read_object
+    returns the contents worth keeping. Files are taken in order so the image budget is spent in order.
+    """
+    budget = ImageBudget()
+    sides = [(file, *side) for file in files for side in git_objects(file, committed)]
+    sizes = object_sizes(git, repo, list(dict.fromkeys(
+        object_id for _, _, _, object_id, in_worktree in sides if not in_worktree)))
+    for file, side, path, object_id, in_worktree in sides:
+        media = file.binary or image_type(path) is not None
+
+        def keep(size):
+            return ((file.has_code and size <= MAX_HIGHLIGHT_BYTES) or
+                    (image_type(path) is not None and size <= MAX_BINARY and
+                     (size <= budget.remaining or size < LFS_POINTER_LIMIT)))
+
+        if in_worktree:
+            found = worktree_content(repo / path, object_id, keep, media)
+            if found is None:
+                continue
+            size, content = found
+        elif object_id in sizes:
+            size = sizes[object_id]
+            content = read_object(object_id) if keep(size) else None
+        else:
+            continue
+        if file.has_code and content is not None and size <= MAX_HIGHLIGHT_BYTES:
+            file.sources[side] = content
+        if media:
+            file.blobs[side] = budget.retain(size, content if image_type(path) and size <= MAX_BINARY else None)

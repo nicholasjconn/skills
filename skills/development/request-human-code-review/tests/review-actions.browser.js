@@ -13,16 +13,19 @@ async (page) => {
   let finishSave;
   let commentStarted;
   let finishComment;
-  const files = [...paths, outside].map((path, index) => ({
-    path, change: 'M', additions: 0, deletions: 0, reviewed: index === 2,
+  const files = [...paths, outside].map(path => ({
+    path, change: 'M', additions: 0, deletions: 0, rows: [], media: {},
   }));
+  const snapshot = {comparison: {patch: 'fixture.patch'}, files};
+  const progress = {comments: [existingComment], reviewed: files.map((_, index) => index === 2)};
+  let template;
   const serveReview = async route => {
     const path = route.request().url().slice(origin.length + 1);
-    if (path === 'data') {
-      return route.fulfill({json: {comparison: {patch: 'fixture.patch'}, comments: [existingComment], files}});
-    }
-    if (path.startsWith('file/')) {
-      return route.fulfill({json: {rows: [], media: {}}});
+    if (path === '') {
+      // The review server fills these two data blocks when it serves the page.
+      const body = template.replace('REVIEW_SNAPSHOT', () => JSON.stringify(snapshot))
+        .replace('REVIEW_STATE', () => JSON.stringify(progress));
+      return route.fulfill({contentType: 'text/html', body});
     }
     if (path === 'reviewed') {
       posts.push(route.request().postDataJSON());
@@ -80,6 +83,7 @@ async (page) => {
 
   try {
     await page.setViewportSize({width: 1200, height: 840});
+    template = await (await page.goto(`${origin}/review.html`)).text();
     await page.goto(origin);
     await folderTrigger.press('Enter');
     await markFolder.waitFor();

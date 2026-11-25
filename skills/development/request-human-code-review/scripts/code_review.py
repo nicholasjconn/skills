@@ -3,8 +3,10 @@
 
 import argparse
 import fcntl
+import gzip
 import hashlib
 import json
+import multiprocessing
 import os
 import re
 import secrets
@@ -13,26 +15,36 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
-from contextlib import ExitStack, closing
-from dataclasses import dataclass, field
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import cache, cached_property
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from itertools import accumulate, groupby, islice
+from itertools import accumulate, count, groupby, islice
 from pathlib import Path
 from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
-from media import ImageBudget, describe, git_blobs, image_type, patch_blobs
+from media import ImageBudget, describe, image_type, load_blobs, patch_blobs
 from patch_input import DIFF_HEADER, HUNK, file_paths, patch_sections
-from tailnet import STARTUP_TIMEOUT as TAILNET_STARTUP_TIMEOUT, Tailnet
+from tailnet import Tailnet
 
 ASSETS = Path(__file__).resolve().parent
 LIFETIME = 12 * 3600
-SNAPSHOT_TIMEOUT = 45
-CONTEXT_PAGE = 20
+# The page holds every diff, so a file's diff and the whole review are both limited.
+# Lines are limited as well as bytes because each line costs memory and page size however short it is.
+MAX_FILE_DIFF = 500 * 1024
+MAX_REVIEW_FILES = 300
+MAX_REVIEW_DIFF = 3 * 1024 * 1024
+MAX_REVIEW_LINES = 100_000
+# Highlighting a file costs about as much as 4,000 characters of its text before the first line.
+# A worker process is worth starting for each 200,000 characters of such work.
+HIGHLIGHT_FILE_COST = 4_000
+HIGHLIGHT_WORKER_LOAD = 200_000
 GIT_DIFF = (
     "--patch", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
     "--no-relative", "--submodule=short", "--ignore-submodules=dirty", "-U3",
@@ -55,19 +67,42 @@ def git_local_variables():
     return local
 
 
-def git(repo, *args, allowed=(0,), input_bytes=None):
+def git_command(repo, *args):
     local = git_local_variables()
     environment = {name: value for name, value in os.environ.items() if name not in local}
     environment["LC_ALL"] = "C"
+    return ["git", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false", "-C", repo, *args], environment
+
+
+def git(repo, *args, allowed=(0,), input_bytes=None):
+    command, environment = git_command(repo, *args)
     process = subprocess.run(
-        ["git", "--no-optional-locks", "-c", "diff.suppressBlankEmpty=false", "-C", repo, *args], input=input_bytes,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-        env=environment,
+        command, input=input_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=environment,
     )
     if process.returncode not in allowed:
         error = process.stderr.decode(errors="replace").strip()
         raise ValueError(f"git {args[0]} failed in {repo}: {error or process.returncode}")
     return process.stdout
+
+
+@contextmanager
+def object_reader(repo):
+    """Yield read(object ID), answered by one Git process for the whole review."""
+    command, environment = git_command(repo, "cat-file", "--batch")
+    with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=environment) as process:
+        def read(object_id):
+            process.stdin.write(object_id + b"\n")
+            process.stdin.flush()
+            size = process.stdout.readline().rpartition(b" ")[2].strip()
+            content = process.stdout.read(int(size) + 1)[:-1] if size.isdigit() else None
+            if content is None or len(content) != int(size):
+                raise ValueError(f"git cat-file could not read {object_id.decode()} in {repo}")
+            return content
+
+        try:
+            yield read
+        finally:
+            process.stdin.close()
 
 
 def stamp():
@@ -79,6 +114,7 @@ def display(data):
 
 
 def markup_lines(path, source):
+    """Return one highlighted HTML string per line, or None when no lexer handles the file."""
     from pygments import highlight
     from pygments.formatters import HtmlFormatter
     from pygments.lexers import get_lexer_for_filename
@@ -89,8 +125,21 @@ def markup_lines(path, source):
     try:
         lexer = get_lexer_for_filename(path, source, stripnl=False, ensurenl=False)
     except ClassNotFound:
-        return []
-    return highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+        return None
+    lines = highlight(source, lexer, HtmlFormatter(nowrap=True)).split("\n")
+    # The formatter ends its last line even when the source does not.
+    if len(lines) == source.count("\n") + 2 and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def end_with_server():
+    """End a highlighting worker when its server dies, where it would otherwise wait for work forever."""
+    def watch():
+        multiprocessing.parent_process().join()
+        os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
 
 
 def mark_inline_changes(rows):
@@ -155,8 +204,9 @@ class FileDiff:
     old_mode: bytes = b""
     new_mode: bytes = b""
     blobs: dict = field(default_factory=dict)
-    repo: Path | None = None
-    committed: bool = False
+    sources: dict = field(default_factory=dict)
+    rendered: list = field(default_factory=list)
+    hidden: bytes | None = None
 
     @property
     def path(self):
@@ -181,7 +231,21 @@ class FileDiff:
         }
 
     @cached_property
+    def diff_size(self):
+        """Bytes of diff text. A binary change is summarized or previewed, never shown as text."""
+        return 0 if self.binary else sum(len(patch) for patch in self.patches)
+
+    @property
+    def too_large(self):
+        return self.diff_size > MAX_FILE_DIFF
+
+    @cached_property
     def line_counts(self):
+        if self.too_large:
+            # Count without building a row for every line.
+            hunks = [patch[patch.find(b"\n@@"):] for patch in self.patches]
+            return {"additions": sum(part.count(b"\n+") for part in hunks),
+                    "deletions": sum(part.count(b"\n-") for part in hunks)}
         return {
             "additions": sum(row["kind"] == "add" for row in self.rows),
             "deletions": sum(row["kind"] == "remove" for row in self.rows),
@@ -189,6 +253,9 @@ class FileDiff:
 
     @cached_property
     def rows(self):
+        if self.too_large:
+            return [{"kind": "note", "text": f"Diff not shown: {self.diff_size / 2**20:.1f} MiB is over the "
+                                             f"{MAX_FILE_DIFF // 1024} KiB limit for one file."}]
         rows = []
         for patch in self.patches:
             old_left = new_left = 0
@@ -226,27 +293,44 @@ class FileDiff:
         return rows
 
     @cached_property
-    def rendered(self):
+    def has_code(self):
+        return any("old_line" in row for row in self.rows)
+
+    @cached_property
+    def texts(self):
+        """Each side's whole text, where Git supplied it."""
+        return {side: display(content).replace("\r\n", "\n") for side, content in self.sources.items()}
+
+    def hunk_sources(self, rows, side):
+        """Yield (rows, text) for one side of each hunk, to highlight when the whole file is not available."""
+        line_key = f"{side}_line"
+        for hunk in split_hunks(rows):
+            code_rows = [row for row in hunk if row.get(line_key) is not None]
+            if code_rows:
+                yield code_rows, "\n".join(row["text"] for row in code_rows) + "\n"
+
+    @property
+    def highlight_cost(self):
+        """About how many characters this file gives the highlighter, counting what each side costs to begin."""
+        sides = (self.old_path is not None) + (self.new_path is not None)
+        return sides * HIGHLIGHT_FILE_COST + (sum(map(len, self.sources.values())) or self.diff_size)
+
+    def render(self):
+        """Build the rows of the file's diff, with the lines hidden between hunks carried inside each gap."""
+        markup = cache(markup_lines)
         rows = [dict(row) for row in self.rows]
         mark_inline_changes(rows)
-        hunks = list(split_hunks(rows))
-        sources = {}
-        if self.repo and hunks:
-            try:
-                sources = git_blobs(git, self.repo, self, self.committed)
-            except (OSError, ValueError):
-                # Source files can change or disappear after the diff was captured.
-                pass
         for side, path in (("old", self.old_path), ("new", self.new_path)):
             if path is None:
                 continue
             line_key = f"{side}_line"
             html_key = f"{side}_html"
-            blob = sources.get(side)
-            if blob is not None and blob.content is not None:
-                source = display(blob.content).replace("\r\n", "\n")
-                source_lines = source.split("\n")
-                highlighted = markup_lines(path, source)
+            text = self.texts.get(side)
+            if text is not None:
+                source_lines = text.split("\n")
+                highlighted = markup(path, text)
+                if highlighted is None:
+                    continue
                 if len(highlighted) == len(source_lines):
                     for row in rows:
                         line = row.get(line_key)
@@ -254,24 +338,34 @@ class FileDiff:
                             row[html_key] = highlighted[line - 1]
                     continue
             # Patches may contain only the hunks. Keep the two lexer states separate.
-            for hunk in hunks:
-                code_rows = [row for row in hunk if row.get(line_key) is not None]
-                if not code_rows:
-                    continue
-                source = "\n".join(row["text"] for row in code_rows) + "\n"
-                highlighted = markup_lines(path, source)
+            for code_rows, source in self.hunk_sources(rows, side):
+                highlighted = markup(path, source)
+                if highlighted is None:
+                    break
                 if len(highlighted) == len(code_rows) + 1:
-                    for row, markup in zip(code_rows, highlighted):
-                        row[html_key] = markup
+                    for row, html in zip(code_rows, highlighted):
+                        row[html_key] = html
 
-        baseline = sources.get("old")
-        gaps = self.context_gaps(baseline.content) if baseline and baseline.content else {}
+        baseline = self.sources.get("old")
+        gaps = self.context_gaps(baseline) if baseline else {}
+        if gaps:
+            # Unchanged lines come from the immutable Git baseline, even in a worktree review.
+            lines = self.texts["old"].split("\n")
+            highlighted = markup(self.old_path, self.texts["old"])
+            if highlighted is not None and len(highlighted) != len(lines):
+                highlighted = None
         # Reserve row indices for hidden lines so expanding a gap cannot move a comment anchor.
         visible = []
         index = 0
         for position in range(len(rows) + 1):
             if gap := gaps.get(position):
-                visible.append({**gap, "kind": "gap", "index": index})
+                first, last = gap["old"] - 1, gap["old"] - 1 + gap["count"]
+                gap = {**gap, "kind": "gap", "index": index, "text": [line.removesuffix("\r") for line in lines[first:last]]}
+                if highlighted is not None:
+                    gap["html"] = highlighted[first:last]
+                if last == len(lines) and not baseline.endswith(b"\n"):
+                    gap["no_newline"] = True
+                visible.append(gap)
                 index += gap["count"]
             if position < len(rows):
                 rows[position]["index"] = index
@@ -304,46 +398,22 @@ class FileDiff:
                                     "up": False, "down": True}
         return gaps
 
-    def context_rows(self, gap, start, stop, *, highlighted=False):
-        # Unchanged lines come from the immutable Git baseline, even in a worktree review.
-        baseline = git(self.repo, "cat-file", "blob", self.baseline_blob.decode())
-        source = display(baseline).replace("\r\n", "\n")
-        lines = source.split("\n")
-        markup = markup_lines(self.old_path, source) if highlighted else []
-        for index in range(start, stop):
-            offset = index - gap["index"]
-            old, new = gap["old"] + offset, gap["new"] + offset
-            row = {"kind": "context", "index": index, "old_line": old, "new_line": new,
-                   "text": lines[old - 1].removesuffix("\r")}
-            if len(markup) == len(lines):
-                row.update(old_html=markup[old - 1], new_html=markup[old - 1])
-            if old == len(lines) and not baseline.endswith(b"\n"):
-                row["no_newline"] = True
-            yield row
-
-    def context_page(self, start, count, direction):
-        if start < 0 or count < 1 or direction not in ("up", "down"):
-            raise ValueError("Invalid context range")
-        stop = start + count
-        for gap in self.rendered:
-            if (gap["kind"] == "gap" and gap[direction] and
-                    gap["index"] <= start < stop <= gap["index"] + gap["count"]):
-                if direction == "up":
-                    start = max(start, stop - CONTEXT_PAGE)
-                else:
-                    stop = min(stop, start + CONTEXT_PAGE)
-                return list(self.context_rows(gap, start, stop, highlighted=True))
-        raise ValueError("That range has no expandable context")
-
     def selected_rows(self, start, stop):
+        gaps = count()
+        hidden = None
         for row in self.rendered:
             index = row["index"]
             if index >= stop:
                 break
             if row["kind"] == "gap":
-                first, last = max(start, index), min(stop, index + row["count"])
-                if first < last:
-                    yield from self.context_rows(row, first, last)
+                position = next(gaps)
+                if start < index + row["count"]:
+                    # A comment on lines the reviewer expanded quotes them from the file's hidden lines.
+                    hidden = hidden or json.loads(gzip.decompress(self.hidden))
+                    for line in range(max(start, index), min(stop, index + row["count"])):
+                        offset = line - index
+                        yield {"kind": "context", "index": line, "old_line": row["old"] + offset,
+                               "new_line": row["new"] + offset, "text": hidden[position]["text"][offset]}
             elif start <= index:
                 yield row
 
@@ -359,6 +429,19 @@ def split_hunks(rows):
             hunk.append(row)
     if hunk:
         yield hunk
+
+
+def check_size(files):
+    """Refuse a comparison too large for one page, with the numbers the caller needs to narrow it."""
+    shown = [file for file in files if not file.too_large]
+    size = sum(file.diff_size for file in shown)
+    lines = sum(patch.count(b"\n") for file in shown if not file.binary for patch in file.patches)
+    if len(files) > MAX_REVIEW_FILES or size > MAX_REVIEW_DIFF or lines > MAX_REVIEW_LINES:
+        raise ValueError(
+            f"This comparison is too large to review at once: {len(files)} changed files (limit {MAX_REVIEW_FILES}), "
+            f"{size / 2**20:.1f} MiB of diff (limit {MAX_REVIEW_DIFF // 2**20} MiB) "
+            f"and {lines:,} diff lines (limit {MAX_REVIEW_LINES:,}). "
+            "Review a smaller range with --base and --head, or part of it with --patch.")
 
 
 def tracked_diffs(output):
@@ -412,16 +495,21 @@ def git_snapshot(args):
     tracked = git(repo, "diff", "--raw", "-z", "--abbrev=64", "--find-renames", *GIT_DIFF, *revisions, "--")
     files = tracked_diffs(tracked)
     if not head:
-        for raw_path in git(repo, "ls-files", "-z", "--others", "--exclude-standard").split(b"\0"):
-            if not raw_path:
-                continue
-            path = os.fsdecode(raw_path)
+        untracked = [os.fsdecode(path) for path in
+                     git(repo, "ls-files", "-z", "--others", "--exclude-standard").split(b"\0") if path]
+        for path in untracked:
             if path.endswith("/"):
                 raise ValueError(f"Untracked nested repository {path!r}. Add or ignore it before reviewing.")
+
+        def added(path):
             patch = git(repo, "diff", "--no-index", *GIT_DIFF, "--", os.devnull, path, allowed=(0, 1))
             if not patch.startswith(b"diff --git "):
                 raise ValueError(f"Git returned no patch for untracked file {path!r}")
-            files.append(FileDiff(None, path, "?", (patch,)))
+            return FileDiff(None, path, "?", (patch,))
+
+        # Git has no batch form of this diff, so each untracked file costs one process.
+        with ThreadPoolExecutor() as pool:
+            files.extend(pool.map(added, untracked))
     scope = json.dumps([
         str(repo), args.base, args.head, args.merge_base,
         (branch or current) if args.head in (None, "HEAD") or args.base == "HEAD" else None,
@@ -431,12 +519,9 @@ def git_snapshot(args):
         "head": args.head, "head_commit": head, "merge_base": args.merge_base,
         "checkout_branch": branch.removeprefix("refs/heads/") or None, "captured_at": stamp(),
     }
-    image_budget = ImageBudget()
-    for file in files:
-        file.repo = repo
-        file.committed = bool(head)
-        if file.binary or image_type(file.old_path) or image_type(file.new_path):
-            file.blobs = git_blobs(git, repo, file, bool(head), image_budget=image_budget)
+    check_size(files)
+    with object_reader(repo) as read_object:
+        load_blobs(git, read_object, repo, files, bool(head))
     return scope, comparison, files
 
 
@@ -444,21 +529,61 @@ def patch_snapshot(path):
     path = path.resolve()
     content = path.read_bytes()
     files = []
-    image_budget = ImageBudget()
     for patch in patch_sections(content):
         old, new, status = file_paths(patch)
-        file = FileDiff(os.fsdecode(old) if old else None, os.fsdecode(new) if new else None, status, (patch,))
-        if file.binary:
-            file.blobs = patch_blobs(file, image_budget)
-        files.append(file)
+        files.append(FileDiff(os.fsdecode(old) if old else None, os.fsdecode(new) if new else None, status, (patch,)))
     if content.strip() and not files:
         raise ValueError(f"No unified diff found in {path}")
+    check_size(files)
+    image_budget = ImageBudget()
+    for file in files:
+        if file.binary:
+            file.blobs = patch_blobs(file, image_budget)
     return json.dumps(["patch", str(path)]), {"patch": str(path), "captured_at": stamp()}, files
 
 
+def build(file):
+    """Return the rows the page shows for one file, and the lines hidden in its gaps, compressed.
+
+    The page asks for a file's hidden lines when the reviewer first expands one of its gaps.
+    """
+    shown, hidden = [], []
+    for row in file.render():
+        if row["kind"] == "gap":
+            hidden.append({key: row.pop(key) for key in ("text", "html", "no_newline") if key in row})
+        shown.append(row)
+    packed = json.dumps(hidden, separators=(",", ":")).encode()
+    return shown, gzip.compress(packed, compresslevel=1) if hidden else None
+
+
+def render(files):
+    """Build every file, across CPU cores when there is enough to highlight to repay starting them.
+
+    Workers return hidden lines already compressed, so the server never holds them all at once.
+    """
+    order = sorted(files, key=lambda file: file.highlight_cost, reverse=True)
+    workers = min(os.cpu_count() or 1, len(order), sum(file.highlight_cost for file in order) // HIGHLIGHT_WORKER_LOAD)
+    if workers > 1:
+        with ProcessPoolExecutor(workers, initializer=end_with_server) as pool:
+            # A worker needs the diff and the text, not the image previews.
+            built = list(pool.map(build, [replace(file, blobs={}) for file in order]))
+    else:
+        built = [build(file) for file in order]
+    for file, (file.rendered, file.hidden) in zip(order, built):
+        file.sources = {}
+
+
 def snapshot(args):
+    """Capture the comparison and build every file's view, so the page needs nothing more from Git."""
     scope, comparison, files = patch_snapshot(args.patch) if args.patch else git_snapshot(args)
-    return scope, comparison, sorted(files, key=lambda item: (item.path, item.change))
+    files.sort(key=lambda item: (item.path, item.change))
+    render(files)
+    return scope, comparison, files
+
+
+def embed(value):
+    """Encode JSON for an HTML data block, where a literal "<" could end the block."""
+    return json.dumps(value, separators=(",", ":")).replace("<", "\\u003c").encode()
 
 
 def annotation(file, target):
@@ -522,9 +647,19 @@ class Review:
         self.scope, comparison, self.files = snapshot(args)
         self.assets = {name: ("text/javascript", (ASSETS / name).read_bytes())
                        for name in ("review.js", "images.js")}
-        self.assets[""] = "text/html", (ASSETS / "review.html").read_bytes()
         self.assets["review.css"] = "text/css", ((ASSETS / "review.css").read_bytes() +
                                                   HtmlFormatter(nobackground=True).get_style_defs(".source").encode())
+        # Everything is built here. The page holds the diffs and each request adds the reviewer's progress;
+        # a file's hidden lines wait, compressed, until the reviewer first expands one of its gaps.
+        parts = (ASSETS / "review.html").read_bytes().split(b"REVIEW_STATE")
+        if len(parts) != 2 or parts[0].count(b"REVIEW_SNAPSHOT") != 1:
+            raise ValueError("review.html is missing its data blocks")
+        self.hidden = {f"file/{index}/hidden": file.hidden for index, file in enumerate(self.files) if file.hidden}
+        diffs = embed({"comparison": comparison, "files": [
+            {**file.metadata(), **file.line_counts, "rows": file.rendered, "media": describe(file)}
+            for file in self.files
+        ]})
+        self.document = parts[0].replace(b"REVIEW_SNAPSHOT", diffs), parts[1]
         payload = {"session": self.session, "comparison": comparison, "comments": {}}
         with closing(connect(self.state)) as db, db:
             db.execute("INSERT INTO sessions VALUES (?, 'pending', ?)", (self.session, json.dumps(payload)))
@@ -533,29 +668,29 @@ class Review:
         status, raw = db.execute("SELECT status, payload FROM sessions WHERE id = ?", (self.session,)).fetchone()
         return status, json.loads(raw)
 
-    def get_snapshot(self, route):
+    def asset(self, route):
         if route in self.assets:
             return self.assets[route]
-        if route.startswith("file/"):
-            index, *asset = route.removeprefix("file/").split("/")
+        if route in self.hidden:
+            return "application/json", gzip.decompress(self.hidden[route])
+        index, _, side = route.removeprefix("file/").partition("/image/")
+        if route.startswith("file/") and side in ("old", "new"):
             file = self.file(index)
-            if not asset:
-                return {"rows": file.rendered, "media": describe(file)}
-            if len(asset) == 4 and asset[0] == "context":
-                return {"rows": file.context_page(int(asset[1]), int(asset[2]), asset[3])}
-            if len(asset) == 2 and asset[0] == "image" and asset[1] in ("old", "new"):
-                side = asset[1]
-                blob = file.blobs.get(side)
-                if blob is not None and blob.content is not None:
-                    return image_type(getattr(file, f"{side}_path")), blob.content
+            blob = file.blobs.get(side)
+            if blob is not None and blob.content is not None:
+                return image_type(getattr(file, f"{side}_path")), blob.content
         raise KeyError(route)
 
-    def get_data(self, db):
+    def page(self, db):
         status, payload = self.load(db)
         if status != "pending":
             raise ValueError("This review has ended")
-        return {"comparison": payload["comparison"], "expires_at": self.expires_at, "files": self.file_statuses(db),
-                "comments": list(payload["comments"].values())}
+        progress = embed({
+            "expires_at": self.expires_at, "comments": list(payload["comments"].values()),
+            "reviewed": [file["reviewed"] for file in self.file_statuses(db)],
+        })
+        before, after = self.document
+        return "text/html", before + progress + after
 
     def file(self, index):
         if not (isinstance(index, str) and index.isascii() and index.isdecimal() and int(index) < len(self.files)):
@@ -673,10 +808,11 @@ def serve(args):
 def serve_owned(args):
     from threading import Event, Lock
 
+    # Until the review exists there is nothing to close, so a signal during the build ends the worker at once.
+    review = Review(args)
     interrupted = Event()
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, lambda *_: interrupted.set())
-    review = Review(args)
     lock = Lock()
     completed = Event()
     prefix = f"/{review.session}/"
@@ -688,6 +824,9 @@ def serve_owned(args):
             else:
                 mime, data = "application/json", json.dumps(response).encode()
             self.send_response(code)
+            if not mime.startswith("image/") and "gzip" in self.headers.get("Accept-Encoding", ""):
+                data = gzip.compress(data, compresslevel=1)
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Type", f"{mime}; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Content-Security-Policy", "default-src 'none'; sandbox" if mime.startswith("image/") else CSP)
@@ -716,11 +855,11 @@ def serve_owned(args):
                     if not 0 < length <= 256 * 1024:
                         raise ValueError("Invalid or oversized request")
                     data = json.loads(self.rfile.read(length))
-                if self.command == "GET" and route != "data":
-                    response = review.get_snapshot(route)
+                if self.command == "GET" and route:
+                    response = review.asset(route)
                 else:
                     with lock, closing(connect(review.state)) as db, db:
-                        response = review.get_data(db) if self.command == "GET" else review.post(db, route, data)
+                        response = review.page(db) if self.command == "GET" else review.post(db, route, data)
             except KeyError:
                 self.send(404, {"error": "Unknown review item"})
                 return
@@ -801,23 +940,17 @@ def start(args):
             handoff.flush()
         except BrokenPipeError:
             pass
-    timeout = SNAPSHOT_TIMEOUT + (TAILNET_STARTUP_TIMEOUT if args.tailscale else 0)
+    # The worker answers once every diff is built and the page is reachable, or it exits with the reason logged.
     with process.stdout as output:
-        if select.select([output], [], [], timeout)[0]:
-            line = output.readline()
-            if line:
-                print(line.decode().strip())
-                return
-        else:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-            raise ValueError(f"Review startup timed out. See {log_path}")
-    raise ValueError(f"Could not start the review. {log_path.read_text().strip()} (log: {log_path})")
-
+        # Highlighting workers inherit this pipe, so only the worker's own exit shows that no answer is coming.
+        while not select.select([output], [], [], 0.2)[0] and process.poll() is None:
+            pass
+        line = output.readline() if select.select([output], [], [], 0)[0] else b""
+    if not line:
+        status = process.wait()
+        stopped = f"The review worker was stopped by signal {-status}. " if status < 0 else ""
+        raise ValueError(f"Could not start the review. {stopped}{log_path.read_text().strip()} (log: {log_path})")
+    print(line.decode().strip())
 
 def result(args):
     if not (args.state_dir / "review.sqlite3").is_file():

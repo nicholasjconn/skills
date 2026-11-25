@@ -9,6 +9,8 @@ description: >-
 Use `python3 <skill-directory>/scripts/code_review.py start --help` to choose a
 source. Add `--tailscale` for private HTTPS access from another tailnet device.
 Image previews are limited to 32 MiB per image and 128 MiB per review.
+If `start` reports that the comparison is too large, tell the user the numbers
+and ask how to narrow it.
 
 Share the returned URL and keep the session ID. End the turn while the user
 reviews. When they return, run `code_review.py result SESSION` and check the
