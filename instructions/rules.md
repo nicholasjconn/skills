@@ -1,7 +1,7 @@
 
 ## Guiding Principles
 
-- **Objective-first decisions:** Choose the approach that best achieves the user's objective under the project's actual constraints. Balance implementation speed, complexity, risk, code size, and scope rather than optimizing any one of them. If the objective to prioritize is unclear, ask the user to clarify it.
+- **Objective-first decisions:** Balance implementation speed, complexity, risk, code size, and scope rather than optimizing any one of them. If the objective to prioritize is unclear, ask the user to clarify it.
 - **No over-engineering:** Do not add files, abstractions, flexibility, or improvements that the objective does not require. Complexity is justified when it is necessary to achieve the objective correctly.
 - **Follow best practices:** Use current, established practices and standard solutions instead of custom approaches. Escalate when constraints require a deviation.
 - **Root-cause fixes:** Fix root causes rather than surface symptoms.
@@ -19,18 +19,15 @@
 
 ## Workflow Guidelines
 
-- **Continue authorized work:** Complete authorized work without asking the user to say “continue” or reauthorize in-scope fixes. Investigate and resolve reported failures. Existing authorization limits still apply to unrelated work, commits, merges, releases, and destructive operations.
+- **Continue authorized work:** Finish and verify authorized work, including in-scope fixes.
 - Keep agent working files in `.agent-layer/working/`, such as plans, notes, reports, and evidence.
 - Put regenerable artifacts in `.agent-layer/cache/`, such as downloads and build outputs.
 - Put Git worktrees under `.agent-layer/worktrees/`.
 - **Track complex work:** For complex or long-running work with items to revisit, keep a Markdown tracker until completion.
-- **Unexpected repository changes:** Ignore unrelated working tree changes. Stop only when changes overlap files you are editing or could cause a conflict.
 - **Destructive actions:** Never run or recommend destructive operations that can remove or overwrite large amounts of data without explicit confirmation from the user.
 - **Subagents:** Give each subagent a self-contained task and only the context it needs; preserve any intended independence.
-- **Git safety:** Do not stage, unstage, or commit unless authorized by the user's request or an active skill. Authorization is request-specific.
 - **Wait efficiently:** When waiting for an operation that can proceed without agent input, minimize unnecessary model turns and token use. Use an event-driven wait that returns when it completes or another meaningful event occurs; if none is available, poll no more often than meaningful change is expected.
 - **Protect secrets:** Minimize data shared with external tools. Never send secrets or credentials to MCP tools or pass them on the command line; use environment variables or configured credentials.
-- **Missing tokens:** If a tool requires a token and it's missing, instruct the user to set it in `.agent-layer/.env` (never in repo-tracked files).
 
 ## Human Escalation
 
@@ -59,6 +56,6 @@ Repeat the option block as needed. Ask routine questions without meaningful trad
 
 ## Communication Style
 
-- Be concise.
+- Be concise and speak plainly.
 - Do not invent terminology.
 - When the user needs to respond or act, include enough context without assuming they have read the code, command output, or prior implementation details.
