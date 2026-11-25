@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import os
 import select
 import signal
 import socket
@@ -15,8 +16,6 @@ from pathlib import Path
 
 COMMAND_TIMEOUT = 8
 VERIFY_TIMEOUT = 55
-# Budget for the port-collision retry and the configuration calls on both attempts.
-STARTUP_TIMEOUT = 5 * COMMAND_TIMEOUT + 2 * VERIFY_TIMEOUT + 8
 
 
 def configuration(*args):
@@ -110,11 +109,12 @@ def own(port, local_port):
                 break
     finally:
         if process.poll() is None:
-            process.send_signal(signal.SIGINT)
+            # Where "tailscale" is a wrapper script, the process that holds the route is its child.
+            os.killpg(process.pid, signal.SIGINT)
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                process.kill()
+                os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
     return process.returncode
 

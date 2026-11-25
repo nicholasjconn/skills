@@ -3,14 +3,15 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from code_review import FileDiff
+from code_review import FileDiff, render
 
 
 class InlineHighlights(unittest.TestCase):
     def changed_rows(self, before, after):
         patch = f"@@ -1 +1 @@\n-{before}\n+{after}\n".encode()
-        rows = FileDiff("values.txt", "values.txt", "M", (patch,)).rendered
-        return [row for row in rows if row["kind"] in ("remove", "add")]
+        file = FileDiff("values.txt", "values.txt", "M", (patch,))
+        render([file])
+        return [row for row in file.rendered if row["kind"] in ("remove", "add")]
 
     def test_preserves_repeated_tokens_between_two_edits(self):
         for indices in ((20, 90), (55, 105)):

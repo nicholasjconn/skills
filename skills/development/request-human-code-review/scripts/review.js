@@ -9,6 +9,7 @@ const fileReviewActions = byId('file-review-actions');
 const narrow = matchMedia('(max-width: 780px)');
 const changes = {A: 'Added', D: 'Deleted', M: 'Modified', R: 'Renamed', C: 'Copied', T: 'Type changed', '?': 'Untracked'};
 const sides = {old: 'Baseline', new: 'Updated'};
+const CONTEXT_PAGE = 20;
 const views = [];
 const deletingComments = new Set();
 let layoutOverride;
@@ -569,7 +570,9 @@ class FileView {
     this.file = file;
     this.index = index;
     this.sources = [];
-    this.expanding = new Set();
+    this.rows = file.rows;
+    this.hasCode = file.rows.some(row => row.kind === 'hunk');
+    this.shown = false;
     this.savingMark = false;
     this.panel = element('section', 'file-card');
     const header = element('header', 'file-heading');
@@ -583,6 +586,11 @@ class FileView {
     this.toggle.setAttribute('aria-controls', `file-body-${index}`);
     title.append(this.toggle);
     this.change = element('p', 'file-change', changes[file.change]);
+    const media = file.media;
+    if (media.binary || media.image) {
+      const bytes = side => side.present ? (side.size === null ? 'size unknown' : `${side.size.toLocaleString()} B`) : 'absent';
+      this.change.textContent += ` · ${media.binary ? 'Binary · ' : ''}${bytes(media.old)} → ${bytes(media.new)}`;
+    }
     this.commentCount = element('span', 'comment-count');
     this.commentCount.setAttribute('aria-live', 'polite');
     this.updateCommentCount();
@@ -616,6 +624,7 @@ class FileView {
     this.media.hidden = true;
     this.diff = element('div', 'diff');
     this.diff.tabIndex = 0;
+    this.diff.hidden = media.binary && file.rows.length === 0;
     this.body.append(this.fileThread, this.media, this.diff);
     this.panel.append(header, this.body);
     this.panel.dataset.index = index;
@@ -664,37 +673,21 @@ class FileView {
     });
   }
 
-  setExpanded(expanded, load = true) {
+  setExpanded(expanded, show = true) {
     if (!expanded && editing?.view === this) return;
     if (!expanded && (selection?.view === this || selectionFeedback?.view === this)) clearSelection();
     this.body.hidden = !expanded;
     this.toggle.setAttribute('aria-expanded', String(expanded));
     this.addComment.hidden = !expanded || !this.hasCode;
-    if (expanded && load) this.load();
+    if (expanded && show) this.show();
   }
 
-  async load() {
-    if (this.data || this.loading) return;
-    this.loading = true;
-    this.diff.replaceChildren(element('div', 'diff-note', 'Loading diff…'));
-    try {
-      this.data = await request(`file/${this.index}`);
-      const {rows, media} = this.data;
-      this.hasCode = rows.some(row => row.kind === 'hunk');
-      if (media.binary || media.image) {
-        const bytes = side => side.present ? (side.size === null ? 'size unknown' : `${side.size.toLocaleString()} B`) : 'absent';
-        this.change.textContent += ` · ${media.binary ? 'Binary · ' : ''}${bytes(media.old)} → ${bytes(media.new)}`;
-        renderImagePreview(this.media, this.index, media, sides);
-      }
-      this.diff.hidden = media.binary && rows.length === 0;
-      this.addComment.hidden = this.body.hidden || !this.hasCode;
-      this.render();
-    } catch (error) {
-      this.data = null;
-      this.diff.replaceChildren(element('div', 'diff-note', `Could not load diff. ${error.message}`));
-    } finally {
-      this.loading = false;
-    }
+  // The rows are already in the page. Building their elements waits until the file is in view.
+  show() {
+    if (this.shown) return;
+    this.shown = true;
+    renderImagePreview(this.media, this.index, this.file.media, sides);
+    this.render();
   }
 
   updateMark() {
@@ -738,7 +731,6 @@ class FileView {
       if (!gap[direction]) continue;
       const expand = button('expand-context', `Expand ${direction}`);
       expand.dataset.direction = direction;
-      expand.disabled = this.expanding.has(gap);
       expand.addEventListener('click', () => this.expandContext(gap, direction));
       row.append(expand);
     }
@@ -750,37 +742,62 @@ class FileView {
     return row;
   }
 
+  // A file's hidden lines are fetched once, when the reviewer first expands one of its gaps.
+  loadHidden() {
+    this.hidden ??= request(`file/${this.index}/hidden`).then(hidden => {
+      this.rows.filter(row => row.kind === 'gap').forEach((gap, position) => Object.assign(gap, hidden[position]));
+    }, error => {
+      this.hidden = null;
+      throw error;
+    });
+    return this.hidden;
+  }
+
   async expandContext(gap, direction) {
-    if (this.expanding.has(gap)) return;
     const controls = this.diff.querySelector(`[data-gap-index="${gap.index}"]`);
-    this.expanding.add(gap);
-    controls.querySelectorAll('button').forEach(action => { action.disabled = true; });
     showError(null);
-    try {
-      const {rows} = await request(`file/${this.index}/context/${gap.index}/${gap.count}/${direction}`);
-      const fromTop = direction === 'down';
-      const remaining = {...gap, count: gap.count - rows.length, index: gap.index + (fromTop ? rows.length : 0)};
-      const replacement = remaining.count ? (fromTop ? [...rows, remaining] : [remaining, ...rows]) : rows;
-      this.data.rows.splice(this.data.rows.indexOf(gap), 1, ...replacement);
-      const active = document.activeElement;
-      if (selection?.view === this || selectionFeedback?.view === this) clearSelection();
-      this.render();
-      if (active === commentBody && editing?.view === this) {
-        commentBody.focus({preventScroll: true});
-      } else if (active === document.body || controls.contains(active)) {
-        const next = this.diff.querySelector(`[data-gap-index="${remaining.index}"] [data-direction="${direction}"]`);
-        (next ?? this.diff).focus({preventScroll: true});
+    if (!gap.text) {
+      const buttons = [...controls.querySelectorAll('button')];
+      for (const item of buttons) item.disabled = true;
+      try {
+        await this.loadHidden();
+      } catch (error) {
+        showError(error);
+        return;
+      } finally {
+        for (const item of buttons) item.disabled = false;
       }
-    } catch (error) {
-      showError(error);
-    } finally {
-      this.expanding.delete(gap);
-      this.diff.querySelectorAll(`[data-gap-index="${gap.index}"] button`).forEach(action => { action.disabled = false; });
+      // Another press may have expanded this gap while its lines were on the way.
+      if (!this.rows.includes(gap)) return;
+    }
+    const fromTop = direction === 'down';
+    const count = Math.min(CONTEXT_PAGE, gap.count);
+    const first = fromTop ? gap.index : gap.index + gap.count - count;
+    // The gap keeps every hidden line; origin is the row index of its first one.
+    const origin = gap.origin ?? gap.index;
+    const rows = Array.from({length: count}, (_, step) => {
+      const offset = first + step - origin;
+      const row = {kind: 'context', index: first + step, old_line: gap.old + offset, new_line: gap.new + offset, text: gap.text[offset]};
+      if (gap.html) row.old_html = row.new_html = gap.html[offset];
+      if (gap.no_newline && offset === gap.text.length - 1) row.no_newline = true;
+      return row;
+    });
+    const remaining = {...gap, origin, count: gap.count - count, index: gap.index + (fromTop ? count : 0)};
+    const replacement = remaining.count ? (fromTop ? [...rows, remaining] : [remaining, ...rows]) : rows;
+    this.rows.splice(this.rows.indexOf(gap), 1, ...replacement);
+    const active = document.activeElement;
+    if (selection?.view === this || selectionFeedback?.view === this) clearSelection();
+    this.render();
+    if (active === commentBody && editing?.view === this) {
+      commentBody.focus({preventScroll: true});
+    } else if (active === document.body || controls.contains(active)) {
+      const next = this.diff.querySelector(`[data-gap-index="${remaining.index}"] [data-direction="${direction}"]`);
+      (next ?? this.diff).focus({preventScroll: true});
     }
   }
 
   render() {
-    const rows = this.data.rows;
+    const rows = this.rows;
     const block = element('div', `diff-body ${layout}`);
     this.sources = [];
     this.diff.setAttribute('aria-label', layout === 'split' ? 'Side-by-side diff' : 'Unified diff');
@@ -849,7 +866,7 @@ class FileView {
     this.fileThread.replaceChildren();
     this.fileThread.hidden = true;
     this.diff.querySelectorAll('.inline-thread').forEach(thread => thread.remove());
-    const block = this.data && this.diff.firstElementChild;
+    const block = this.shown && this.diff.firstElementChild;
     const lineCount = block?.firstElementChild?.childElementCount ?? 0;
     const threads = new Map();
     const anchor = target => {
@@ -950,7 +967,7 @@ function selectedCode() {
   const selected = parts.slice(first, last + 1);
   const changedSides = new Set(selected.map(part => part.side).filter(side => side !== 'both'));
   if (changedSides.size > 1) return {view, message: versionHint};
-  if (view.data.rows.some(row => row.kind === 'gap' && parts[first].index < row.index && row.index < parts[last].index)) {
+  if (view.rows.some(row => row.kind === 'gap' && parts[first].index < row.index && row.index < parts[last].index)) {
     return {view, message: 'Expand the hidden lines to comment on this selection.'};
   }
   const side = [...changedSides][0] ?? 'new';
@@ -1022,7 +1039,7 @@ function updateLayout() {
   layoutSelect.value = layout;
   clearSelection();
   highlight(null);
-  views.forEach(view => { if (view.data) view.render(); });
+  views.forEach(view => { if (view.shown) view.render(); });
 }
 
 function revealCommentEditor() {
@@ -1270,9 +1287,11 @@ function revisionLabel(value) {
   return label;
 }
 
-async function initialize() {
-  const result = await request('data');
-  comments = result.comments;
+function initialize() {
+  const result = JSON.parse(byId('review-snapshot').textContent);
+  const progress = JSON.parse(byId('review-state').textContent);
+  result.files.forEach((file, index) => { file.reviewed = progress.reviewed[index]; });
+  comments = progress.comments;
   updateReviewCommentTotal();
   const {repo, base, head, merge_base, patch, checkout_branch} = result.comparison;
   byId('source-name').textContent = (patch ?? repo).split('/').pop();
@@ -1300,7 +1319,7 @@ async function initialize() {
     for (const entry of entries) {
       if (!entry.isIntersecting) continue;
       const view = views[Number(entry.target.dataset.index)];
-      if (!view.body.hidden) view.load();
+      if (!view.body.hidden) view.show();
       observer.unobserve(entry.target);
     }
   }, {rootMargin: '240px 0px'});
@@ -1320,7 +1339,11 @@ async function initialize() {
   byId('empty').hidden = Boolean(views.length);
   updateProgress();
   updateReviewActions();
-  showExpiryNotice(result.expires_at);
+  showExpiryNotice(progress.expires_at);
 }
 
-initialize().catch(error => showError(error));
+try {
+  initialize();
+} catch (error) {
+  showError(error);
+}
