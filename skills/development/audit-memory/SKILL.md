@@ -20,7 +20,7 @@ Audit memory files and fix evidence-backed problems.
 - Do not create a missing memory file. Report it and follow repository policy.
 - Do not modify source code, tests, or repository documentation.
 
-Write `audit-memory.<run-id>.report.md`, using
+Name the report `audit-memory.<run-id>.report.md`, using
 `YYYYMMDD-HHMMSS-<short-rand>` for `run-id`.
 
 ## Contract

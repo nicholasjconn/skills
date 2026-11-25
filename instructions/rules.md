@@ -20,7 +20,7 @@
 ## Workflow Guidelines
 
 - **Continue authorized work:** Complete authorized work without asking the user to say “continue” or reauthorize in-scope fixes. Investigate and resolve reported failures. Existing authorization limits still apply to unrelated work, commits, merges, releases, and destructive operations.
-- Keep agent working files in `.agent-layer/working/`, such as plans, notes, and evidence.
+- Keep agent working files in `.agent-layer/working/`, such as plans, notes, reports, and evidence.
 - Put regenerable artifacts in `.agent-layer/cache/`, such as downloads and build outputs.
 - Put Git worktrees under `.agent-layer/worktrees/`.
 - **Track complex work:** For complex or long-running work with items to revisit, keep a Markdown tracker until completion.

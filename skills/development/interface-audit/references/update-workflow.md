@@ -5,9 +5,10 @@ Update one report in place from complete incremental evidence.
 ## Select the report
 
 Use an explicit valid path when supplied; correct only an unambiguous typo.
-Otherwise select the newest matching report in the project’s report location by a
-deterministic local order. If no valid report exists, preserve any old artifact
-and run a fresh audit rather than substituting or partially updating a report.
+Otherwise, look for the newest matching report where
+[new audit reports](report-structure.md) are saved. Check the previous report
+location if needed. If no valid report exists, preserve any old artifact and
+run a fresh audit.
 
 Read the selected report before editing so identifiers, requirements, scope,
 and scoring remain coherent.

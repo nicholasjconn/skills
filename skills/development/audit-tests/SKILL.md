@@ -16,7 +16,7 @@ Audit tests and fix clear negative-value or mechanical problems.
 - Derive tiers from repository configuration. If ambiguous, audit concrete
   tests without tiers and report the limitation.
 
-Write `audit-tests.<run-id>.report.md`, using
+Name the report `audit-tests.<run-id>.report.md`, using
 `YYYYMMDD-HHMMSS-<short-rand>` for `run-id`.
 
 ## Contract

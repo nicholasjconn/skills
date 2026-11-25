@@ -1,7 +1,8 @@
 # Interface Audit Report Structure
 
-Write `interface-audit.<run-id>.md`, using
-`YYYYMMDD-HHMMSS-<short-rand>` for the run id.
+Name the report `interface-audit.<run-id>.md`, using
+`YYYYMMDD-HHMMSS-<short-rand>` for the run id. Save it with the project's audit
+reports or, if it has no audit-report directory, with its working files.
 
 ## Required sections
 

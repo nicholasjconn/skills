@@ -76,9 +76,10 @@ explicitly names it. If he supplied no source material, ask for the rough idea
 first.
 
 Select only the content Nick wants transformed, excluding instructions about
-how to handle it, and preserve it as supplied. Write it to a unique local file
-with mode `0600` and pass its path through `--input-file`. Keep raw source out of
-shell commands. Pass Nick's shaping instructions through `--instructions`.
+how to handle it, and preserve it as supplied. Write it to a unique file with
+mode `0600` in an ignored directory or outside the checkout. Pass its path
+through `--input-file`. Keep raw source out of shell commands. Pass Nick's shaping
+instructions through `--instructions`.
 
 ```bash
 ./steward x write create-run --content-type post --input-file <source-file>
